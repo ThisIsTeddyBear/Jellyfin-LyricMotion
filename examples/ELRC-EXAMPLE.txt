@@ -1,0 +1,8 @@
+Word-level ELRC:
+[00:23.932]<00:23.932>Sajde <00:24.511>mein <00:25.145>yun <00:25.498>hi
+
+Syllable-level concept:
+[00:07.549]<00:07.549>Wa<00:07.877>ter <00:08.045>fal<00:08.210>ling
+
+v1.4 groups "Wa"+"ter" into one visual word "Water", while retaining both
+timing segments to calculate a continuous word progress value.

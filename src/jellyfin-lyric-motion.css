@@ -1,0 +1,376 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+/*
+ * Jellyfin LyricMotion v2.0.0 — Universal Polish Edition
+ *
+ * Known-good v1 Jellyfin capture/timeline path.
+ *
+ * Major rendering change:
+ *   ELRC cues remain the timing source,
+ *   but each complete word is ONE shaped DOM span.
+ *
+ * Result:
+ * - syllable timing still drives the neutral white swipe
+ * - am-lyrics-style staggered motion remains the glow timing model
+ * - user accent color exists ONLY in glyph-shaped shadow halos
+ * - no masks / boxes / colored lyric fill
+ * - complex-script shaping remains protected
+ */
+
+.lyricPage {
+    --ak-primary: rgba(255, 255, 255, 0.99);
+    --ak-primary-soft: rgba(255, 255, 255, 0.90);
+    --ak-secondary: rgba(255, 255, 255, 0.40);
+    --ak-past-text: rgba(255, 255, 255, 0.63);
+
+    --ak-blur: 0.068em;
+    --ak-blur-near: 0.034em;
+    --ak-wipe-width: 0.75em;
+    --ak-wipe-half: 0.375em;
+    --ak-line-ease: cubic-bezier(0.41, 0, 0.12, 0.99);
+}
+
+.lyricPage .lyricsContainer.ak-karaoke-container {
+    width: min(76rem, calc(100vw - 3rem));
+    padding-top: 11vh;
+    padding-bottom: 28vh;
+    gap: 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Line typography                                                            */
+/* -------------------------------------------------------------------------- */
+
+.lyricPage .lyricsLine.ak-enhanced-line {
+    position: relative;
+    overflow: visible !important;
+
+    max-width: min(70rem, calc(100vw - 4rem));
+    margin: 0.018em 0;
+    padding: 0.14em 0.13em 0.20em;
+    min-height: 1.52em;
+
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        "Nirmala UI",
+        "Noto Sans Devanagari",
+        Roboto,
+        "Helvetica Neue",
+        Arial,
+        sans-serif;
+
+    font-size: clamp(2.2rem, 4vw, 4.55rem);
+    font-weight: 735;
+    line-height: 1.15;
+    letter-spacing: -0.033em;
+    text-wrap: pretty;
+
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+
+    transform-origin: 4% 50%;
+    transform: translate3d(0, 0, 0) scale(0.986);
+    opacity: 0.34;
+    filter: blur(var(--ak-blur));
+
+    transition:
+        opacity 700ms ease,
+        filter 700ms ease,
+        transform 400ms var(--ak-line-ease),
+        text-shadow 400ms ease;
+
+    will-change: opacity, filter, transform;
+}
+
+[dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line {
+    transform-origin: 96% 50%;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-near {
+    opacity: 0.66;
+    filter: blur(var(--ak-blur-near));
+    transform: scale(0.997);
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-near2 {
+    opacity: 0.48;
+    filter: blur(0.05em);
+    transform: scale(0.992);
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-far {
+    opacity: 0.25;
+    filter: blur(0.078em);
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.futureLyric:not(.ak-current):not(.ak-near):not(.ak-near2) {
+    opacity: 0.30;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.pastLyric:not(.ak-current):not(.ak-near):not(.ak-near2) {
+    opacity: 0.42;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-current,
+.lyricPage .lyricsLine.ak-enhanced-line:not(.futureLyric):not(.pastLyric):not(.ak-far) {
+    opacity: 1;
+    filter: none;
+    transform: translate3d(0, 0, 0) scale(1.018);
+    text-shadow:
+        0 0 0.22em rgba(255, 255, 255, 0.032),
+        0 0.04em 0.18em rgba(255, 255, 255, 0.022);
+    z-index: 2;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .lyricPage .lyricsLine.ak-enhanced-line.dynamicLyric:hover {
+        opacity: 0.97 !important;
+        filter: none !important;
+        transform: scale(1.005);
+    }
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.dynamicLyric {
+    cursor: pointer;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Normal LRC                                                                 */
+/* -------------------------------------------------------------------------- */
+
+.lyricPage .lyricsLine.ak-line-synced .ak-untimed {
+    color: var(--ak-secondary);
+    -webkit-text-fill-color: var(--ak-secondary);
+    transition:
+        color 500ms ease,
+        -webkit-text-fill-color 500ms ease;
+}
+
+.lyricPage .lyricsLine.ak-line-synced.ak-current .ak-untimed,
+.lyricPage .lyricsLine.ak-line-synced:not(.futureLyric):not(.pastLyric) .ak-untimed {
+    color: var(--ak-primary);
+    -webkit-text-fill-color: var(--ak-primary);
+}
+
+.lyricPage .lyricsLine.ak-line-synced.pastLyric:not(.ak-current) .ak-untimed {
+    color: var(--ak-past-text);
+    -webkit-text-fill-color: var(--ak-past-text);
+}
+
+/* -------------------------------------------------------------------------- */
+/* AM-style neutral wipe + glyph-shaped motion/glow                            */
+/* -------------------------------------------------------------------------- */
+
+.lyricPage .ak-word,
+.lyricPage .ak-untimed {
+    white-space: pre-wrap;
+    overflow: visible;
+}
+
+.lyricPage .ak-word {
+    --ak-word-progress: 0%;
+    --ak-wipe-width: 0.75em;
+    --ak-wipe-half: 0.375em;
+
+    position: relative;
+    display: inline-block;
+    vertical-align: baseline;
+    overflow: visible;
+
+    padding: 0.025em 0 0.09em;
+    margin: -0.025em 0 -0.09em;
+
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+
+    /*
+     * The lyric wipe stays neutral white. The soft 0.75em feather mirrors
+     * the reference renderer's wipe geometry; JS expands it slightly on long
+     * words.
+     */
+    background-repeat: no-repeat;
+    background-image: linear-gradient(
+        90deg,
+        var(--ak-primary) 0%,
+        var(--ak-primary)
+            calc(var(--ak-word-progress) - var(--ak-wipe-half)),
+        var(--ak-primary-soft)
+            var(--ak-word-progress),
+        var(--ak-secondary)
+            calc(var(--ak-word-progress) + var(--ak-wipe-half)),
+        var(--ak-secondary) 100%
+    );
+
+    background-clip: text;
+    -webkit-background-clip: text;
+
+    transform-origin: 50% 80%;
+    will-change: transform, filter;
+}
+
+[dir="rtl"] .lyricPage .ak-word {
+    background-image: linear-gradient(
+        270deg,
+        var(--ak-primary) 0%,
+        var(--ak-primary)
+            calc(var(--ak-word-progress) - var(--ak-wipe-half)),
+        var(--ak-primary-soft)
+            var(--ak-word-progress),
+        var(--ak-secondary)
+            calc(var(--ak-word-progress) + var(--ak-wipe-half)),
+        var(--ak-secondary) 100%
+    );
+}
+
+
+/*
+ * ZERO-PROGRESS GUARD
+ *
+ * A gradient feather centered at 0% otherwise makes the first strokes of every
+ * not-yet-sung word look white. At true zero progress, paint a normal solid
+ * future word. The gradient only exists once timing actually starts moving.
+ */
+.lyricPage .lyricsLine.ak-current .ak-word.ak-word-zero {
+    background: none !important;
+    color: var(--ak-secondary) !important;
+    -webkit-text-fill-color: var(--ak-secondary) !important;
+    filter: none;
+    text-shadow: none;
+}
+
+/*
+ * Latin growable words get an absolutely positioned grapheme layer.
+ * It has NO background, NO mask and NO colored box. Each glyph only paints a
+ * small glyph-shaped text-shadow while it grows/lifts. v1.9 keeps a white
+ * inner sparkle and adds the song's stable accent only to the outer shadow,
+ * so the color travels with the staggered glyph motion itself.
+ */
+.lyricPage .ak-motion-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    overflow: visible;
+    pointer-events: none;
+    user-select: none;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+}
+
+.lyricPage .ak-motion-glyph {
+    position: absolute;
+    display: block;
+    overflow: visible;
+
+    font: inherit;
+    font-weight: inherit;
+    letter-spacing: inherit;
+    line-height: inherit;
+
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+
+    transform-origin: 50% 80%;
+    text-shadow: none;
+
+    will-change: transform, text-shadow;
+}
+
+/*
+ * Complex scripts keep the browser-shaped complete word and receive the same
+ * a full-strength glyph-shaped motion/drop-shadow on that already-shaped
+ * word. The word remains one shaping unit, but its glow energy now closely
+ * matches the Latin animation instead of being deliberately subdued.
+ */
+.lyricPage .ak-motion-whole {
+    will-change: transform, filter;
+}
+
+.lyricPage .lyricsLine.ak-current .ak-word-next {
+    /* Continuity hint only; deliberately not a glow. */
+    filter: none;
+}
+
+.lyricPage .lyricsLine.ak-current .ak-word-done {
+    filter: none;
+}
+
+
+/*
+ * PROFESSIONAL LINE HANDOFF
+ *
+ * The new line can become current immediately while the previous sustained
+ * glyph glow decays for a few frames. This avoids the hard cut seen when the
+ * Jellyfin line index changes.
+ */
+.lyricPage .lyricsLine.ak-enhanced-line.ak-motion-handoff {
+    opacity: 0.60 !important;
+    filter: none !important;
+    transform: translate3d(0, 0, 0) scale(1.004) !important;
+    transition:
+        opacity 320ms ease,
+        transform 320ms cubic-bezier(0.41, 0, 0.12, 0.99) !important;
+}
+
+/* Untimed whitespace / punctuation. */
+.lyricPage .lyricsLine.ak-current .ak-untimed,
+.lyricPage .lyricsLine:not(.futureLyric):not(.pastLyric) .ak-untimed {
+    color: var(--ak-secondary);
+    -webkit-text-fill-color: var(--ak-secondary);
+}
+
+/* Solid cheap rendering away from the active line. */
+.lyricPage .lyricsLine.pastLyric:not(.ak-current) .ak-word,
+.lyricPage .lyricsLine.pastLyric:not(.ak-current) .ak-untimed {
+    background: none;
+    color: var(--ak-past-text);
+    -webkit-text-fill-color: var(--ak-past-text);
+    filter: none;
+    text-shadow: none;
+    transform: none;
+}
+
+.lyricPage .lyricsLine.futureLyric:not(.ak-current) .ak-word,
+.lyricPage .lyricsLine.futureLyric:not(.ak-current) .ak-untimed {
+    background: none;
+    color: var(--ak-secondary);
+    -webkit-text-fill-color: var(--ak-secondary);
+    filter: none;
+    text-shadow: none;
+    transform: none;
+}
+
+@media (max-width: 760px) {
+    .lyricPage .lyricsContainer.ak-karaoke-container {
+        width: calc(100vw - 1.5rem);
+        padding-top: 8vh;
+        padding-bottom: 22vh;
+    }
+
+    .lyricPage .lyricsLine.ak-enhanced-line {
+        max-width: calc(100vw - 2rem);
+        font-size: clamp(1.9rem, 8vw, 3.1rem);
+        letter-spacing: -0.026em;
+        line-height: 1.18;
+        padding-bottom: 0.22em;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lyricPage .lyricsLine.ak-enhanced-line {
+        transition-duration: 0.01ms !important;
+    }
+
+    .lyricPage .ak-motion-layer {
+        display: none !important;
+    }
+
+    .lyricPage .ak-word {
+        transform: none !important;
+        filter: none !important;
+    }
+}

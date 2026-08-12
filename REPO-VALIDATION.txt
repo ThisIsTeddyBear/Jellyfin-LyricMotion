@@ -1,0 +1,4 @@
+renderer node --check: PASSED
+POSIX installer syntax: PASSED
+Jellyfin index.html redistributed: NO
+public API: JellyfinLyricMotion
