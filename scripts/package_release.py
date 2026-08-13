@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import shutil
-import stat
 import zipfile
 from pathlib import Path
 
@@ -40,6 +39,9 @@ RELEASE_PATHS = (
     "examples/ELRC-EXAMPLE.txt",
 )
 
+WINDOWS_TEXT_SUFFIXES = {".cmd", ".ps1"}
+BINARY_SUFFIXES = {".png"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -53,6 +55,16 @@ def validate_version(version: str) -> None:
         raise SystemExit(f"requested version {version!r} does not match VERSION {expected!r}")
 
 
+def release_bytes(source: Path) -> bytes:
+    data = source.read_bytes()
+    if source.suffix.lower() in BINARY_SUFFIXES:
+        return data
+
+    text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    newline = "\r\n" if source.suffix.lower() in WINDOWS_TEXT_SUFFIXES else "\n"
+    return text.replace("\n", newline).encode("utf-8")
+
+
 def copy_release_tree(target: Path, version: str) -> list[Path]:
     copied: list[Path] = []
     release_paths = RELEASE_PATHS + (f"docs/RELEASE-NOTES-{version}.md",)
@@ -62,18 +74,23 @@ def copy_release_tree(target: Path, version: str) -> list[Path]:
             raise SystemExit(f"missing release file: {relative_name}")
         destination = target / relative_name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        destination.write_bytes(release_bytes(source))
+        destination.chmod(source.stat().st_mode)
         copied.append(destination)
     return copied
 
 
 def write_deterministic_zip(folder: Path, archive: Path, files: list[Path]) -> None:
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
-        for source in sorted(files):
+        for source in sorted(
+            files,
+            key=lambda path: path.relative_to(folder.parent).as_posix(),
+        ):
             relative = source.relative_to(folder.parent).as_posix()
             info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
-            mode = source.stat().st_mode
-            executable = bool(mode & stat.S_IXUSR) or source.suffix == ".sh"
+            # Pin Unix ZIP metadata so Windows and Linux builds are identical.
+            info.create_system = 3
+            executable = source.suffix == ".sh"
             info.external_attr = ((0o755 if executable else 0o644) & 0xFFFF) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             output.writestr(info, source.read_bytes())
