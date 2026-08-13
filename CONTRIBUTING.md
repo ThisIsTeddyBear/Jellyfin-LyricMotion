@@ -25,6 +25,19 @@ Before submitting:
 
 ```bash
 node --check src/jellyfin-lyric-motion.js
+node scripts/test_overlap_background.js
+node scripts/test_tv_overlap.js
+node scripts/test_script_safety.js
+node scripts/test_release_contract.js
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-Test normal LRC, enhanced timing, seeking, pause/resume, line handoff, Latin text and at least one complex script.
+Test normal LRC, enhanced timing, seeking, pause/resume, overlapping lines,
+background vocals, Latin text, and at least one joining script. TV changes must
+also cover the delayed host-focus path documented in `docs/TV-VALIDATION.md`.
+
+Release packages are generated, not edited by hand:
+
+```bash
+python scripts/package_release.py --version "$(cat VERSION)"
+```

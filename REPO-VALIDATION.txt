@@ -1,4 +1,23 @@
-renderer node --check: PASSED
-POSIX installer syntax: PASSED
-Jellyfin index.html redistributed: NO
-public API: JellyfinLyricMotion
+Jellyfin LyricMotion v3.0.0 repository validation
+
+JavaScript node --check: PASSED
+Overlap/background contract: 19 assertions PASSED
+TV overlap/activation contract: 20 assertions PASSED
+Connected-script contract: 106 assertions PASSED
+Release/version contract: 21 assertions PASSED
+TTML converter: 5 tests PASSED
+PowerShell installer parsing: PASSED
+POSIX installer parsing: PASSED
+Install -> reinstall -> uninstall simulation: PASSED
+Deterministic package rebuild: PASSED
+Release package files: 24
+Feature screenshots: 3 at 1600x900
+Patched Jellyfin index.html redistributed: NO
+Canonical public API: JellyfinLyricMotion
+Compatibility API alias: AppleKaraoke
+
+Local release asset:
+dist/local-testing/jellyfin-lyric-motion-v3.0.0.zip
+
+SHA-256:
+6DC1420917652167DE553530799D4712BCC3C7988D6E12FF1A4587F3907EA24D

@@ -12,6 +12,8 @@ assignees: ""
 **Browser:**
 **Lyric type:**
 **Language/script:**
+**TV/webOS firmware (if applicable):**
+**Background/overlapping vocals involved:**
 
 ## What happened
 
@@ -24,3 +26,6 @@ assignees: ""
 ```js
 JellyfinLyricMotion.diagnostics()
 ```
+
+For TV issues, include the playback timestamp and whether the focus/current
+line moved before or after the word wipe.

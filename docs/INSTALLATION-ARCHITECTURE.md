@@ -27,7 +27,10 @@ src/
 scripts/
 docker/
 examples/
+docs/
+VERSION
 README.md
+CHANGELOG.md
 LICENSE
 THIRD_PARTY_NOTICES.md
 ```
@@ -46,3 +49,10 @@ THIRD_PARTY_NOTICES.md
 Package managers and container updates may replace the webroot. Re-run or rebuild LyricMotion after an update when necessary.
 
 Each GitHub release should publish a tested Jellyfin compatibility matrix.
+
+## Automated release
+
+`scripts/package_release.py` creates both the extracted release folder and its
+deterministic ZIP under `dist/local-testing`. A pushed `v*` tag is validated by
+GitHub Actions, packaged from the matching `VERSION`, and published with its
+SHA-256 checksum. Generated `dist` content is intentionally not committed.

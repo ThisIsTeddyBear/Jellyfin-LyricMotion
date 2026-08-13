@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="2.0.0"
+VERSION="3.0.0"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 JS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.js"
@@ -50,7 +50,13 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 INDEX="$WEB_DIR/index.html"
-BACKUP="$WEB_DIR/index.html.before-jellyfin-lyric-motion-$(date +%Y%m%d-%H%M%S)"
+BACKUP_BASE="$WEB_DIR/index.html.before-jellyfin-lyric-motion-$(date +%Y%m%d-%H%M%S)"
+BACKUP=$BACKUP_BASE
+BACKUP_SUFFIX=1
+while [ -e "$BACKUP" ]; do
+  BACKUP="$BACKUP_BASE-$BACKUP_SUFFIX"
+  BACKUP_SUFFIX=$((BACKUP_SUFFIX + 1))
+done
 
 if [ ! -w "$WEB_DIR" ] || [ ! -w "$INDEX" ]; then
   echo "Web directory is not writable. Re-run with sudo."
@@ -88,8 +94,8 @@ if not match:
     raise SystemExit("runtime.bundle.js was not found in index.html")
 
 inject = (
-    '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=2.0.0">'
-    '<script defer="defer" src="jellyfin-lyric-motion.js?v=2.0.0"></script>'
+    '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.0">'
+    '<script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.0"></script>'
 )
 content = content[:match.start()] + inject + content[match.start():]
 path.write_text(content, encoding="utf-8")

@@ -3,7 +3,7 @@
 param([string]$WebDir)
 
 $ErrorActionPreference = "Stop"
-$Version = "2.0.0"
+$Version = "3.0.0"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Here
 $JsSource = Join-Path $Root "src\jellyfin-lyric-motion.js"
@@ -68,7 +68,13 @@ Write-Host ""
 Write-Host "Jellyfin LyricMotion v$Version" -ForegroundColor Cyan
 Write-Host "Web directory: $WebDir"
 
-$BackupPath = Join-Path $WebDir ("index.html.before-jellyfin-lyric-motion-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+$BackupName = "index.html.before-jellyfin-lyric-motion-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
+$BackupPath = Join-Path $WebDir $BackupName
+$BackupSuffix = 1
+while (Test-Path -LiteralPath $BackupPath) {
+    $BackupPath = Join-Path $WebDir ($BackupName + "-" + $BackupSuffix)
+    $BackupSuffix++
+}
 Copy-Item $IndexPath $BackupPath -Force
 
 $content = Remove-LyricMotionTags ([IO.File]::ReadAllText($IndexPath))
@@ -78,7 +84,7 @@ if (-not $runtime.Success) {
     throw "runtime.bundle.js was not found. Backup: $BackupPath"
 }
 
-$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=2.0.0"><script defer="defer" src="jellyfin-lyric-motion.js?v=2.0.0"></script>'
+$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.0"><script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.0"></script>'
 $content = $content.Insert($runtime.Index, $inject)
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)

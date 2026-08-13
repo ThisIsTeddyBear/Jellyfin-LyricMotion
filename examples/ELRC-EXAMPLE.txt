@@ -1,8 +1,15 @@
 Word-level ELRC:
-[00:23.932]<00:23.932>Sajde <00:24.511>mein <00:25.145>yun <00:25.498>hi
+[00:23.932]<00:23.932>Stay <00:24.511>with <00:25.145>the <00:25.498>rhythm<00:26.100>
 
-Syllable-level concept:
-[00:07.549]<00:07.549>Wa<00:07.877>ter <00:08.045>fal<00:08.210>ling
+Syllable timing inside complete shaped words:
+[00:07.549]<00:07.549>Wa<00:07.877>ter <00:08.045>fal<00:08.210>ling<00:08.700>
 
-v1.4 groups "Wa"+"ter" into one visual word "Water", while retaining both
-timing segments to calculate a continuous word progress value.
+LyricMotion keeps "Wa" + "ter" as one visual word while retaining both timing
+segments for a continuous wipe and glow envelope.
+
+Overlapping lines retain independent final timestamps:
+[00:36.596]<00:36.596>One <00:36.848>voice, <00:37.471>one <00:37.775>moment<00:38.265>
+[00:37.284]<00:37.284>Answering <00:38.166>now<00:38.719>
+
+Do not type the invisible background-role marker manually. Convert TTML x-bg
+content with scripts/ttml_to_elrc.py so the marker and timings remain valid.
