@@ -8,7 +8,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.0.0';
+    const VERSION = '3.0.1';
     const TICKS_PER_SECOND = 10000000;
 
     /* Invisible ELRC prefix emitted by the companion TTML converter. */

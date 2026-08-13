@@ -1,9 +1,53 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param([string]$WebDir)
+param(
+    [string]$WebDir,
+    [switch]$EnsureAdministrator
+)
 
 $ErrorActionPreference = "Stop"
-$Version = "3.0.0"
+
+trap {
+    Write-Host ""
+    Write-Host ("LyricMotion installation failed: " + $_.Exception.Message) -ForegroundColor Red
+    if ($EnsureAdministrator) {
+        [void](Read-Host "Press Enter to close")
+    }
+    exit 1
+}
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+if ($EnsureAdministrator -and -not (Test-IsAdministrator)) {
+    Write-Host "Requesting Administrator access for Jellyfin Web..." -ForegroundColor Yellow
+
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", ('"' + $PSCommandPath + '"'),
+        "-EnsureAdministrator"
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($WebDir)) {
+        $arguments += @("-WebDir", ('"' + $WebDir + '"'))
+    }
+
+    $process = Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList ($arguments -join " ") `
+        -Verb RunAs `
+        -Wait `
+        -PassThru
+
+    exit $process.ExitCode
+}
+$Version = "3.0.1"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Here
 $JsSource = Join-Path $Root "src\jellyfin-lyric-motion.js"
@@ -84,7 +128,7 @@ if (-not $runtime.Success) {
     throw "runtime.bundle.js was not found. Backup: $BackupPath"
 }
 
-$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.0"><script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.0"></script>'
+$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.1"><script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.1"></script>'
 $content = $content.Insert($runtime.Index, $inject)
 
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -101,3 +145,7 @@ Write-Host "Backup: $BackupPath"
 Write-Host "Hard-refresh Jellyfin Web or use a private browser window."
 Write-Host "After a Jellyfin upgrade, re-run this installer if the patch was replaced."
 Write-Host ""
+
+if ($EnsureAdministrator) {
+    [void](Read-Host "Press Enter to close")
+}

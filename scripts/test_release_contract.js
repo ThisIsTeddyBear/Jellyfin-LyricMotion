@@ -13,8 +13,11 @@ const windowsInstaller = read('scripts/install.ps1');
 const posixInstaller = read('scripts/install.sh');
 const dockerfile = read('docker/Dockerfile');
 const readme = read('README.md');
+const installLauncher = read('INSTALL-WINDOWS.cmd');
+const uninstallLauncher = read('UNINSTALL-WINDOWS.cmd');
+const windowsUninstaller = read('scripts/uninstall.ps1');
 
-assert.strictEqual(version, '3.0.0');
+assert.strictEqual(version, '3.0.1');
 assert(js.includes(`const VERSION = '${version}';`));
 assert(css.includes(`Jellyfin LyricMotion v${version}`));
 assert(windowsInstaller.includes(`$Version = "${version}"`));
@@ -29,6 +32,12 @@ assert(js.includes('window.JellyfinLyricMotion = publicApi;'));
 assert(js.includes('window.AppleKaraoke = publicApi;'));
 assert(!windowsInstaller.includes('?v=2.0.0'));
 assert(!posixInstaller.includes('?v=2.0.0'));
+assert(installLauncher.includes('-EnsureAdministrator'));
+assert(uninstallLauncher.includes('-EnsureAdministrator'));
+assert(windowsInstaller.includes('-Verb RunAs'));
+assert(windowsUninstaller.includes('-Verb RunAs'));
+assert(windowsInstaller.includes('exit $process.ExitCode'));
+assert(windowsUninstaller.includes('exit $process.ExitCode'));
 
 for (const screenshot of [
     'classic-bloom-atmosphere.png',
@@ -40,4 +49,4 @@ for (const screenshot of [
     assert(fs.statSync(path.join(root, relative)).size > 50_000, `${relative} is unexpectedly small`);
 }
 
-console.log('Release contract: 21 assertions passed.');
+console.log('Release contract: 27 assertions passed.');

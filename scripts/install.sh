@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-VERSION="3.0.0"
+VERSION="3.0.1"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 JS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.js"
@@ -94,8 +94,8 @@ if not match:
     raise SystemExit("runtime.bundle.js was not found in index.html")
 
 inject = (
-    '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.0">'
-    '<script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.0"></script>'
+    '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.1">'
+    '<script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.1"></script>'
 )
 content = content[:match.start()] + inject + content[match.start():]
 path.write_text(content, encoding="utf-8")

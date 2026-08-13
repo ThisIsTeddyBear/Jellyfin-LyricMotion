@@ -1,10 +1,10 @@
-Jellyfin LyricMotion v3.0.0 repository validation
+Jellyfin LyricMotion v3.0.1 repository validation
 
 JavaScript node --check: PASSED
 Overlap/background contract: 19 assertions PASSED
 TV overlap/activation contract: 20 assertions PASSED
 Connected-script contract: 106 assertions PASSED
-Release/version contract: 21 assertions PASSED
+Release/version contract: 27 assertions PASSED
 TTML converter: 5 tests PASSED
 PowerShell installer parsing: PASSED
 POSIX installer parsing: PASSED
@@ -17,7 +17,7 @@ Canonical public API: JellyfinLyricMotion
 Compatibility API alias: AppleKaraoke
 
 Local release asset:
-dist/local-testing/jellyfin-lyric-motion-v3.0.0.zip
+dist/local-testing/jellyfin-lyric-motion-v3.0.1.zip
 
 SHA-256:
-0CDBEA75E9272E745547343AB6E22E6ACE8D7216D1705D035E6640EF26DAE534
+BB7A55110DEC06C180C30652C653647CF17AC90F8FE2D548675921517968FD21

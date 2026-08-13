@@ -1,8 +1,52 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param([string]$WebDir)
+param(
+    [string]$WebDir,
+    [switch]$EnsureAdministrator
+)
 
 $ErrorActionPreference = "Stop"
+
+trap {
+    Write-Host ""
+    Write-Host ("LyricMotion uninstall failed: " + $_.Exception.Message) -ForegroundColor Red
+    if ($EnsureAdministrator) {
+        [void](Read-Host "Press Enter to close")
+    }
+    exit 1
+}
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+if ($EnsureAdministrator -and -not (Test-IsAdministrator)) {
+    Write-Host "Requesting Administrator access for Jellyfin Web..." -ForegroundColor Yellow
+
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", ('"' + $PSCommandPath + '"'),
+        "-EnsureAdministrator"
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($WebDir)) {
+        $arguments += @("-WebDir", ('"' + $WebDir + '"'))
+    }
+
+    $process = Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList ($arguments -join " ") `
+        -Verb RunAs `
+        -Wait `
+        -PassThru
+
+    exit $process.ExitCode
+}
 
 function Test-WebDir([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
@@ -59,3 +103,7 @@ Write-Host ""
 Write-Host "Jellyfin LyricMotion removed." -ForegroundColor Green
 Write-Host "Hard-refresh Jellyfin Web."
 Write-Host ""
+
+if ($EnsureAdministrator) {
+    [void](Read-Host "Press Enter to close")
+}

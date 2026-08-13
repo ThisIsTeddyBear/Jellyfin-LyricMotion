@@ -2,6 +2,18 @@
 
 All notable changes are documented here. The project follows Semantic Versioning.
 
+## [3.0.1] - 2026-08-13
+
+### Fixed
+
+- Windows install and uninstall launchers now request Administrator access through UAC before modifying Jellyfin Web under `Program Files`.
+- Elevated launchers wait for completion, preserve the elevated process exit code, and show a readable error instead of closing immediately.
+
+### Documentation
+
+- Clarified why desktop, mobile, and TV deliberately use different motion tiers.
+- Clarified why connected scripts use atomic paint and restrained whole-word glow instead of Latin-style spatial/per-glyph animation.
+
 ## [3.0.0] - 2026-08-13
 
 ### Added

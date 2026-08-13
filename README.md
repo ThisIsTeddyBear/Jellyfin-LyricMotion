@@ -58,7 +58,7 @@ LyricMotion does not download lyrics. It enhances sidecars and lyric data alread
 
 ## Install
 
-Download `jellyfin-lyric-motion-v3.0.0.zip` from [GitHub Releases](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases), extract it, and run the installer from the extracted directory.
+Download `jellyfin-lyric-motion-v3.0.1.zip` from [GitHub Releases](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases), extract it, and run the installer from the extracted directory.
 
 ### Windows
 
@@ -74,7 +74,7 @@ For a custom or portable Jellyfin Web directory:
 .\scripts\install.ps1 -WebDir "D:\Apps\Jellyfin\Server\jellyfin-web"
 ```
 
-Administrator rights are normally required for a Jellyfin installation under `Program Files`.
+The Windows launchers request Administrator access through UAC when Jellyfin is installed under `Program Files`.
 
 ### Linux and macOS
 
@@ -184,6 +184,14 @@ The legacy `AppleKaraoke` console name remains as a compatibility alias for v2.x
 
 Only currently active overlapping lines receive per-frame word updates. Static line classes change at boundaries instead of walking the whole lyric document on every frame.
 
+### Why motion is not identical on every device
+
+The profiles deliberately share timing and design rather than identical GPU work. Desktop has enough compositor headroom for the full geometry/per-glyph path. Android uses fewer detailed layers and a 30 fps target to reduce sustained heat. LG/webOS uses whole shaped words, an actual 60 fps gate, opacity-only line changes, and host-focus synchronization because desktop-style glyph layers and simultaneous scale/filter transitions caused boundary stutter on the TV browser.
+
+### Why some writing systems use different motion
+
+This is script-based, not English-only. Latin-script languages can use the spatial wipe and eligible per-glyph motion. Devanagari, Gurmukhi, Malayalam, Arabic, and other joining scripts use atomic whole-word luminance and a restrained colored glow. Their conjuncts and vowel marks are shaped across multiple Unicode characters; slicing or moving those characters independently causes the clipping and white seams that the atomic renderer was created to prevent.
+
 ## What installation changes
 
 The installer:
@@ -244,7 +252,7 @@ node scripts/test_tv_overlap.js
 node scripts/test_script_safety.js
 node scripts/test_release_contract.js
 python -m unittest discover -s scripts -p "test_*.py"
-python scripts/package_release.py --version 3.0.0
+python scripts/package_release.py --version 3.0.1
 ```
 
 See [Contributing](CONTRIBUTING.md) before submitting a pull request.
