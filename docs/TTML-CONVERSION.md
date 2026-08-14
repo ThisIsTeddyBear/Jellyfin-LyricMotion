@@ -22,11 +22,11 @@ The default output is written beside the input with an `.elrc` extension. Use `-
 
 ## Background-vocal transport
 
-ELRC has no standard field for a vocal role. The converter therefore prefixes a background line with two invisible Unicode format characters before the first enhanced cue. Jellyfin's LRC parser preserves that prefix, and LyricMotion removes it before display while assigning the compact background-vocal lane.
+ELRC has no standard field for a vocal role. The converter prefixes a background line with the ASCII token `[ak:bg]` before the first enhanced cue. Unlike Unicode format controls, this survives Jellyfin server parsing. LyricMotion removes it before display, corrects cue positions by the token length, and assigns the compact background-vocal lane.
 
-The timing text is otherwise ordinary ELRC. Players that do not understand the marker normally render no visible extra character.
+The timing text is otherwise ordinary ELRC. The token may be visible in players that do not run LyricMotion, which is the necessary tradeoff for reliable transport through Jellyfin.
 
-Use `--plain-background` to create separate background lines without the marker, or `--no-background` to omit them.
+Use `--plain-background` to create separate background lines without the token, or `--no-background` to omit them.
 
 ## Sidecar naming
 
@@ -41,4 +41,12 @@ After replacing the ELRC, refresh the song or its library in Jellyfin. Fully res
 
 ## Source of truth
 
-Keep the TTML. ELRC can preserve timing and LyricMotion's private background marker, but it cannot express every TTML layout, metadata, agent, or role feature in a standard way.
+Keep the TTML. ELRC can preserve timing and LyricMotion's private background token, but it cannot express every TTML layout, metadata, agent, or role feature in a standard way.
+
+## Safety and timing validation
+
+The converter refuses TTML inputs larger than 64 MiB and rejects documents containing DTD/entity declarations before XML parsing. Frame/tick rates and parsed clock values must be finite and non-negative; malformed minute/second/frame fields fail conversion rather than creating corrupt ELRC timestamps.
+
+When both `end` and `dur` are present, the converter uses the earlier effective end. Child timing is also clamped to an inherited parent end. Apple-style nested lyric span timestamps remain treated as absolute media times, matching the source format this converter targets.
+
+ELRC output is written to a same-directory temporary file, flushed, then atomically replaces the destination only after the whole conversion succeeds. Existing output therefore survives parse/conversion/write failures instead of being left half-written.

@@ -8,17 +8,177 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.0.1';
+    const VERSION = '3.1.0';
+
+    /*
+     * A duplicated script tag used to create a second DOM observer, route-hook
+     * set and animation scheduler even though fetch/XHR wrapping was guarded.
+     * Fail closed if LyricMotion is already alive in this page.
+     */
+    const existingRuntime =
+        window.JellyfinLyricMotion
+        || window.AppleKaraoke;
+
+    if (
+        existingRuntime
+        && existingRuntime.version
+    ) {
+        console.warn(
+            '[JellyfinLyricMotion]',
+            `duplicate runtime ignored; active version ${existingRuntime.version}`
+        );
+        return;
+    }
+
+    /*
+     * TV POLICY: stock Jellyfin only.
+     *
+     * LyricMotion is intentionally a desktop/mobile enhancement. Every TV or
+     * ten-foot client we can identify exits before network interception, DOM
+     * observation, media hooks, styling, atmosphere or animation is installed.
+     * Jellyfin therefore owns the complete TV lyrics experience.
+     *
+     * Keep this detector dependency-free and old-engine friendly: it must be
+     * able to run on embedded browsers that are much older than the clients
+     * LyricMotion enhances on desktop/mobile.
+     */
+    function detectStockJellyfinTvEnvironment() {
+        const navigatorObject =
+            (window && window.navigator)
+            || (typeof navigator !== 'undefined' ? navigator : null);
+
+        const ua = String(
+            (navigatorObject && navigatorObject.userAgent)
+            || ''
+        ).toLowerCase();
+
+        const platform = String(
+            (navigatorObject && navigatorObject.platform)
+            || ''
+        ).toLowerCase();
+
+        const haystack = `${ua} ${platform}`;
+        const markers = [
+            ['lg-webos', ['web0s', 'webos', 'netcast']],
+            ['samsung-tizen', ['tizen', 'samsung smart-tv', 'samsung smarttv']],
+            ['hbbtv', ['hbbtv', 'ce-html']],
+            ['hisense-vidaa', ['vidaa', 'hisense tv', 'hisense-tv']],
+            ['vizio', ['vizio', 'viziotv']],
+            ['panasonic-viera', ['viera', 'panasonic tv', 'panasonic-tv']],
+            ['sony-bravia', ['bravia', 'sony_tv', 'sony tv']],
+            ['philips-tv', ['philips tv', 'philips-tv']],
+            ['roku', ['roku', 'rokutv']],
+            ['fire-tv', ['fire tv', 'firetv']],
+            ['android-tv', ['android tv', 'androidtv', 'google tv', 'googletv', 'jellyfin android tv']],
+            ['apple-tv', ['appletv', 'apple tv', 'tvos']],
+            ['chromecast', ['crkey', 'chromecast']],
+            ['opera-tv', ['opera tv', 'opera-tv', 'inettvbrowser']],
+            ['generic-smart-tv', ['smart tv', 'tv browser', 'tvbrowser', 'dlnadoc']],
+            ['game-console-tv', ['playstation', 'xbox']]
+        ];
+
+        for (let index = 0; index < markers.length; index += 1) {
+            const family = markers[index][0];
+            const tokens = markers[index][1];
+
+            for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+                if (haystack.indexOf(tokens[tokenIndex]) >= 0) {
+                    return { detected: true, family };
+                }
+            }
+        }
+
+        /* Amazon Fire TV model identifiers are commonly AFT*. */
+        if (/(^|[;\s(])aft[a-z0-9]+(?:[;\s)]|$)/i.test(haystack)) {
+            return { detected: true, family: 'fire-tv' };
+        }
+
+        /*
+         * Some Android-TV WebViews omit the literal "Android TV" token but
+         * identify a television device in the model section. Avoid broad
+         * "Android + TV" heuristics that could accidentally disable phones.
+         */
+        if (/\b(shield android tv|mibox|mi box|nexus player)\b/i.test(haystack)) {
+            return { detected: true, family: 'android-tv' };
+        }
+
+        /*
+         * Catch TV-labelled embedded browsers without stealing normal phones
+         * or tablets. This intentionally runs after the named families so the
+         * diagnostics retain the most useful platform label.
+         */
+        if (
+            /\b(?:smart[- ]?tv|television|tv)\b/i.test(haystack)
+            && !/\b(?:iphone|ipad|ipod|mobile)\b/i.test(haystack)
+        ) {
+            return { detected: true, family: 'generic-tv' };
+        }
+
+        /*
+         * Final high-confidence ten-foot fallback: remote-only embedded
+         * clients generally expose no touch points and no hovering/fine
+         * pointer. Phones/tablets have touch points and desktop browsers have
+         * a fine/hovering primary pointer, so both stay on LyricMotion.
+         */
+        try {
+            const maxTouchPoints = Number(
+                navigatorObject && navigatorObject.maxTouchPoints
+            ) || 0;
+            const remoteOnlyPointer =
+                typeof window.matchMedia === 'function'
+                && window.matchMedia(
+                    '(hover: none) and (pointer: coarse), (hover: none) and (pointer: none)'
+                ).matches;
+
+            if (maxTouchPoints === 0 && remoteOnlyPointer) {
+                return { detected: true, family: 'remote-only-tv' };
+            }
+        } catch {
+            // UA/platform markers above remain authoritative on older engines.
+        }
+
+        return { detected: false, family: '' };
+    }
+
+    const stockTvEnvironment =
+        detectStockJellyfinTvEnvironment();
+
+    if (stockTvEnvironment.detected) {
+        const stockTvApi = Object.freeze({
+            version: VERSION,
+            enabled: false,
+            platform: 'tv',
+            renderer: 'stock-jellyfin',
+            reason: 'tv-stock-bypass',
+            tvFamily: stockTvEnvironment.family
+        });
+
+        window.JellyfinLyricMotion = stockTvApi;
+
+        console.info(
+            '[JellyfinLyricMotion]',
+            `v${VERSION}: ${stockTvEnvironment.family} detected; using stock Jellyfin lyrics`
+        );
+        return;
+    }
+
     const TICKS_PER_SECOND = 10000000;
 
-    /* Invisible ELRC prefix emitted by the companion TTML converter. */
-    const BACKGROUND_VOCAL_SENTINEL = '\u2063\u2060';
+    /*
+     * Jellyfin's lyric parser can discard Unicode format controls.  The ASCII
+     * transport token survives the complete TTML -> ELRC -> Jellyfin path and
+     * is removed before the lyric is painted.  The old invisible marker is
+     * still accepted so existing local files do not break.
+     */
+    const BACKGROUND_VOCAL_TOKEN = '[ak:bg]';
+    const LEGACY_BACKGROUND_VOCAL_SENTINEL = '\u2063\u2060';
+    const UNIFIED_RENDERER_SIGNATURE =
+        'unified-pc-mobile-v3:60fps:multiscript-shaped-wipe:classic-bloom64:atmo360x26';
 
     // Display-only lyric wipe smoothing.
     const WORD_PROGRESS_SMOOTH_TAU_MS = 20;
     const WORD_PROGRESS_SNAP_DELTA = 0.42;
     const WORD_RENDER_LOOKAHEAD_TICKS = 140000; // 14 ms
-    const WORD_PREWIPE_TICKS = 0; // no pre-sung headlight
 
     // Behaviour adapted from the current am-lyrics renderer.
     const BASE_WIPE_GRADIENT_EM = 0.75;
@@ -27,28 +187,15 @@
     const SHORT_WORD_GLOW_MIN_DURATION_MS = 1320;
     const MOTION_FINAL_RISE_EM = -0.035;
     const MOTION_HANDOFF_TICKS = 3200000; // 320 ms previous-line glow decay
-    const TV_COMPOSITOR_HANDOFF_MS = 210;
+    const ECO_COMPOSITOR_HANDOFF_MS = 210; // eco-only handoff decay
     const LINE_CLASS_NEIGHBORHOOD = 6;
     const ZERO_PROGRESS_EPSILON = 0.0025;
 
-    /*
-     * LG's focused lyric button advances on Jellyfin's coarse timeupdate,
-     * while our phase-locked singing clock advances every rendered frame.
-     * Commit a TV line only after the host focus/class signal, then give the
-     * compositor one short arm before smoothly repaying any timing debt.
-     */
-    const TV_FOCUS_ARM_MS = 90;
-    const TV_HOST_MAX_WAIT_MS = 560;
-    const TV_HOST_POLL_INTERVAL_MS = 48;
-    const TV_VISUAL_CATCHUP_RATE = 1.45;
-
-    /* Joining scripts use a uniform luminance reveal, never a spatial clip. */
-    const ATOMIC_FUTURE_ALPHA = 0.40;
 
     /*
      * Phase-locked lyric clock.
      *
-     * Some embedded TV media engines expose currentTime in visible steps even
+     * Some embedded media engines expose currentTime in visible steps even
      * while requestAnimationFrame is healthy. Between trustworthy media-clock
      * samples we advance a monotonic projection, then gently phase-correct it
      * when currentTime moves again. Large jumps still snap immediately.
@@ -66,12 +213,38 @@
 
     const PERFORMANCE_STORAGE_KEY = 'appleKaraokePerformanceMode';
 
+    // PC/mobile-only romanization. The heavy local romanizer is lazy-loaded
+    // only for songs that actually contain non-Latin/native-script lyrics.
+    const LEGACY_ROMANIZATION_STORAGE_KEY = 'appleKaraokeRomanizationMode';
+    const SONG_PREFERENCES_STORAGE_KEY = 'appleKaraokeSongPreferencesV2';
+    const ROMANIZER_ASSET = 'jellyfin-lyric-romanizer.js';
+    const ROMANIZER_LOAD_TIMEOUT_MS = 8000;
+    const ROMANIZATION_CACHE_MAX_ENTRIES = 1800;
+
+    // Per-song display synchronization. Positive values delay the lyrics;
+    // negative values make lyrics appear earlier. UI controls move in 0.5 s
+    // steps while the public API accepts 0.1 s precision for diagnostics/tests.
+    const TIMING_OFFSET_STEP_SECONDS = 0.5;
+    const TIMING_OFFSET_MIN_SECONDS = -15;
+    const TIMING_OFFSET_MAX_SECONDS = 15;
+    const SONG_PREFERENCES_MAX_ENTRIES = 300;
+
     const PERFORMANCE_TARGET_FPS = Object.freeze({
         desktop: 60,
-        mobile: 30,
-        tv: 60,
+        mobile: 60,
         eco: 20
     });
+
+    /*
+     * Background responses follow a stable visual rhythm across the library.
+     * Logical start/end lanes are mirrored by CSS for RTL interfaces.
+     */
+    const BACKGROUND_VOCAL_LANE_PATTERN = Object.freeze([
+        'center',
+        'inset-end',
+        'center',
+        'inset-start'
+    ]);
 
     /*
      * Normal LRC only changes at line boundaries, so 20 fps is still very
@@ -82,20 +255,29 @@
     const PAUSED_TARGET_FPS = 2;
 
     /*
+     * Lifecycle guards. Decoration retries are deliberately bounded and only
+     * exist while a live lyrics route + captured payload are waiting for
+     * Jellyfin's DOM. Outside the lyrics page the animation loop is fully
+     * dormant instead of polling the whole SPA forever.
+     */
+    const DECORATION_RETRY_MS = 120;
+    const DECORATION_RETRY_WINDOW_MS = 6000;
+    const MEDIA_DISCOVERY_RETRY_MS = 250;
+    const ATMOSPHERE_IMAGE_TIMEOUT_MS = 6500;
+
+    /*
      * Premium atmosphere is rendered ONCE per song into a small,
      * viewport-shaped blurred bitmap. There is no full-screen live CSS blur.
      */
     const ATMOSPHERE_RASTER_LONG_EDGE = Object.freeze({
         desktop: 360,
-        mobile: 240,
-        tv: 220,
+        mobile: 360,
         eco: 160
     });
 
     const ATMOSPHERE_RASTER_BLUR_PX = Object.freeze({
         desktop: 26,
-        mobile: 20,
-        tv: 18,
+        mobile: 26,
         eco: 15
     });
 
@@ -144,22 +326,38 @@
         { id: 'laser-green', name: 'Laser Green', rgb: '96, 242, 133', secondaryRgb: '79, 224, 232', tertiaryRgb: '242, 222, 96', gain: 0.84 },
         { id: 'moon-lavender', name: 'Moon Lavender', rgb: '196, 172, 255', secondaryRgb: '124, 197, 255', tertiaryRgb: '239, 145, 215', gain: 0.88 }
     ]);
-    const ROUTE_RE = /(?:^|[#/])lyrics(?:[/?#]|$)/i;
+    const ROUTE_RE = /^#?!?\/?lyrics(?:[/?#]|$)/i;
 
     const state = {
         lyrics: null,
         generation: 0,
         decoratedGeneration: -1,
+        lyricsRequestSeq: 0,
+        lyricsRequestKey: '',
+        lyricsRequestKeys: new Map(),
+        lyricsAcceptedKey: '',
+        lyricsAcceptedSeq: 0,
+        lyricsStaleResponseDrops: 0,
         lineData: [],
         rafId: 0,
         frameTimer: 0,
+        animationLoopRunning: false,
+        animationLoopStarts: 0,
+        animationLoopStops: 0,
         lastMediaWarning: 0,
         geometryTimer: 0,
+        decorationRetryStartedAt: 0,
+        decorationRetryCount: 0,
+        decorationRetryExpiredCount: 0,
         lastActiveLine: -999,
         lastActiveLineSignature: '',
         activeLineIndexes: [],
+        activeLineScratch: [],
         lineEndPrefix: [],
         mediaElement: null,
+        mediaProbeAt: 0,
+        mediaSwitchCount: 0,
+        staleMediaEventDrops: 0,
         timedCueCount: 0,
         backgroundVocalCount: 0,
         overlapFrameCount: 0,
@@ -176,27 +374,8 @@
         lineTransitionCount: 0,
         lastLineSyncCount: 0,
         maxLineSyncCount: 0,
-        tvHandoffLineIndex: -1,
-        tvHandoffUntil: 0,
-        tvTimingLine: -1,
-        tvPresentationLine: -999,
-        tvPendingLine: -1,
-        tvPendingSince: 0,
-        tvPendingHostFrames: 0,
-        tvHostLine: -1,
-        tvHostSignalAt: 0,
-        tvLastHostPollAt: 0,
-        tvFocusedLine: -1,
-        tvArmUntil: 0,
-        tvVisualTicks: 0,
-        tvVisualFrameAt: 0,
-        tvVisualDebtMs: 0,
-        tvLastActivationWaitMs: 0,
-        tvActivationSource: 'initial',
-        tvActivationFallbacks: 0,
-        tvStockTimingObserved: false,
-        tvForceTimingCommit: false,
-
+        ecoHandoffLineIndex: -1,
+        ecoHandoffUntil: 0,
         playbackClockMedia: null,
         playbackClockSeconds: 0,
         playbackClockRawSeconds: 0,
@@ -216,8 +395,29 @@
         accentSelectionReason: 'initial',
         accentReplayArmed: false,
 
-        atomicWordCount: 0,
+        shapedWordCount: 0,
         scriptProfileCounts: {},
+        fontGeometryRefreshCount: 0,
+
+        romanizationMode: 'native',
+        romanizationAvailable: false,
+        romanizationCandidate: false,
+        romanizationLoadState: 'idle',
+        romanizationLoadError: '',
+        romanizationSource: 'none',
+        romanizationToggle: null,
+        romanizationCache: new Map(),
+        romanizationLineCount: 0,
+        romanizationToggleCount: 0,
+        lyricsItemId: '',
+        lyricsRequestUrl: '',
+
+        songPreferenceKey: '',
+        songPreferences: Object.create(null),
+        lyricToolsHost: null,
+        timingControls: null,
+        timingOffsetSeconds: 0,
+        timingOffsetChangeCount: 0,
 
         // Adaptive Album Atmosphere state.
         atmosphereMode: 'balanced',
@@ -229,6 +429,9 @@
         atmosphereColors: null,
         atmosphereLastCheck: 0,
         atmosphereLoadSeq: 0,
+        atmospherePendingKey: '',
+        atmospherePendingSince: 0,
+        atmosphereTimeoutCount: 0,
         atmosphereFailedKey: '',
         atmosphereFailedAt: 0,
         atmosphereRasterMethod: 'none',
@@ -246,11 +449,158 @@
     }
 
     function isLyricsUrl(url) {
-        return typeof url === 'string' && /\/lyrics(?:[/?#]|$)/i.test(url);
+        if (typeof url !== 'string' || !url) return false;
+
+        try {
+            const parsed = new URL(url, location.href);
+            const path = parsed.pathname || '';
+
+            if (/\/(?:Audio|Items)\/[^/]+\/Lyrics(?:\/|$)/i.test(path)) {
+                return true;
+            }
+
+            if (/\/Lyrics\/[^/]+(?:\/|$)/i.test(path)) {
+                return true;
+            }
+
+            if (/\/Lyrics\/?$/i.test(path)) {
+                return !!(
+                    parsed.searchParams.get('itemId')
+                    || parsed.searchParams.get('item_id')
+                );
+            }
+        } catch {
+            return /\/(?:Audio|Items)\/[^/?#]+\/Lyrics(?:[/?#]|$)/i.test(url)
+                || /\/Lyrics\/[^/?#]+(?:[/?#]|$)/i.test(url)
+                || /\/Lyrics(?:\/?\?(?:[^#]*&)?(?:itemId|item_id)=)/i.test(url);
+        }
+
+        return false;
+    }
+
+    function elementHasLiveLayout(element) {
+        if (!element || element.isConnected === false || element.hidden) {
+            return false;
+        }
+
+        try {
+            if (typeof element.getClientRects === 'function') {
+                return element.getClientRects().length > 0;
+            }
+        } catch {
+            // Detached/transitioning WebView nodes can throw during layout reads.
+        }
+
+        return true;
+    }
+
+    function getCurrentLyricsContainer(
+        enhancedOnly = false
+    ) {
+        const selector = enhancedOnly
+            ? '.lyricsContainer.ak-karaoke-container'
+            : '.lyricsContainer';
+
+        let candidates = [];
+
+        try {
+            if (typeof document.querySelectorAll === 'function') {
+                candidates = Array.from(
+                    document.querySelectorAll(selector)
+                );
+            }
+        } catch {
+            candidates = [];
+        }
+
+        if (!candidates.length) {
+            try {
+                const fallback = document.querySelector(selector);
+                if (fallback) candidates.push(fallback);
+            } catch {
+                // No matching lyric DOM yet.
+            }
+        }
+
+        const live = candidates.filter(
+            element => elementHasLiveLayout(element)
+        );
+
+        if (live.length) {
+            /* Jellyfin appends the entering SPA page after the outgoing one. */
+            return live[live.length - 1];
+        }
+
+        const connected = candidates.filter(
+            element => element && element.isConnected !== false
+        );
+
+        return connected.length
+            ? connected[connected.length - 1]
+            : null;
+    }
+
+    function getCurrentLyricPage() {
+        const container =
+            getCurrentLyricsContainer(false);
+
+        if (container) {
+            if (typeof container.closest === 'function') {
+                try {
+                    const page = container.closest('.lyricPage');
+                    if (page) return page;
+                } catch {
+                    // Fall through to a parent walk for older WebKit.
+                }
+            }
+
+            let parent = container.parentElement;
+            while (parent) {
+                if (
+                    parent.classList
+                    && parent.classList.contains('lyricPage')
+                ) {
+                    return parent;
+                }
+                parent = parent.parentElement;
+            }
+        }
+
+        let pages = [];
+        try {
+            pages = Array.from(
+                document.querySelectorAll('.lyricPage')
+            );
+        } catch {
+            // Older embedded DOM implementations may expose only querySelector.
+        }
+
+        const live = pages.filter(
+            page => elementHasLiveLayout(page)
+        );
+        if (live.length) return live[live.length - 1];
+
+        return pages.length
+            ? pages[pages.length - 1]
+            : document.querySelector('.lyricPage');
     }
 
     function isLyricsPage() {
-        return ROUTE_RE.test(location.hash) || !!document.querySelector('.lyricsContainer');
+        const hash = String(
+            location.hash || ''
+        );
+
+        if (hash) {
+            return ROUTE_RE.test(hash);
+        }
+
+        const container =
+            getCurrentLyricsContainer(false);
+
+        return !!(
+            container
+            && elementHasLiveLayout(container)
+        );
     }
 
     function normalizeLyricsPayload(payload) {
@@ -272,12 +622,28 @@
 
 
     let unicodeMarkExpression = null;
+    let latinGlyphExpression = null;
 
     try {
         unicodeMarkExpression =
             new RegExp('\\p{Mark}', 'u');
     } catch {
-        // Older webOS engines use the explicit ranges below.
+        // Older browsers use the explicit ranges below.
+    }
+
+    /*
+     * Keep Unicode property escapes out of regex literals. Engines that do not
+     * understand \p{} fail at parse time, before a surrounding try/catch can
+     * run. Construct the optional expression dynamically instead.
+     */
+    try {
+        latinGlyphExpression =
+            new RegExp(
+                '^[\\p{Script=Latin}\\p{Mark}\\p{Number}\\p{Punctuation}\\p{Symbol}]+$',
+                'u'
+            );
+    } catch {
+        latinGlyphExpression = null;
     }
 
     function codePointTokens(text) {
@@ -299,45 +665,32 @@
     }
 
     function isFallbackMarkCodePoint(codePoint) {
-        return (
-            codePoint >= 0x0300 && codePoint <= 0x036f
-        ) || (
-            codePoint >= 0x0591 && codePoint <= 0x05c7
-        ) || (
-            codePoint >= 0x0610 && codePoint <= 0x061a
-        ) || (
-            codePoint >= 0x064b && codePoint <= 0x065f
-        ) || (
-            codePoint >= 0x06d6 && codePoint <= 0x06ed
-        ) || (
-            codePoint >= 0x0900 && codePoint <= 0x0903
-        ) || (
-            codePoint >= 0x093a && codePoint <= 0x094f
-        ) || (
-            codePoint >= 0x0951 && codePoint <= 0x0957
-        ) || (
-            codePoint >= 0x0962 && codePoint <= 0x0963
-        ) || (
-            codePoint >= 0x0a01 && codePoint <= 0x0a03
-        ) || codePoint === 0x0a3c || (
-            codePoint >= 0x0a3e && codePoint <= 0x0a4d
-        ) || codePoint === 0x0a51 || (
-            codePoint >= 0x0a70 && codePoint <= 0x0a71
-        ) || codePoint === 0x0a75 || (
-            codePoint >= 0x0d00 && codePoint <= 0x0d03
-        ) || (
-            codePoint >= 0x0d3b && codePoint <= 0x0d4d
-        ) || codePoint === 0x0d57 || (
-            codePoint >= 0x0d62 && codePoint <= 0x0d63
-        ) || (
-            codePoint >= 0x1ab0 && codePoint <= 0x1aff
-        ) || (
-            codePoint >= 0x1dc0 && codePoint <= 0x1dff
-        ) || (
-            codePoint >= 0x20d0 && codePoint <= 0x20ff
-        ) || (
-            codePoint >= 0xfe20 && codePoint <= 0xfe2f
-        );
+        const ranges = [
+            [0x0300, 0x036f],
+            [0x0591, 0x05c7],
+            [0x0610, 0x061a],
+            [0x064b, 0x065f],
+            [0x0670, 0x0670],
+            [0x06d6, 0x06ed],
+            [0x0900, 0x0903], [0x093a, 0x094f], [0x0951, 0x0957], [0x0962, 0x0963],
+            [0x0981, 0x0983], [0x09bc, 0x09bc], [0x09be, 0x09c4], [0x09c7, 0x09c8], [0x09cb, 0x09cd], [0x09d7, 0x09d7], [0x09e2, 0x09e3], [0x09fe, 0x09fe],
+            [0x0a01, 0x0a03], [0x0a3c, 0x0a3c], [0x0a3e, 0x0a4d], [0x0a51, 0x0a51], [0x0a70, 0x0a71], [0x0a75, 0x0a75],
+            [0x0a81, 0x0a83], [0x0abc, 0x0abc], [0x0abe, 0x0ac5], [0x0ac7, 0x0ac9], [0x0acb, 0x0acd], [0x0ae2, 0x0ae3],
+            [0x0b01, 0x0b03], [0x0b3c, 0x0b3c], [0x0b3e, 0x0b44], [0x0b47, 0x0b48], [0x0b4b, 0x0b4d], [0x0b55, 0x0b57], [0x0b62, 0x0b63],
+            [0x0b82, 0x0b82], [0x0bbe, 0x0bc2], [0x0bc6, 0x0bc8], [0x0bca, 0x0bcd], [0x0bd7, 0x0bd7],
+            [0x0c00, 0x0c04], [0x0c3c, 0x0c3c], [0x0c3e, 0x0c44], [0x0c46, 0x0c48], [0x0c4a, 0x0c4d], [0x0c55, 0x0c56], [0x0c62, 0x0c63],
+            [0x0c81, 0x0c83], [0x0cbc, 0x0cbc], [0x0cbe, 0x0cc4], [0x0cc6, 0x0cc8], [0x0cca, 0x0ccd], [0x0cd5, 0x0cd6], [0x0ce2, 0x0ce3],
+            [0x0d00, 0x0d03], [0x0d3b, 0x0d4d], [0x0d57, 0x0d57], [0x0d62, 0x0d63],
+            [0x0d81, 0x0d83], [0x0dca, 0x0dca], [0x0dcf, 0x0dd4], [0x0dd6, 0x0dd6], [0x0dd8, 0x0ddf], [0x0df2, 0x0df3],
+            [0x0e31, 0x0e31], [0x0e34, 0x0e3a], [0x0e47, 0x0e4e],
+            [0x0eb1, 0x0eb1], [0x0eb4, 0x0ebc], [0x0ec8, 0x0ecd],
+            [0x0f18, 0x0f19], [0x0f35, 0x0f35], [0x0f37, 0x0f37], [0x0f39, 0x0f39], [0x0f71, 0x0f84], [0x0f86, 0x0f87], [0x0f8d, 0x0fbc],
+            [0x102b, 0x103e], [0x1056, 0x1059], [0x105e, 0x1060], [0x1062, 0x1064], [0x1067, 0x106d], [0x1071, 0x1074], [0x1082, 0x108d], [0x108f, 0x108f], [0x109a, 0x109d],
+            [0x17b4, 0x17d3], [0x17dd, 0x17dd],
+            [0x1ab0, 0x1aff], [0x1dc0, 0x1dff], [0x20d0, 0x20ff], [0xfe20, 0xfe2f]
+        ];
+
+        return codePointInRanges(codePoint, ranges);
     }
 
     function isMarkToken(token) {
@@ -367,12 +720,73 @@
         ) || (
             codePoint >= 0x1f3fb
             && codePoint <= 0x1f3ff
+        ) || (
+            codePoint >= 0xe0020
+            && codePoint <= 0xe007f
         );
     }
 
     function isJoinControl(codePoint) {
         return codePoint === 0x200c
             || codePoint === 0x200d;
+    }
+
+    function isRegionalIndicator(codePoint) {
+        return codePoint >= 0x1f1e6
+            && codePoint <= 0x1f1ff;
+    }
+
+    function hangulGraphemeType(codePoint) {
+        if (
+            (codePoint >= 0x1100 && codePoint <= 0x115f)
+            || (codePoint >= 0xa960 && codePoint <= 0xa97c)
+        ) return 'L';
+
+        if (
+            (codePoint >= 0x1160 && codePoint <= 0x11a7)
+            || (codePoint >= 0xd7b0 && codePoint <= 0xd7c6)
+        ) return 'V';
+
+        if (
+            (codePoint >= 0x11a8 && codePoint <= 0x11ff)
+            || (codePoint >= 0xd7cb && codePoint <= 0xd7fb)
+        ) return 'T';
+
+        if (codePoint >= 0xac00 && codePoint <= 0xd7a3) {
+            return ((codePoint - 0xac00) % 28) === 0
+                ? 'LV'
+                : 'LVT';
+        }
+
+        return '';
+    }
+
+    function hangulBoundaryJoins(leftCodePoint, rightCodePoint) {
+        const left = hangulGraphemeType(leftCodePoint);
+        const right = hangulGraphemeType(rightCodePoint);
+
+        return (left === 'L' && ['L', 'V', 'LV', 'LVT'].includes(right))
+            || (['LV', 'V'].includes(left) && ['V', 'T'].includes(right))
+            || (['LVT', 'T'].includes(left) && right === 'T');
+    }
+
+    function regionalIndicatorBoundaryJoins(tokens, rightIndex) {
+        if (
+            rightIndex <= 0
+            || !isRegionalIndicator(tokens[rightIndex - 1].codePoint)
+            || !isRegionalIndicator(tokens[rightIndex].codePoint)
+        ) {
+            return false;
+        }
+
+        let precedingRunLength = 0;
+        for (let index = rightIndex - 1; index >= 0; index -= 1) {
+            if (!isRegionalIndicator(tokens[index].codePoint)) break;
+            precedingRunLength += 1;
+        }
+
+        /* Unicode GB12/GB13: group regional indicators into pairs. */
+        return precedingRunLength % 2 === 1;
     }
 
     function isIndicVirama(codePoint) {
@@ -454,6 +868,14 @@
             )
             || isJoinControl(
                 left.codePoint
+            )
+            || regionalIndicatorBoundaryJoins(
+                tokens,
+                rightIndex
+            )
+            || hangulBoundaryJoins(
+                left.codePoint,
+                right.codePoint
             );
     }
 
@@ -529,33 +951,231 @@
         return boundaries;
     }
 
+    function codePointInRanges(codePoint, ranges) {
+        for (let index = 0; index < ranges.length; index += 1) {
+            const range = ranges[index];
+            if (codePoint >= range[0] && codePoint <= range[1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function textHasCodePointInRanges(text, ranges) {
+        for (const character of String(text || '')) {
+            if (codePointInRanges(character.codePointAt(0), ranges)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const RTL_STRONG_RANGES = Object.freeze([
+        [0x05d0, 0x05ea],   // Hebrew letters
+        [0x05ef, 0x05f2],
+        [0x0620, 0x063f],   // Arabic letters
+        [0x0641, 0x064a],
+        [0x066e, 0x066f],
+        [0x0671, 0x06d3],
+        [0x06d5, 0x06d5],
+        [0x06e5, 0x06e6],
+        [0x06ee, 0x06ef],
+        [0x06fa, 0x06fc],
+        [0x06ff, 0x06ff],
+        [0x0710, 0x072f],   // Syriac
+        [0x074d, 0x077f],   // Syriac supplement + Arabic supplement
+        [0x0780, 0x07a5],   // Thaana
+        [0x07b1, 0x07b1],
+        [0x07ca, 0x07ea],   // NKo
+        [0x0840, 0x0858],   // Mandaic
+        [0x0860, 0x086a],   // Syriac supplement
+        [0x0870, 0x0887],   // Arabic Extended-B letters
+        [0x08a0, 0x08c9],   // Arabic Extended-A letters
+        [0xfb1d, 0xfb4f],   // Hebrew presentation forms
+        [0xfb50, 0xfdff],   // Arabic presentation forms A
+        [0xfe70, 0xfefc],   // Arabic presentation forms B
+        [0x1e900, 0x1e943]  // Adlam letters
+    ]);
+
+    const COMPLEX_SHAPING_RANGES = Object.freeze([
+        [0x0600, 0x08ff],   // Arabic-family joining scripts
+        [0x0900, 0x0dff],   // Indic + Sinhala
+        [0x0e00, 0x0fff],   // Thai, Lao, Tibetan
+        [0x1000, 0x109f],   // Myanmar
+        [0x1780, 0x17ff],   // Khmer
+        [0x1800, 0x18af],   // Mongolian
+        [0xa980, 0xa9df],   // Javanese + Myanmar Extended-B
+        [0xaa60, 0xaa7f],   // Myanmar Extended-A
+        [0x11000, 0x11fff], // Brahmic supplementary blocks
+        [0xfb1d, 0xfdff],
+        [0xfe70, 0xfeff]
+    ]);
+
+    const CJK_CODEPOINT_RANGES = Object.freeze([
+        [0x3040, 0x30ff],   // Hiragana + Katakana
+        [0x3100, 0x312f],   // Bopomofo
+        [0x31a0, 0x31bf],
+        [0x3400, 0x4dbf],   // CJK Extension A
+        [0x4e00, 0x9fff],   // Unified ideographs
+        [0xac00, 0xd7af],   // Hangul syllables
+        [0xf900, 0xfaff],   // Compatibility ideographs
+        [0x20000, 0x323af]  // Supplementary CJK extensions
+    ]);
+
+    const CUE_TOKEN_SCRIPT_PROFILES = Object.freeze({
+        cjk: true,
+        thai: true,
+        lao: true,
+        khmer: true,
+        myanmar: true
+    });
+
+    function firstStrongDirection(text) {
+        for (const character of String(text || '')) {
+            const codePoint = character.codePointAt(0);
+
+            if (codePointInRanges(codePoint, RTL_STRONG_RANGES)) {
+                return 'rtl';
+            }
+
+            /*
+             * Treat known letter/ideograph ranges as LTR base-direction
+             * candidates. Digits and punctuation are deliberately neutral so
+             * a leading timestamp/number does not flip an Arabic/Hebrew line.
+             */
+            if (
+                (codePoint >= 0x0041 && codePoint <= 0x005a)
+                || (codePoint >= 0x0061 && codePoint <= 0x007a)
+                || (codePoint >= 0x00c0 && codePoint <= 0x02af)
+                || (codePoint >= 0x0370 && codePoint <= 0x058f)
+                || (codePoint >= 0x0900 && codePoint <= 0x1fff)
+                || codePointInRanges(codePoint, CJK_CODEPOINT_RANGES)
+            ) {
+                return 'ltr';
+            }
+        }
+
+        return 'ltr';
+    }
+
     function detectScriptProfile(text) {
-        if (/[\u0900-\u097f]/u.test(text)) {
-            return 'devanagari';
+        const value = String(text || '');
+
+        if (textHasCodePointInRanges(value, [[0x0600, 0x06ff], [0x0750, 0x077f], [0x08a0, 0x08ff], [0xfb50, 0xfdff], [0xfe70, 0xfeff]])) return 'arabic';
+        if (textHasCodePointInRanges(value, [[0x0590, 0x05ff], [0xfb1d, 0xfb4f]])) return 'hebrew';
+        if (textHasCodePointInRanges(value, [[0x0900, 0x097f], [0xa8e0, 0xa8ff]])) return 'devanagari';
+        if (textHasCodePointInRanges(value, [[0x0980, 0x09ff]])) return 'bengali';
+        if (textHasCodePointInRanges(value, [[0x0a00, 0x0a7f]])) return 'gurmukhi';
+        if (textHasCodePointInRanges(value, [[0x0a80, 0x0aff]])) return 'gujarati';
+        if (textHasCodePointInRanges(value, [[0x0b00, 0x0b7f]])) return 'odia';
+        if (textHasCodePointInRanges(value, [[0x0b80, 0x0bff]])) return 'tamil';
+        if (textHasCodePointInRanges(value, [[0x0c00, 0x0c7f]])) return 'telugu';
+        if (textHasCodePointInRanges(value, [[0x0c80, 0x0cff]])) return 'kannada';
+        if (textHasCodePointInRanges(value, [[0x0d00, 0x0d7f]])) return 'malayalam';
+        if (textHasCodePointInRanges(value, [[0x0d80, 0x0dff]])) return 'sinhala';
+        if (textHasCodePointInRanges(value, [[0x0e00, 0x0e7f]])) return 'thai';
+        if (textHasCodePointInRanges(value, [[0x0e80, 0x0eff]])) return 'lao';
+        if (textHasCodePointInRanges(value, [[0x1000, 0x109f], [0xa9e0, 0xa9ff], [0xaa60, 0xaa7f]])) return 'myanmar';
+        if (textHasCodePointInRanges(value, [[0x1780, 0x17ff]])) return 'khmer';
+        if (textHasCodePointInRanges(value, [[0x0f00, 0x0fff]])) return 'tibetan';
+        if (textHasCodePointInRanges(value, CJK_CODEPOINT_RANGES)) return 'cjk';
+        if (textHasCodePointInRanges(value, [[0x0400, 0x052f]])) return 'cyrillic';
+        if (textHasCodePointInRanges(value, [[0x0370, 0x03ff], [0x1f00, 0x1fff]])) return 'greek';
+        if (textHasCodePointInRanges(value, [[0x0530, 0x058f]])) return 'armenian';
+        if (textHasCodePointInRanges(value, [[0x10a0, 0x10ff], [0x2d00, 0x2d2f]])) return 'georgian';
+
+        if (
+            value.indexOf('\u200c') >= 0
+            || value.indexOf('\u200d') >= 0
+            || textHasCodePointInRanges(value, COMPLEX_SHAPING_RANGES)
+        ) {
+            return 'complex';
         }
 
-        if (/[\u0a00-\u0a7f]/u.test(text)) {
-            return 'gurmukhi';
-        }
-
-        if (/[\u0d00-\u0d7f]/u.test(text)) {
-            return 'malayalam';
+        if (latinGlyphExpression) {
+            try {
+                if (latinGlyphExpression.test(value.replace(/\s+/g, ''))) {
+                    return 'latin';
+                }
+            } catch {
+                // Conservative generic fallback below.
+            }
         }
 
         if (
-            /[\u0590-\u08ff\u0980-\u09ff\u0a80-\u0cff\u0d80-\u0dff\u1000-\u109f\u1780-\u17ff]/u
-                .test(text)
-            || text.includes('\u200c')
-            || text.includes('\u200d')
+            /^[\x00-\x7f]*$/.test(value)
+            || looksLikeLatinFallback(value.replace(/\s+/g, ''))
         ) {
-            return 'joining';
+            return 'latin';
         }
 
-        return 'spatial';
+        /* Unknown scripts stay whole-shaped, but still receive full effects. */
+        return 'universal';
     }
 
-    function usesAtomicPaint(profile) {
-        return profile !== 'spatial';
+    function usesWholeShapedMotion(profile) {
+        return [
+            'arabic',
+            'hebrew',
+            'devanagari',
+            'bengali',
+            'gurmukhi',
+            'gujarati',
+            'odia',
+            'tamil',
+            'telugu',
+            'kannada',
+            'malayalam',
+            'sinhala',
+            'thai',
+            'lao',
+            'myanmar',
+            'khmer',
+            'tibetan',
+            'complex',
+            'universal'
+        ].indexOf(profile) >= 0;
+    }
+
+    function usesCueTokenization(profile) {
+        return !!CUE_TOKEN_SCRIPT_PROFILES[profile];
+    }
+
+    const LATIN_LETTER_FALLBACK_RANGES = Object.freeze([
+        [0x0041, 0x005a], [0x0061, 0x007a],
+        [0x00c0, 0x024f], [0x1d00, 0x1d7f], [0x1d80, 0x1dbf],
+        [0x1e00, 0x1eff], [0x2c60, 0x2c7f], [0xa720, 0xa7ff],
+        [0xab30, 0xab6f], [0x10780, 0x107bf]
+    ]);
+
+    function looksLikeLatinFallback(text) {
+        let hasLatinLetter = false;
+
+        for (const character of String(text || '')) {
+            const codePoint = character.codePointAt(0);
+
+            if (codePointInRanges(codePoint, LATIN_LETTER_FALLBACK_RANGES)) {
+                hasLatinLetter = true;
+                continue;
+            }
+
+            if (
+                isFallbackMarkCodePoint(codePoint)
+                || isVariationOrModifier(codePoint)
+                || (codePoint >= 0x0030 && codePoint <= 0x0039)
+                || (codePoint >= 0x0020 && codePoint <= 0x0040)
+                || (codePoint >= 0x005b && codePoint <= 0x0060)
+                || (codePoint >= 0x007b && codePoint <= 0x00bf)
+                || (codePoint >= 0x2000 && codePoint <= 0x2bff)
+                || (codePoint >= 0x1f000 && codePoint <= 0x1faff)
+            ) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return hasLatinLetter;
     }
 
     function snapBoundary(boundaries, position, direction) {
@@ -575,7 +1195,52 @@
         return boundaries[boundaries.length - 1];
     }
 
-    function getWordRanges(text) {
+    function cueDerivedTokenRanges(text, cueRecords) {
+        const ranges = [];
+
+        (cueRecords || []).forEach(record => {
+            let start = Math.max(0, Math.min(text.length, Number(record.startPos) || 0));
+            let end = Math.max(start, Math.min(text.length, Number(record.endPos) || 0));
+
+            while (start < end && /\s/u.test(text.charAt(start))) start += 1;
+            while (end > start && /\s/u.test(text.charAt(end - 1))) end -= 1;
+
+            if (end <= start) return;
+
+            const previous = ranges[ranges.length - 1];
+            if (previous && start < previous.end) {
+                previous.end = Math.max(previous.end, end);
+                previous.text = text.slice(previous.start, previous.end);
+                return;
+            }
+
+            ranges.push({
+                start,
+                end,
+                text: text.slice(start, end)
+            });
+        });
+
+        return ranges;
+    }
+
+    function getWordRanges(text, cueRecords) {
+        const profile = detectScriptProfile(text);
+
+        /*
+         * CJK and several naturally space-less scripts must not have word
+         * boundaries invented by LyricMotion. If ELRC/Jellyfin supplies
+         * multiple timing tokens, preserve those exact token spans.
+         */
+        if (
+            usesCueTokenization(profile)
+            && Array.isArray(cueRecords)
+            && cueRecords.length > 1
+        ) {
+            const cueRanges = cueDerivedTokenRanges(text, cueRecords);
+            if (cueRanges.length > 1) return cueRanges;
+        }
+
         const ranges = [];
         const regex = /\S+/gu;
         let match;
@@ -596,7 +1261,7 @@
     }
 
     function buildWordRecords(text, lineIndex, cueRecords) {
-        const ranges = getWordRanges(text);
+        const ranges = getWordRanges(text, cueRecords);
 
         return ranges.map((range, wordIndex) => {
             const wordLength = Math.max(1, range.end - range.start);
@@ -686,13 +1351,11 @@
                 end,
                 scriptProfile,
                 paintMode:
-                    usesAtomicPaint(
-                        scriptProfile
-                    )
-                        ? 'atomic'
+                    usesWholeShapedMotion(scriptProfile)
+                        ? 'shaped'
                         : 'spatial',
                 isRtl:
-                    isRtlText(range.text),
+                    firstStrongDirection(range.text) === 'rtl',
                 element: null,
                 visualProgress: 0,
                 lastPaintAt: null,
@@ -701,7 +1364,8 @@
                 motionDurationMs: 0,
                 motionGlyphs: [],
                 wholeMotion: null,
-                geometryReady: false
+                geometryReady: false,
+                geometrySource: 'unprepared'
             };
         });
     }
@@ -723,27 +1387,34 @@
         return 0.5 - Math.cos(Math.PI * x) / 2;
     }
 
-    function isCjkText(text) {
-        return /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/u.test(
-            text
-        );
-    }
+    function canUseGraphemeMotionOverlay(word) {
+        if (!word) return false;
 
-    function isRtlText(text) {
-        return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u0590-\u05FF]/u.test(
-            text
-        );
-    }
+        const compact =
+            String(word.text || '').replace(/\s+/g, '');
 
-    function canUseLatinGlyphOverlay(text) {
-        try {
-            return /^[\p{Script=Latin}\p{Number}\p{Punctuation}\p{Symbol}]+$/u
-                .test(text.replace(/\s+/gu, ''));
-        } catch {
-            return /^[A-Za-z0-9'"’.,!?;:()\-]+$/.test(
-                text.replace(/\s+/g, '')
-            );
+        if (!compact) return false;
+
+        /* Explicit join controls mean that visual shaping can cross the
+         * Unicode grapheme boundary. Keep those words intact. */
+        if (
+            compact.indexOf('\u200c') >= 0
+            || compact.indexOf('\u200d') >= 0
+        ) {
+            return false;
         }
+
+        /* Arabic-family joining and unknown complex scripts must remain one
+         * shaped run. Indic/Dravidian/Bengali/Thai/etc. are safe here because
+         * getGraphemeRanges() refuses boundaries after viramas, before marks,
+         * inside Hangul clusters or across join controls. That lets an entire
+         * akshara/grapheme receive the exact same staggered Classic Bloom used
+         * by Latin without splitting conjuncts or vowel marks. */
+        return [
+            'arabic',
+            'complex',
+            'universal'
+        ].indexOf(word.scriptProfile) < 0;
     }
 
     function classifyWordMotion(words) {
@@ -768,8 +1439,8 @@
              * Motion eligibility is language-agnostic.
              *
              * Rendering remains script-aware later:
-             * Latin -> staggered grapheme layer
-             * complex scripts -> one fully-shaped word
+             * segment-safe scripts -> staggered grapheme layer
+             * contextual/complex scripts -> one fully-shaped word
              */
             const canAnimate =
                 !text.includes('-')
@@ -831,12 +1502,13 @@
                 ? 'grow'
                 : (charRise ? 'rise' : (charDrag ? 'drag' : 'none'));
 
-            word.motionGlow = growable;
+            word.motionGlow =
+                growable;
             word.motionDurationMs = durationMs;
 
             /*
              * Repo-style dynamic intensity/growth, computed once per word.
-             * Per-glyph position decay is added later for Latin overlays.
+             * Per-grapheme position decay is added later for segment-safe overlays.
              */
             const minDuration = 400;
             const maxDuration = 3000;
@@ -984,8 +1656,11 @@
     function clearMotionLayer(word) {
         if (!word || !word.element) return;
 
-        const layer = word.element.querySelector(':scope > .ak-motion-layer');
-        if (layer) layer.remove();
+        const layer = directChildByClass(
+            word.element,
+            'ak-motion-layer'
+        );
+        removeNodeCompat(layer);
 
         word.element.classList.remove(
             'ak-motion-per-glyph',
@@ -999,6 +1674,110 @@
 
         word.motionGlyphs = [];
         word.wholeMotion = null;
+        word.geometryReady = false;
+        word.renderWidth = 0;
+        (word.segments || []).forEach(segment => {
+            delete segment.visualStart;
+            delete segment.visualEnd;
+        });
+        word.geometrySource = 'unprepared';
+    }
+
+    function createMotionGlyph(
+        word,
+        rangeInfo,
+        index,
+        glyphCount,
+        box
+    ) {
+        const glyph = document.createElement('span');
+        glyph.className = 'ak-motion-glyph';
+
+        glyph.glowLayers = [
+            'ak-glow-core',
+            'ak-glow-halo'
+        ].map(className => {
+            const glow = document.createElement('span');
+            glow.className =
+                'ak-glow-layer '
+                + 'ak-glyph-glow-layer '
+                + className;
+            glow.textContent = rangeInfo.text;
+            glow.style.opacity = '0';
+            glyph.appendChild(glow);
+            return glow;
+        });
+
+        glyph.style.left = `${box.left.toFixed(3)}px`;
+        glyph.style.top = `${box.top.toFixed(3)}px`;
+        glyph.style.width = `${box.width.toFixed(3)}px`;
+        glyph.style.height = `${box.height.toFixed(3)}px`;
+        glyph._akMotion = computeGlyphMotionMetrics(
+            word,
+            index,
+            glyphCount
+        );
+
+        return glyph;
+    }
+
+    function measuredFallbackGlyphBoxes(
+        word,
+        graphemes,
+        wordRect
+    ) {
+        const widths = [];
+        let measuredTotal = 0;
+
+        try {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            const style = window.getComputedStyle(word.element);
+
+            if (context) {
+                context.font = style.font || [
+                    style.fontStyle,
+                    style.fontWeight,
+                    style.fontSize,
+                    style.fontFamily
+                ].join(' ');
+
+                graphemes.forEach(rangeInfo => {
+                    const width = Math.max(
+                        0.001,
+                        context.measureText(rangeInfo.text).width
+                    );
+                    widths.push(width);
+                    measuredTotal += width;
+                });
+            }
+        } catch {
+            // Equal-width fallback below is deterministic and compositor-safe.
+        }
+
+        if (widths.length !== graphemes.length || measuredTotal <= 0) {
+            widths.length = 0;
+            graphemes.forEach(() => widths.push(1));
+            measuredTotal = graphemes.length;
+        }
+
+        const scale = wordRect.width / measuredTotal;
+        let cursor = 0;
+
+        return widths.map(width => {
+            const scaledWidth = width * scale;
+            const logicalLeft = cursor;
+            cursor += scaledWidth;
+
+            return {
+                left: word.isRtl
+                    ? wordRect.width - logicalLeft - scaledWidth
+                    : logicalLeft,
+                top: 0,
+                width: scaledWidth,
+                height: wordRect.height
+            };
+        });
     }
 
     function prepareWordGeometry(word) {
@@ -1006,27 +1785,51 @@
 
         clearMotionLayer(word);
 
-        const textNode = Array.from(word.element.childNodes)
-            .find(node => node.nodeType === Node.TEXT_NODE);
+        let textNode = null;
+        const childNodes = word.element.childNodes || [];
+        for (let index = 0; index < childNodes.length; index += 1) {
+            if (childNodes[index].nodeType === Node.TEXT_NODE) {
+                textNode = childNodes[index];
+                break;
+            }
+        }
 
         if (!textNode) return;
 
         const wordRect =
             word.element.getBoundingClientRect();
 
+        /* Adjacent cue segments share boundaries. Cache prefix Range reads so
+         * a boundary used as one cue's end and the next cue's start is measured
+         * once rather than forcing duplicate layout work. */
+        const prefixWidths = new Map();
+        const prefixWidth = position => {
+            const safePosition = Math.max(
+                0,
+                Math.min(textNode.length, Number(position) || 0)
+            );
+            if (prefixWidths.has(safePosition)) {
+                return prefixWidths.get(safePosition);
+            }
+            const measured =
+                getPrefixWidth(textNode, safePosition);
+            prefixWidths.set(safePosition, measured);
+            return measured;
+        };
+
         const fullWidth =
-            getPrefixWidth(textNode, textNode.length)
-            || word.element.getBoundingClientRect().width;
+            prefixWidth(textNode.length)
+            || wordRect.width;
 
         if (fullWidth > 0) {
             word.renderWidth = fullWidth;
 
             word.segments.forEach(segment => {
                 const startPx =
-                    getPrefixWidth(textNode, segment.startPos);
+                    prefixWidth(segment.startPos);
 
                 const endPx =
-                    getPrefixWidth(textNode, segment.endPos);
+                    prefixWidth(segment.endPos);
 
                 segment.visualStart =
                     clamp01(startPx / fullWidth);
@@ -1058,16 +1861,17 @@
             `${(wipeWidth / 2).toFixed(3)}em`
         );
 
-        if (word.motionMode !== 'grow') return;
+        if (word.motionMode !== 'grow') {
+            return;
+        }
 
         /*
-         * Latin words can safely use a per-grapheme motion overlay that
-         * mirrors am-lyrics' staggered character glow. Complex scripts keep
-         * their original shaped word and receive a whole-word glyph shadow.
+         * Segment-safe scripts can use a per-grapheme motion overlay that
+         * mirrors the staggered character glow. Contextual scripts keep their
+         * original shaped word and receive the same whole-word bloom/motion.
          */
         if (
-            word.paintMode === 'atomic'
-            || !canUseLatinGlyphOverlay(word.text)
+            !canUseGraphemeMotionOverlay(word)
             || !shouldUsePerGlyphMotion(
                 glyphCount
             )
@@ -1079,6 +1883,7 @@
                     Math.floor(glyphCount / 2),
                     glyphCount
                 );
+            word.geometrySource = 'whole-joining-or-profile';
             return;
         }
 
@@ -1090,6 +1895,7 @@
                     Math.floor(glyphCount / 2),
                     glyphCount
                 );
+            word.geometrySource = 'whole-no-box';
             return;
         }
 
@@ -1119,52 +1925,18 @@
 
                 if (!rect.width && !rect.height) return;
 
-                const glyph =
-                    document.createElement('span');
-
-                glyph.className = 'ak-motion-glyph';
-
-                glyph.glowLayers = [
-                    'ak-glow-core',
-                    'ak-glow-halo'
-                ].map(className => {
-                    const glow =
-                        document.createElement(
-                            'span'
-                        );
-
-                    glow.className =
-                        'ak-glow-layer '
-                        + 'ak-glyph-glow-layer '
-                        + className;
-
-                    glow.textContent =
-                        rangeInfo.text;
-
-                    glow.style.opacity = '0';
-                    glyph.appendChild(glow);
-
-                    return glow;
-                });
-
-                glyph.style.left =
-                    `${(rect.left - wordRect.left).toFixed(3)}px`;
-
-                glyph.style.top =
-                    `${(rect.top - wordRect.top).toFixed(3)}px`;
-
-                glyph.style.width =
-                    `${rect.width.toFixed(3)}px`;
-
-                glyph.style.height =
-                    `${rect.height.toFixed(3)}px`;
-
-                glyph._akMotion =
-                    computeGlyphMotionMetrics(
-                        word,
-                        index,
-                        graphemes.length
-                    );
+                const glyph = createMotionGlyph(
+                    word,
+                    rangeInfo,
+                    index,
+                    graphemes.length,
+                    {
+                        left: rect.left - wordRect.left,
+                        top: rect.top - wordRect.top,
+                        width: rect.width,
+                        height: rect.height
+                    }
+                );
 
                 layer.appendChild(glyph);
                 glyphs.push(glyph);
@@ -1175,7 +1947,32 @@
             }
         });
 
-        if (glyphs.length) {
+        if (glyphs.length !== graphemes.length) {
+            replaceChildrenCompat(layer);
+            glyphs.length = 0;
+
+            measuredFallbackGlyphBoxes(
+                word,
+                graphemes,
+                wordRect
+            ).forEach((box, index) => {
+                const glyph = createMotionGlyph(
+                    word,
+                    graphemes[index],
+                    index,
+                    graphemes.length,
+                    box
+                );
+                layer.appendChild(glyph);
+                glyphs.push(glyph);
+            });
+
+            word.geometrySource = 'canvas-fallback';
+        } else {
+            word.geometrySource = 'range';
+        }
+
+        if (glyphs.length === graphemes.length) {
             word.element.appendChild(layer);
             word.motionGlyphs = glyphs;
             word.element.classList.add(
@@ -1189,6 +1986,7 @@
                     Math.floor(glyphCount / 2),
                     glyphCount
                 );
+            word.geometrySource = 'whole-geometry-failure';
         }
     }
 
@@ -1199,32 +1997,52 @@
     }
 
     function queueMotionGeometryRefresh() {
+        if (!state.lyrics || !isLyricsPage()) {
+            if (state.geometryTimer) {
+                clearTimeout(state.geometryTimer);
+                state.geometryTimer = 0;
+            }
+            return false;
+        }
+
         clearTimeout(state.geometryTimer);
 
         state.geometryTimer =
             window.setTimeout(() => {
-                requestAnimationFrame(refreshMotionGeometry);
+                state.geometryTimer = 0;
+
+                if (!state.lyrics || !isLyricsPage()) {
+                    return;
+                }
+
+                requestAnimationFrame(() => {
+                    if (!state.lyrics || !isLyricsPage()) {
+                        return;
+                    }
+
+                    refreshMotionGeometry();
+                });
             }, 40);
+
+        return true;
     }
 
     function createWordSpan(word) {
         const span = document.createElement('span');
 
         span.className = 'ak-word ak-word-zero';
-        span.dataset.akWord = String(word.wordIndex);
-        span.dataset.akMotion = word.motionMode;
-        span.dataset.akText = word.text;
-        span.dataset.akScript =
-            word.scriptProfile;
 
         span.classList.add(
             `ak-script-${word.scriptProfile}`
         );
 
-        if (word.paintMode === 'atomic') {
-            span.classList.add(
-                'ak-paint-atomic'
-            );
+        if (word.paintMode === 'shaped') {
+            span.classList.add('ak-paint-shaped');
+        }
+
+        if (word.isRtl) {
+            span.classList.add('ak-word-rtl');
+            span.setAttribute('dir', 'rtl');
         }
 
         span.style.setProperty(
@@ -1237,10 +2055,6 @@
             '0'
         );
 
-        span.style.setProperty(
-            '--ak-atomic-alpha',
-            String(ATOMIC_FUTURE_ALPHA)
-        );
 
         if (word.segments.length) {
             span.classList.add('ak-word-timed');
@@ -1392,7 +2206,7 @@
                     .slice(-4);
             }
         } catch {
-            // Storage may be disabled in the TV client.
+            // Storage may be disabled by the client/browser.
         }
 
         return [];
@@ -1530,10 +2344,10 @@
     }
 
     function applyAccentTheme() {
+        if (!isLyricsPage()) return;
+
         const page =
-            document.querySelector(
-                '.lyricPage'
-            );
+            getCurrentLyricPage();
 
         if (!page) return;
 
@@ -1562,9 +2376,14 @@
     ) {
         const mode = readAccentMode();
 
+        const songIdentity =
+            state.lyricsAcceptedKey
+            || state.lyricsRequestKey
+            || '';
+
         const signature =
             stableHash(
-                lyricSignature(lyrics)
+                `${songIdentity}|${lyricSignature(lyrics)}`
             ).toString(16);
 
         if (
@@ -1746,18 +2565,276 @@
         return state.accent || PREMIUM_ACCENTS[0];
     }
 
-    function acceptLyricsPayload(payload, source) {
+    function retireDecoratedLines() {
+        state.lineData.forEach(lineRecord => {
+            const element =
+                lineRecord && lineRecord.element;
+
+            if (!element || !element.isConnected) return;
+
+            try {
+                Array.from(element.classList || [])
+                    .filter(name => name.indexOf('ak-') === 0)
+                    .forEach(name => element.classList.remove(name));
+
+                delete element.dataset.akGeneration;
+                delete element.dataset.akVocalRole;
+                delete element.dataset.akVocalRoleSource;
+                delete element.dataset.akBackgroundLane;
+                delete element.dataset.akBackgroundEntry;
+
+                /*
+                 * Jellyfin may replace/reuse this node on the next SPA task.
+                 * Hide the retired lyric immediately so the previous song can
+                 * never flash while the new/no-lyrics view is being committed.
+                 * decorateLine() clears both properties on valid reuse.
+                 */
+                element.style.visibility = 'hidden';
+                element.setAttribute('aria-hidden', 'true');
+            } catch {
+                // A framework-owned node can detach in the middle of cleanup.
+            }
+        });
+
+        const container =
+            getCurrentLyricsContainer(true);
+
+        if (container) {
+            container.classList.remove(
+                'ak-karaoke-container'
+            );
+        }
+    }
+
+    function clearCapturedLyrics(
+        source = 'clear'
+    ) {
+        const hadLyrics = !!state.lyrics || state.lineData.length > 0;
+
+        cancelDecorationRetry(true);
+        if (state.geometryTimer) {
+            clearTimeout(state.geometryTimer);
+            state.geometryTimer = 0;
+        }
+        invalidateAtmosphereLoads(source);
+        stopAnimationLoop(source);
+        retireDecoratedLines();
+
+        if (
+            state.atmosphereRoot
+            && state.atmosphereRoot.isConnected
+        ) {
+            state.atmosphereRoot.classList.remove(
+                'ak-atmosphere-ready'
+            );
+        }
+
+        state.atmosphereArtwork = '';
+        state.atmosphereSource = 'none';
+        state.atmosphereColors = null;
+
+        state.lyrics = null;
+        state.lyricsAcceptedKey = '';
+        if (hadLyrics) state.generation += 1;
+        state.decoratedGeneration = -1;
+        state.lineData = [];
+        state.timedCueCount = 0;
+        state.backgroundVocalCount = 0;
+        state.romanizationAvailable = false;
+        state.romanizationCandidate = false;
+        if (state.romanizationCache && typeof state.romanizationCache.clear === 'function') {
+            state.romanizationCache.clear();
+        }
+        state.romanizationLineCount = 0;
+        state.songPreferenceKey = '';
+        state.timingOffsetSeconds = 0;
+        if (typeof removeRomanizationToggle === 'function') {
+            removeRomanizationToggle();
+        }
+        if (typeof removeTimingControls === 'function') {
+            removeTimingControls();
+        }
+        if (state.lyricToolsHost && state.lyricToolsHost.parentNode) {
+            state.lyricToolsHost.parentNode.removeChild(state.lyricToolsHost);
+        }
+        state.lyricToolsHost = null;
+        state.lastActiveLine = -999;
+        state.lastActiveLineSignature = '';
+        state.activeLineIndexes = [];
+        state.lineEndPrefix = [];
+        state.overlapFrameCount = 0;
+        state.maxSimultaneousLines = 1;
+        resetPlaybackClock();
+
+        if (hadLyrics) {
+            log(`cleared captured lyrics from ${source}`);
+        }
+
+        return hadLyrics;
+    }
+
+    function lyricsRequestIdentity(url) {
+        if (!isLyricsUrl(url)) return '';
+
+        const raw = String(url || '');
+        const withoutHash = raw.split('#', 1)[0];
+        const queryIndex = withoutHash.indexOf('?');
+        const rawPath = queryIndex >= 0
+            ? withoutHash.slice(0, queryIndex)
+            : withoutHash;
+        const query = queryIndex >= 0
+            ? withoutHash.slice(queryIndex + 1)
+            : '';
+        const path = rawPath
+            .replace(/^https?:\/\/[^/]+/i, '')
+            .replace(/\/{2,}/g, '/')
+            .toLowerCase();
+
+        /*
+         * Jellyfin normally carries the item id in the path. Keep an item-id
+         * query parameter too for compatibility with alternate client routes,
+         * while deliberately ignoring auth/cache query parameters so duplicate
+         * requests for the same song share one generation.
+         */
+        const itemMatch = query.match(
+            /(?:^|&)(?:itemid|item_id)=([^&]+)/i
+        );
+
+        return itemMatch
+            ? `${path}?itemid=${itemMatch[1].toLowerCase()}`
+            : path;
+    }
+
+    function lyricItemIdFromUrl(url) {
+        const raw = String(url || '');
+        try {
+            const parsed = new URL(raw, location.href);
+            const path = parsed.pathname || '';
+            const patterns = [
+                /\/Audio\/([^/]+)\/Lyrics(?:\/|$)/i,
+                /\/Items\/([^/]+)\/Lyrics(?:\/|$)/i,
+                /\/Lyrics\/([^/?#]+)/i
+            ];
+            for (let i = 0; i < patterns.length; i += 1) {
+                const match = path.match(patterns[i]);
+                if (match && match[1]) return decodeURIComponent(match[1]);
+            }
+            return parsed.searchParams.get('itemId')
+                || parsed.searchParams.get('item_id')
+                || '';
+        } catch {
+            const match = raw.match(/\/(?:Audio|Items)\/([^/?#]+)\/Lyrics/i);
+            return match && match[1] ? match[1] : '';
+        }
+    }
+
+    function beginLyricsRequest(
+        url
+    ) {
+        const key = lyricsRequestIdentity(url);
+        if (!key) return 0;
+
+        state.lyricsRequestUrl = String(url || '');
+        const itemId = lyricItemIdFromUrl(url);
+        if (itemId) state.lyricsItemId = itemId;
+
+        const switchedSong =
+            !!state.lyricsRequestKey
+            && key !== state.lyricsRequestKey;
+
+        /*
+         * Every network request receives its own generation token, even when
+         * Jellyfin refreshes the same song twice. An earlier response can still
+         * populate the UI while a newer refresh is pending, but it can never
+         * overwrite a newer response once that newer payload has been accepted.
+         */
+        state.lyricsRequestSeq += 1;
+        state.lyricsRequestKey = key;
+        if (switchedSong) {
+            /* Drop request identities from the previous track session. This is
+             * also an ABA guard: if the user goes A -> B -> A, a very late
+             * response from the first A must not match the second A merely
+             * because the normalized item URL is identical. */
+            state.lyricsRequestKeys.clear();
+        }
+        state.lyricsRequestKeys.set(
+            state.lyricsRequestSeq,
+            key
+        );
+        while (state.lyricsRequestKeys.size > 128) {
+            const oldest = state.lyricsRequestKeys.keys().next();
+            if (oldest.done) break;
+            state.lyricsRequestKeys.delete(oldest.value);
+        }
+
+        /*
+         * A true track switch clears the previous model immediately. A same-song
+         * refresh keeps the current lyrics visible until one of its responses
+         * arrives. Sequence ordering still prevents an older response from
+         * overwriting a newer response that has already been accepted.
+         */
+        if (switchedSong) {
+            clearCapturedLyrics('request-switch');
+        }
+
+        return state.lyricsRequestSeq;
+    }
+
+    function acceptLyricsPayload(
+        payload,
+        source,
+        requestSeq = 0
+    ) {
+        if (requestSeq > 0) {
+            const requestKey =
+                state.lyricsRequestKeys.get(requestSeq)
+                || '';
+
+            const wrongSong =
+                requestKey
+                    ? requestKey !== state.lyricsRequestKey
+                    : requestSeq !== state.lyricsRequestSeq;
+
+            const olderThanAccepted =
+                requestSeq < state.lyricsAcceptedSeq;
+
+            if (wrongSong || olderThanAccepted) {
+                state.lyricsStaleResponseDrops += 1;
+                return false;
+            }
+
+            state.lyricsAcceptedSeq = requestSeq;
+            state.lyricsAcceptedKey = state.lyricsRequestKey;
+        }
+
         const lyrics = normalizeLyricsPayload(payload);
-        if (!lyrics) return;
+
+        if (!lyrics) {
+            clearCapturedLyrics(source);
+            return true;
+        }
 
         state.lyrics = lyrics;
         state.generation += 1;
         state.decoratedGeneration = -1;
         selectSongAccent(lyrics);
 
-        // Force atmosphere rediscovery on the next animation pass/song.
+        // Force atmosphere rediscovery and invalidate any old-song async load.
+        invalidateAtmosphereLoads('lyrics-accepted');
         state.atmosphereMediaKey = '';
         state.atmosphereFailedKey = '';
+        state.atmosphereArtwork = '';
+        state.atmosphereSource = 'pending';
+        state.atmosphereColors = null;
+
+        if (
+            state.atmosphereRoot
+            && state.atmosphereRoot.isConnected
+        ) {
+            state.atmosphereRoot.classList.remove(
+                'ak-atmosphere-ready'
+            );
+        }
 
         const cueCount = lyrics.reduce((total, lyric) => {
             const cues = lyricValue(lyric, 'Cues', 'cues');
@@ -1772,13 +2849,19 @@
         state.overlapFrameCount = 0;
         state.maxSimultaneousLines = 1;
         resetPlaybackClock();
+        applySongPreferences(lyrics);
 
         log(`captured ${lyrics.length} lyric lines / ${cueCount} cues from ${source}`);
+        if (typeof prepareRomanizationForLyrics === 'function') {
+            prepareRomanizationForLyrics();
+        }
         queueDecoration();
 
         if (cueCount === 0) {
             warn('Lyrics loaded without enhanced ELRC cue data.');
         }
+
+        return true;
     }
 
     function tryParseJson(text) {
@@ -1790,18 +2873,96 @@
         }
     }
 
+    function fetchInputUrl(input) {
+        if (typeof input === 'string') {
+            return input;
+        }
+
+        if (input && typeof input.url === 'string') {
+            return input.url;
+        }
+
+        try {
+            if (
+                typeof URL !== 'undefined'
+                && input instanceof URL
+            ) {
+                return input.href;
+            }
+        } catch {
+            // Cross-realm URL objects can throw instanceof in old WebViews.
+        }
+
+        return '';
+    }
+
+    function fetchInputMethod(input, init) {
+        const initMethod =
+            init && typeof init.method === 'string'
+                ? init.method
+                : '';
+        const inputMethod =
+            input && typeof input.method === 'string'
+                ? input.method
+                : '';
+        return String(initMethod || inputMethod || 'GET').toUpperCase();
+    }
+
+    function isLyricsReadMethod(method) {
+        return String(method || 'GET').toUpperCase() === 'GET';
+    }
+
     function installFetchInterceptor() {
         if (typeof window.fetch !== 'function' || window.fetch.__appleKaraokeWrapped) return;
         const originalFetch = window.fetch;
 
         async function wrappedFetch(input, init) {
+            const requestUrl =
+                fetchInputUrl(input);
+            const requestMethod =
+                fetchInputMethod(input, init);
+            const captureRequest =
+                isLyricsReadMethod(requestMethod)
+                && isLyricsUrl(requestUrl);
+            const requestSeq =
+                captureRequest
+                    ? beginLyricsRequest(requestUrl)
+                    : 0;
             const response = await originalFetch.call(this, input, init);
             try {
-                const url = typeof input === 'string' ? input : input && input.url;
-                if (isLyricsUrl(url || response.url)) {
-                    response.clone().json()
-                        .then(data => acceptLyricsPayload(data, 'fetch'))
-                        .catch(() => {});
+                const finalUrl = requestUrl || response.url;
+                if (
+                    isLyricsReadMethod(requestMethod)
+                    && isLyricsUrl(finalUrl)
+                ) {
+                    const effectiveSeq =
+                        requestSeq
+                        || beginLyricsRequest(finalUrl);
+
+                    /*
+                     * Jellyfin can answer a removed/missing lyric resource as
+                     * 204/404 instead of a JSON object with Lyrics: []. Treat
+                     * those as an authoritative empty model for the current
+                     * request so a same-song refresh cannot keep stale lyrics.
+                     */
+                    if (
+                        response.status === 204
+                        || response.status === 404
+                    ) {
+                        acceptLyricsPayload(
+                            { Lyrics: [] },
+                            'fetch-empty',
+                            effectiveSeq
+                        );
+                    } else {
+                        response.clone().json()
+                            .then(data => acceptLyricsPayload(
+                                data,
+                                'fetch',
+                                effectiveSeq
+                            ))
+                            .catch(() => {});
+                    }
                 }
             } catch (error) {
                 warn('fetch capture failed', error);
@@ -1823,6 +2984,14 @@
 
         function wrappedOpen(method, url) {
             this.__appleKaraokeUrl = typeof url === 'string' ? url : String(url || '');
+            this.__appleKaraokeMethod = String(method || 'GET').toUpperCase();
+            this.__appleKaraokeLyricsSeq =
+                isLyricsReadMethod(this.__appleKaraokeMethod)
+                    && isLyricsUrl(this.__appleKaraokeUrl)
+                    ? beginLyricsRequest(
+                        this.__appleKaraokeUrl
+                    )
+                    : 0;
             return originalOpen.apply(this, arguments);
         }
         wrappedOpen.__appleKaraokeWrapped = true;
@@ -1834,16 +3003,41 @@
                 this.__appleKaraokeListenerAdded = true;
                 this.addEventListener('load', () => {
                     const url = this.responseURL || this.__appleKaraokeUrl || '';
-                    if (!isLyricsUrl(url)) return;
+                    if (
+                        !isLyricsReadMethod(this.__appleKaraokeMethod)
+                        || !isLyricsUrl(url)
+                    ) return;
 
                     try {
+                        const effectiveSeq =
+                            this.__appleKaraokeLyricsSeq
+                            || beginLyricsRequest(url);
+
+                        if (
+                            this.status === 204
+                            || this.status === 404
+                        ) {
+                            acceptLyricsPayload(
+                                { Lyrics: [] },
+                                'XMLHttpRequest-empty',
+                                effectiveSeq
+                            );
+                            return;
+                        }
+
                         let data = null;
                         if (this.responseType === 'json' && this.response && typeof this.response === 'object') {
                             data = this.response;
                         } else if (!this.responseType || this.responseType === 'text') {
                             data = tryParseJson(this.responseText);
                         }
-                        if (data) acceptLyricsPayload(data, 'XMLHttpRequest');
+                        if (data) {
+                            acceptLyricsPayload(
+                                data,
+                                'XMLHttpRequest',
+                                effectiveSeq
+                            );
+                        }
                     } catch (error) {
                         warn('XHR capture failed', error);
                     }
@@ -1856,6 +3050,53 @@
     function setText(element, text) {
         element.textContent = text;
         return element;
+    }
+
+    function replaceChildrenCompat(element, ...nodes) {
+        if (!element) return;
+
+        if (typeof element.replaceChildren === 'function') {
+            element.replaceChildren(...nodes);
+            return;
+        }
+
+        while (element.firstChild) {
+            element.removeChild(element.firstChild);
+        }
+
+        nodes.forEach(node => {
+            if (node) element.appendChild(node);
+        });
+    }
+
+    function directChildByClass(element, className) {
+        if (!element || !className) return null;
+
+        const children = element.children || [];
+        for (let index = 0; index < children.length; index += 1) {
+            const child = children[index];
+            if (
+                child.classList
+                && child.classList.contains(className)
+            ) {
+                return child;
+            }
+        }
+
+        return null;
+    }
+
+    function removeNodeCompat(element) {
+        if (!element) return;
+
+        if (typeof element.remove === 'function') {
+            element.remove();
+            return;
+        }
+
+        if (element.parentNode) {
+            element.parentNode.removeChild(element);
+        }
     }
 
     function createUntimedSpan(text) {
@@ -1877,24 +3118,853 @@
             || ''
         );
 
-        const isBackgroundVocal =
+        let markerLength = 0;
+        let roleSource = null;
+
+        if (rawText.indexOf(BACKGROUND_VOCAL_TOKEN) === 0) {
+            markerLength = BACKGROUND_VOCAL_TOKEN.length;
+            roleSource = 'ascii-marker';
+        } else if (
             rawText.indexOf(
-                BACKGROUND_VOCAL_SENTINEL
-            ) === 0;
+                LEGACY_BACKGROUND_VOCAL_SENTINEL
+            ) === 0
+        ) {
+            markerLength =
+                LEGACY_BACKGROUND_VOCAL_SENTINEL.length;
+            roleSource = 'legacy-marker';
+        } else {
+            const trimmed = rawText.trim();
+
+            /*
+             * Recovery path for libraries already imported with the stripped
+             * legacy marker. It is intentionally narrow: only a complete,
+             * short parenthetical response is inferred as a backing vocal.
+             */
+            const firstCharacter = trimmed.charAt(0);
+            const lastCharacter = trimmed.charAt(trimmed.length - 1);
+            const completeParenthetical =
+                (firstCharacter === '(' && lastCharacter === ')')
+                || (firstCharacter === '（' && lastCharacter === '）');
+
+            if (
+                trimmed.length >= 3
+                && trimmed.length <= 64
+                && completeParenthetical
+            ) {
+                roleSource = 'parenthetical-fallback';
+            }
+        }
+
+        const isBackgroundVocal = !!roleSource;
 
         return {
             rawText,
             text: isBackgroundVocal
-                ? rawText.slice(
-                    BACKGROUND_VOCAL_SENTINEL.length
-                )
+                ? rawText.slice(markerLength)
                 : rawText,
-            positionOffset: isBackgroundVocal
-                ? BACKGROUND_VOCAL_SENTINEL.length
-                : 0,
-            isBackgroundVocal
+            positionOffset: markerLength,
+            isBackgroundVocal,
+            backgroundVocalRoleSource: roleSource
         };
     }
+
+
+    let romanizerLoadPromise = null;
+
+    function finiteNumber(value, fallback = 0) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : fallback;
+    }
+
+    function clampTimingOffsetSeconds(value) {
+        const numeric = Math.round(finiteNumber(value, 0) * 10) / 10;
+        return Math.max(
+            TIMING_OFFSET_MIN_SECONDS,
+            Math.min(TIMING_OFFSET_MAX_SECONDS, numeric)
+        );
+    }
+
+    function loadSongPreferences() {
+        state.songPreferences = Object.create(null);
+        try {
+            const parsed = JSON.parse(
+                localStorage.getItem(SONG_PREFERENCES_STORAGE_KEY) || '{}'
+            );
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                Object.keys(parsed).forEach(key => {
+                    const entry = parsed[key];
+                    if (!entry || typeof entry !== 'object') return;
+                    state.songPreferences[key] = {
+                        romanization:
+                            entry.romanization === 'romanized'
+                                ? 'romanized'
+                                : 'native',
+                        timingOffsetSeconds:
+                            clampTimingOffsetSeconds(entry.timingOffsetSeconds),
+                        updatedAt: finiteNumber(entry.updatedAt, 0)
+                    };
+                });
+            }
+        } catch {
+            state.songPreferences = Object.create(null);
+        }
+
+        /*
+         * v7 stored Romanization as a global switch. Do not carry that global
+         * behavior forward: v8 makes the choice song-specific. Keep the key
+         * readable only for migration diagnostics and leave every unseen song
+         * in its native-script default until the user explicitly opts in.
+         */
+        try {
+            const legacy = localStorage.getItem(LEGACY_ROMANIZATION_STORAGE_KEY);
+            if (legacy === 'romanized' || legacy === 'native') {
+                localStorage.removeItem(LEGACY_ROMANIZATION_STORAGE_KEY);
+            }
+        } catch {
+            // Restricted/private storage should never block playback.
+        }
+    }
+
+    function songPreferenceKeyForLyrics(lyrics = state.lyrics) {
+        const requestKey = String(
+            state.lyricsAcceptedKey || state.lyricsRequestKey || ''
+        );
+        if (requestKey) return requestKey;
+        if (!lyrics || !lyrics.length) return '';
+        const signature = lyricSignature(lyrics);
+        const firstStart = finiteNumber(
+            lyricValue(lyrics[0], 'Start', 'start'),
+            0
+        );
+        const lastStart = finiteNumber(
+            lyricValue(lyrics[lyrics.length - 1], 'Start', 'start'),
+            0
+        );
+        return `lyrics:${stableHash(signature).toString(16)}:${lyrics.length}:${firstStart}:${lastStart}`;
+    }
+
+    function pruneSongPreferences() {
+        const keys = Object.keys(state.songPreferences || {});
+        if (keys.length <= SONG_PREFERENCES_MAX_ENTRIES) return;
+        keys.sort((left, right) =>
+            finiteNumber(state.songPreferences[left] && state.songPreferences[left].updatedAt, 0)
+            - finiteNumber(state.songPreferences[right] && state.songPreferences[right].updatedAt, 0)
+        );
+        keys.slice(0, keys.length - SONG_PREFERENCES_MAX_ENTRIES)
+            .forEach(key => delete state.songPreferences[key]);
+    }
+
+    function persistSongPreferences() {
+        try {
+            pruneSongPreferences();
+            localStorage.setItem(
+                SONG_PREFERENCES_STORAGE_KEY,
+                JSON.stringify(state.songPreferences)
+            );
+        } catch {
+            // Quota/private-mode failures should not affect live playback.
+        }
+    }
+
+    function applySongPreferences(lyrics = state.lyrics) {
+        const key = songPreferenceKeyForLyrics(lyrics);
+        state.songPreferenceKey = key;
+        const entry = key && state.songPreferences[key]
+            ? state.songPreferences[key]
+            : null;
+        state.romanizationMode =
+            entry && entry.romanization === 'romanized'
+                ? 'romanized'
+                : 'native';
+        state.timingOffsetSeconds =
+            entry
+                ? clampTimingOffsetSeconds(entry.timingOffsetSeconds)
+                : 0;
+        updateRomanizationToggleUi();
+        updateTimingControlsUi();
+    }
+
+    function persistCurrentSongPreference() {
+        const key = state.songPreferenceKey || songPreferenceKeyForLyrics();
+        if (!key) return false;
+        state.songPreferenceKey = key;
+
+        const isDefault =
+            state.romanizationMode !== 'romanized'
+            && Math.abs(state.timingOffsetSeconds) < 0.0001;
+
+        if (isDefault) {
+            delete state.songPreferences[key];
+        } else {
+            state.songPreferences[key] = {
+                romanization:
+                    state.romanizationMode === 'romanized'
+                        ? 'romanized'
+                        : 'native',
+                timingOffsetSeconds:
+                    clampTimingOffsetSeconds(state.timingOffsetSeconds),
+                updatedAt: Date.now()
+            };
+        }
+
+        persistSongPreferences();
+        return true;
+    }
+
+    function hasNativeScriptCandidate(text) {
+        const value = String(text || '').trim();
+        if (!value) return false;
+        const profile = detectScriptProfile(value);
+        return profile !== 'latin';
+    }
+
+    function lyricsHaveNativeScript(lyrics) {
+        return (lyrics || []).some(lyric => {
+            const profile = lyricTextProfile(lyric);
+            return hasNativeScriptCandidate(profile.text);
+        });
+    }
+
+    function romanizerAssetUrl() {
+        let source = '';
+        try {
+            const scripts = document.getElementsByTagName('script');
+            for (let index = scripts.length - 1; index >= 0; index -= 1) {
+                const candidate = String(scripts[index].src || '');
+                if (candidate.indexOf('jellyfin-lyric-motion.js') >= 0) {
+                    source = candidate;
+                    break;
+                }
+            }
+        } catch {
+            source = '';
+        }
+
+        if (source) {
+            const clean = source.split('#', 1)[0].split('?', 1)[0];
+            return clean.replace(/jellyfin-lyric-motion\.js$/i, ROMANIZER_ASSET)
+                + `?v=${encodeURIComponent(VERSION)}`;
+        }
+
+        return `${ROMANIZER_ASSET}?v=${encodeURIComponent(VERSION)}`;
+    }
+
+    function getRomanizer() {
+        const candidate = window.JellyfinLyricRomanizer;
+        return candidate
+            && typeof candidate.romanize === 'function'
+            && typeof candidate.canRomanize === 'function'
+            ? candidate
+            : null;
+    }
+
+    function ensureRomanizerLoaded() {
+        const existing = getRomanizer();
+        if (existing) {
+            state.romanizationLoadState = 'ready';
+            state.romanizationSource = existing.strategy || 'local';
+            return Promise.resolve(existing);
+        }
+
+        if (romanizerLoadPromise) return romanizerLoadPromise;
+
+        state.romanizationLoadState = 'loading';
+        state.romanizationLoadError = '';
+
+        romanizerLoadPromise = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.async = true;
+            script.src = romanizerAssetUrl();
+            script.dataset.akRomanizerLoader = '1';
+
+            let settled = false;
+            const cleanup = () => {
+                if (script.parentNode) script.parentNode.removeChild(script);
+            };
+            const finish = (error, loaded = null) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                cleanup();
+                if (error) reject(error);
+                else resolve(loaded);
+            };
+            const timeoutId = setTimeout(() => {
+                finish(new Error('Romanizer asset load timed out'));
+            }, ROMANIZER_LOAD_TIMEOUT_MS);
+
+            script.onload = () => {
+                const loaded = getRomanizer();
+                if (!loaded) {
+                    finish(new Error('Romanizer asset loaded without API'));
+                    return;
+                }
+                finish(null, loaded);
+            };
+            script.onerror = () => finish(new Error('Romanizer asset failed to load'));
+
+            (document.head || document.documentElement).appendChild(script);
+        }).then(romanizer => {
+            state.romanizationLoadState = 'ready';
+            state.romanizationLoadError = '';
+            state.romanizationSource = romanizer.strategy || 'local';
+            return romanizer;
+        }).catch(error => {
+            state.romanizationLoadState = 'error';
+            state.romanizationLoadError = String(error && error.message || error);
+            romanizerLoadPromise = null;
+            throw error;
+        });
+
+        return romanizerLoadPromise;
+    }
+
+    function romanizeCached(text) {
+        const value = String(text == null ? '' : text);
+        if (!value) return value;
+
+        if (state.romanizationCache.has(value)) {
+            const cached = state.romanizationCache.get(value);
+            /* Refresh recency on hits so the bounded cache behaves as LRU
+             * instead of evicting frequently reused chorus lines by age. */
+            state.romanizationCache.delete(value);
+            state.romanizationCache.set(value, cached);
+            return cached;
+        }
+
+        const romanizer = getRomanizer();
+        if (!romanizer) return value;
+
+        let result = value;
+        try {
+            const converted = romanizer.romanize(value);
+            if (typeof converted === 'string' && converted.length) {
+                result = converted;
+            }
+        } catch {
+            result = value;
+        }
+
+        if (state.romanizationCache.has(value)) {
+            state.romanizationCache.delete(value);
+        }
+        state.romanizationCache.set(value, result);
+        while (state.romanizationCache.size > ROMANIZATION_CACHE_MAX_ENTRIES) {
+            const oldest = state.romanizationCache.keys().next();
+            if (oldest.done) break;
+            state.romanizationCache.delete(oldest.value);
+        }
+        return result;
+    }
+
+    function cloneCueWithPositions(cue, position, endPosition) {
+        const clone = Object.assign({}, cue || {});
+        clone.Position = position;
+        clone.position = position;
+        clone.EndPosition = endPosition;
+        clone.endPosition = endPosition;
+        return clone;
+    }
+
+    function cloneLyricWithDisplay(lyric, text, cues) {
+        const clone = Object.assign({}, lyric || {});
+        clone.Text = text;
+        clone.text = text;
+        if (Array.isArray(cues)) {
+            clone.Cues = cues;
+            clone.cues = cues;
+        }
+        return clone;
+    }
+
+    function romanizedBoundaryStart(sourceText, sourceIndex, convertedLine) {
+        const index = Math.max(0, Math.min(sourceText.length, Number(sourceIndex) || 0));
+        if (index <= 0) return 0;
+        if (index >= sourceText.length) return convertedLine.length;
+
+        /*
+         * Bias inserted transliteration separators toward the cue that begins
+         * after the source boundary. For example 你好 -> "ni hao": the second
+         * cue starts at 3 (after the generated space), while the first ends at
+         * 2. Romanizing the complete line first also preserves word context for
+         * Indic schwa/nasal/conjunct rules instead of transliterating each cue
+         * as an isolated fragment.
+         */
+        const romanizer = getRomanizer();
+        if (romanizer && typeof romanizer.mapBoundary === 'function') {
+            try {
+                const mapped = Number(romanizer.mapBoundary(sourceText, index, 'start'));
+                if (Number.isFinite(mapped)) {
+                    return Math.max(0, Math.min(convertedLine.length, mapped));
+                }
+            } catch {
+                // Fall through to the generic prefix/suffix boundary strategy.
+            }
+        }
+
+        const suffix = romanizeCached(sourceText.slice(index));
+        return Math.max(0, Math.min(
+            convertedLine.length,
+            convertedLine.length - suffix.length
+        ));
+    }
+
+    function romanizedBoundaryEnd(sourceText, sourceIndex, convertedLine) {
+        const index = Math.max(0, Math.min(sourceText.length, Number(sourceIndex) || 0));
+        if (index <= 0) return 0;
+        if (index >= sourceText.length) return convertedLine.length;
+
+        /* Keep generated separators after the cue that just ended. */
+        const romanizer = getRomanizer();
+        if (romanizer && typeof romanizer.mapBoundary === 'function') {
+            try {
+                const mapped = Number(romanizer.mapBoundary(sourceText, index, 'end'));
+                if (Number.isFinite(mapped)) {
+                    return Math.max(0, Math.min(convertedLine.length, mapped));
+                }
+            } catch {
+                // Fall through to the generic prefix boundary strategy.
+            }
+        }
+
+        const prefix = romanizeCached(sourceText.slice(0, index));
+        return Math.max(0, Math.min(convertedLine.length, prefix.length));
+    }
+
+    function romanizedLyricView(lyric) {
+        if (!lyric) return lyric;
+
+        const romanizer = getRomanizer();
+        const profile = lyricTextProfile(lyric);
+        const marker = profile.positionOffset > 0
+            ? profile.rawText.slice(0, profile.positionOffset)
+            : '';
+        const sourceText = profile.text;
+        if (!romanizer || !romanizer.canRomanize(sourceText)) return lyric;
+
+        /*
+         * Romanize the complete lyric line exactly once.  ELRC cues are source
+         * character ranges, so re-map their boundaries into the completed
+         * Latin line instead of transliterating cue fragments independently.
+         * That preserves conjunct, nasal, schwa and neighbouring-word context
+         * while leaving every cue timestamp untouched.
+         */
+        const convertedLine = romanizeCached(sourceText);
+        if (!convertedLine || convertedLine === sourceText) return lyric;
+
+        const rawCues = lyricValue(lyric, 'Cues', 'cues');
+        if (!Array.isArray(rawCues) || !rawCues.length) {
+            state.romanizationLineCount += 1;
+            return cloneLyricWithDisplay(lyric, marker + convertedLine, rawCues);
+        }
+
+        const sorted = rawCues.slice().sort((a, b) =>
+            (Number(cueValue(a, 'Position', 'position')) || 0)
+            - (Number(cueValue(b, 'Position', 'position')) || 0)
+        );
+
+        const convertedCues = sorted.map(cue => {
+            let start = Number(cueValue(cue, 'Position', 'position'));
+            let end = Number(cueValue(cue, 'EndPosition', 'endPosition'));
+            if (!Number.isFinite(start)) start = profile.positionOffset;
+            if (!Number.isFinite(end)) end = start;
+            start = Math.max(0, Math.min(sourceText.length, start - profile.positionOffset));
+            end = Math.max(start, Math.min(sourceText.length, end - profile.positionOffset));
+
+            return cloneCueWithPositions(
+                cue,
+                profile.positionOffset + romanizedBoundaryStart(sourceText, start, convertedLine),
+                profile.positionOffset + romanizedBoundaryEnd(sourceText, end, convertedLine)
+            );
+        });
+
+        state.romanizationLineCount += 1;
+        return cloneLyricWithDisplay(lyric, marker + convertedLine, convertedCues);
+    }
+
+    function displayLyricForCurrentMode(lyric) {
+        if (
+            state.romanizationMode === 'romanized'
+            && state.romanizationAvailable
+        ) {
+            return romanizedLyricView(lyric);
+        }
+        return lyric;
+    }
+
+    function removeLyricsToolsHostIfEmpty() {
+        const host = state.lyricToolsHost;
+        if (!host || !host.isConnected) {
+            state.lyricToolsHost = null;
+            return;
+        }
+        if (!host.children.length && host.parentNode) {
+            host.parentNode.removeChild(host);
+            state.lyricToolsHost = null;
+        }
+    }
+
+    function ensureLyricsToolsHost() {
+        if (!state.lyrics || !isLyricsPage()) return null;
+        const page = getCurrentLyricPage();
+        if (!page) return null;
+
+        let host = state.lyricToolsHost;
+        if (!host || !host.isConnected) {
+            host = document.createElement('div');
+            host.className = 'ak-lyrics-tools';
+            host.dataset.akLyricsTools = '1';
+            host.setAttribute('role', 'group');
+            host.setAttribute('aria-label', 'Lyric display controls');
+            page.appendChild(host);
+            state.lyricToolsHost = host;
+        } else if (host.parentNode !== page) {
+            page.appendChild(host);
+        }
+        return host;
+    }
+
+    function formatTimingOffset(seconds = state.timingOffsetSeconds) {
+        const value = Math.abs(seconds) < 0.0001 ? 0 : seconds;
+        const sign = value >= 0 ? '+' : '-';
+        return `${sign}${Math.abs(value).toFixed(1)}s`;
+    }
+
+    function updateTimingControlsUi() {
+        const controls = state.timingControls;
+        if (!controls) return;
+        const display = controls.querySelector('#lyrics-timing-display');
+        const minus = controls.querySelector('#lyrics-timing-minus-btn');
+        const plus = controls.querySelector('#lyrics-timing-plus-btn');
+        const reset = controls.querySelector('#lyrics-timing-reset-btn');
+        const value = clampTimingOffsetSeconds(state.timingOffsetSeconds);
+
+        if (display) {
+            display.textContent = formatTimingOffset(value);
+            display.setAttribute(
+                'aria-label',
+                `Lyric timing offset ${formatTimingOffset(value)}`
+            );
+        }
+        if (minus) minus.disabled = value <= TIMING_OFFSET_MIN_SECONDS + 0.001;
+        if (plus) plus.disabled = value >= TIMING_OFFSET_MAX_SECONDS - 0.001;
+        if (reset) reset.disabled = Math.abs(value) < 0.0001;
+        controls.dataset.akTimingOffset = value.toFixed(1);
+    }
+
+    function invalidateTimingPaintState() {
+        state.lastActiveLine = -999;
+        state.lastActiveLineSignature = '';
+        state.activeLineIndexes = [];
+        state.forceNextFrame = true;
+        (state.lineData || []).forEach(line => {
+            (line.words || []).forEach(word => {
+                word.visualProgress = NaN;
+                word.lastPaintAt = 0;
+                word._akStaticState = '';
+                word._akProgressBucket = -1;
+                resetWordMotion(word);
+            });
+        });
+        wakeAnimationLoop();
+    }
+
+    function setTimingOffsetSeconds(value, persist = true) {
+        const normalized = clampTimingOffsetSeconds(value);
+        if (Math.abs(normalized - state.timingOffsetSeconds) < 0.0001) {
+            updateTimingControlsUi();
+            return {
+                seconds: state.timingOffsetSeconds,
+                display: formatTimingOffset(),
+                songKey: state.songPreferenceKey
+            };
+        }
+
+        state.timingOffsetSeconds = normalized;
+        state.timingOffsetChangeCount += 1;
+        if (persist) persistCurrentSongPreference();
+        invalidateTimingPaintState();
+        updateTimingControlsUi();
+        return {
+            seconds: state.timingOffsetSeconds,
+            display: formatTimingOffset(),
+            songKey: state.songPreferenceKey
+        };
+    }
+
+    function adjustTimingOffsetSeconds(delta) {
+        return setTimingOffsetSeconds(
+            state.timingOffsetSeconds + finiteNumber(delta, 0),
+            true
+        );
+    }
+
+    function removeTimingControls() {
+        const controls = state.timingControls;
+        if (controls && controls.parentNode) {
+            controls.parentNode.removeChild(controls);
+        }
+        state.timingControls = null;
+        removeLyricsToolsHostIfEmpty();
+    }
+
+    function createTimingButton(id, title, symbol, label) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.id = id;
+        button.className = 'btn-icon ak-lyrics-timing-btn';
+        button.title = title;
+        button.setAttribute('aria-label', label);
+        const glyph = document.createElement('span');
+        glyph.className = 'ak-timing-glyph';
+        glyph.setAttribute('aria-hidden', 'true');
+        glyph.textContent = symbol;
+        button.appendChild(glyph);
+        return button;
+    }
+
+    function ensureTimingControls() {
+        if (!state.lyrics || !isLyricsPage()) {
+            removeTimingControls();
+            return null;
+        }
+
+        const host = ensureLyricsToolsHost();
+        if (!host) return null;
+
+        let controls = state.timingControls;
+        if (!controls || !controls.isConnected) {
+            controls = document.createElement('div');
+            controls.className = 'lyrics-timing-controls ak-lyrics-timing-controls';
+            controls.dataset.akOwned = '1';
+            controls.setAttribute('role', 'group');
+            controls.setAttribute('aria-label', 'Lyrics timing offset');
+
+            const minus = createTimingButton(
+                'lyrics-timing-minus-btn',
+                'Decrease delay (lyrics earlier) -0.5s',
+                '−',
+                'Lyrics earlier by 0.5 seconds'
+            );
+            const display = document.createElement('span');
+            display.id = 'lyrics-timing-display';
+            display.className = 'lyrics-timing-display';
+            display.title = 'Current timing offset';
+            display.setAttribute('aria-live', 'polite');
+
+            const plus = createTimingButton(
+                'lyrics-timing-plus-btn',
+                'Increase delay (lyrics later) +0.5s',
+                '+',
+                'Lyrics later by 0.5 seconds'
+            );
+            const reset = createTimingButton(
+                'lyrics-timing-reset-btn',
+                'Reset timing offset',
+                '↺',
+                'Reset lyrics timing offset'
+            );
+            reset.classList.add('ak-timing-reset-btn');
+
+            minus.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                adjustTimingOffsetSeconds(-TIMING_OFFSET_STEP_SECONDS);
+            });
+            plus.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                adjustTimingOffsetSeconds(TIMING_OFFSET_STEP_SECONDS);
+            });
+            reset.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setTimingOffsetSeconds(0, true);
+            });
+
+            controls.appendChild(minus);
+            controls.appendChild(display);
+            controls.appendChild(plus);
+            controls.appendChild(reset);
+            host.appendChild(controls);
+            state.timingControls = controls;
+        } else if (controls.parentNode !== host) {
+            host.appendChild(controls);
+        }
+
+        updateTimingControlsUi();
+        return controls;
+    }
+
+    function removeRomanizationToggle() {
+        const button = state.romanizationToggle;
+        if (button && button.parentNode) {
+            button.parentNode.removeChild(button);
+        }
+        state.romanizationToggle = null;
+        removeLyricsToolsHostIfEmpty();
+    }
+
+    function updateRomanizationToggleUi() {
+        const button = state.romanizationToggle;
+        if (!button) return;
+        const active = state.romanizationMode === 'romanized';
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        button.dataset.akRomanizationMode = active ? 'romanized' : 'native';
+        button.title = active
+            ? 'Show native lyrics'
+            : 'Show romanized lyrics';
+
+        const label = button.querySelector('.ak-romanization-label');
+        if (label) label.textContent = active ? 'Romanized' : 'Romanize';
+    }
+
+    function ensureRomanizationToggle() {
+        if (!state.romanizationAvailable || !isLyricsPage()) {
+            removeRomanizationToggle();
+            return null;
+        }
+
+        const host = ensureLyricsToolsHost();
+        if (!host) return null;
+
+        let button = state.romanizationToggle;
+        if (!button || !button.isConnected) {
+            button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ak-romanization-toggle';
+            button.setAttribute('aria-label', 'Toggle lyric romanization');
+
+            const icon = document.createElement('span');
+            icon.className = 'ak-romanization-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = 'Aa';
+
+            const label = document.createElement('span');
+            label.className = 'ak-romanization-label';
+
+            button.appendChild(icon);
+            button.appendChild(label);
+            button.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setRomanizationMode(
+                    state.romanizationMode === 'romanized'
+                        ? 'native'
+                        : 'romanized'
+                );
+            });
+
+            /* Romanize is always the first tool. The only other visible
+             * LyricMotion control group is the existing timing offset. */
+            host.insertBefore(button, host.firstChild || null);
+            state.romanizationToggle = button;
+        } else if (button.parentNode !== host) {
+            host.insertBefore(button, host.firstChild || null);
+        }
+
+        updateRomanizationToggleUi();
+        return button;
+    }
+
+    function redecorateForRomanization() {
+        state.romanizationLineCount = 0;
+        state.lastActiveLine = -999;
+        state.lastActiveLineSignature = '';
+        state.forceNextFrame = true;
+
+        if (state.lyrics && isLyricsPage()) {
+            if (!decorateExistingLines()) queueDecoration();
+        }
+        ensureRomanizationToggle();
+        wakeAnimationLoop();
+    }
+
+    function setRomanizationMode(mode) {
+        const normalized = mode === 'romanized' ? 'romanized' : 'native';
+        if (normalized === 'romanized' && !state.romanizationAvailable) {
+            return {
+                mode: state.romanizationMode,
+                available: false
+            };
+        }
+
+        if (state.romanizationMode !== normalized) {
+            state.romanizationMode = normalized;
+            state.romanizationToggleCount += 1;
+            persistCurrentSongPreference();
+            redecorateForRomanization();
+        } else {
+            updateRomanizationToggleUi();
+        }
+
+        return {
+            mode: state.romanizationMode,
+            available: state.romanizationAvailable
+        };
+    }
+
+    function prepareRomanizationForLyrics() {
+        const lyrics = state.lyrics;
+        const generation = state.generation;
+        const nativeCandidate = lyricsHaveNativeScript(lyrics);
+
+        state.romanizationCache.clear();
+        state.romanizationCandidate = nativeCandidate;
+        state.romanizationAvailable = false;
+        state.romanizationLineCount = 0;
+        removeRomanizationToggle();
+
+        if (!nativeCandidate) {
+            if (state.romanizationMode === 'romanized') {
+                state.romanizationMode = 'native';
+                persistCurrentSongPreference();
+            }
+            state.romanizationLoadState = getRomanizer() ? 'ready' : 'idle';
+            state.romanizationSource = 'none';
+            return;
+        }
+
+        ensureRomanizerLoaded().then(romanizer => {
+            if (generation !== state.generation || lyrics !== state.lyrics) return;
+
+            const localAvailable = (lyrics || []).some(lyric => {
+                const profile = lyricTextProfile(lyric);
+                return romanizer.canRomanize(profile.text);
+            });
+            state.romanizationAvailable = localAvailable;
+            state.romanizationSource = localAvailable
+                ? (romanizer.strategy || 'local-offline')
+                : 'unsupported-script';
+
+            if (!localAvailable) {
+                if (state.romanizationMode === 'romanized') {
+                    state.romanizationMode = 'native';
+                    persistCurrentSongPreference();
+                }
+                removeRomanizationToggle();
+                return;
+            }
+
+            ensureRomanizationToggle();
+            if (state.romanizationMode === 'romanized') {
+                redecorateForRomanization();
+            }
+        }).catch(error => {
+            if (generation !== state.generation || lyrics !== state.lyrics) return;
+            state.romanizationLoadError = String(error && error.message || error);
+            state.romanizationAvailable = false;
+            state.romanizationSource = 'local-asset-unavailable';
+            if (state.romanizationMode === 'romanized') {
+                state.romanizationMode = 'native';
+                persistCurrentSongPreference();
+            }
+            warn('Romanization unavailable:', error && error.message || error);
+            removeRomanizationToggle();
+        });
+    }
+
+    loadSongPreferences();
 
     function finiteTick(value) {
         const numeric = Number(value);
@@ -2007,19 +4077,24 @@
     }
 
     function decorateLine(lineElement, lyric, lineIndex) {
-        const textProfile = lyricTextProfile(lyric);
+        const displayLyric = displayLyricForCurrentMode(lyric);
+        const textProfile = lyricTextProfile(displayLyric);
         const rawText = textProfile.rawText;
         const text = textProfile.text;
         const positionOffset = textProfile.positionOffset;
         const isBackgroundVocal =
             textProfile.isBackgroundVocal;
-        const rawCues = lyricValue(lyric, 'Cues', 'cues');
+        const backgroundVocalRoleSource =
+            textProfile.backgroundVocalRoleSource;
+        const rawCues = lyricValue(displayLyric, 'Cues', 'cues');
         const cues = Array.isArray(rawCues)
             ? rawCues.slice().sort((a, b) =>
                 (cueValue(a, 'Position', 'position') || 0) -
                 (cueValue(b, 'Position', 'position') || 0))
             : [];
 
+        lineElement.style.removeProperty('visibility');
+        lineElement.removeAttribute('aria-hidden');
         lineElement.classList.add('ak-enhanced-line');
         lineElement.classList.toggle('ak-word-synced', cues.length > 0);
         lineElement.classList.toggle('ak-line-synced', cues.length === 0);
@@ -2028,25 +4103,39 @@
             isBackgroundVocal
         );
         lineElement.classList.remove(
-            'ak-has-atomic-script'
+            'ak-bg-lane-center',
+            'ak-bg-lane-inset-start',
+            'ak-bg-lane-inset-end',
+            'ak-bg-enter-from-start',
+            'ak-bg-enter-from-end'
         );
-        lineElement.dataset.akLineIndex = String(lineIndex);
+        delete lineElement.dataset.akBackgroundLane;
+        delete lineElement.dataset.akBackgroundEntry;
+        lineElement.classList.remove(
+            'ak-has-shaped-script'
+        );
+        lineElement.dataset.akGeneration = String(state.generation);
         lineElement.dataset.akVocalRole =
             isBackgroundVocal
                 ? 'background'
                 : 'main';
-        lineElement.setAttribute(
-            'aria-label',
-            isBackgroundVocal
-                ? `${text} (background vocal)`
-                : text
-        );
-        lineElement.replaceChildren();
+        if (backgroundVocalRoleSource) {
+            lineElement.dataset.akVocalRoleSource =
+                backgroundVocalRoleSource;
+        } else {
+            delete lineElement.dataset.akVocalRoleSource;
+        }
+        const lineDirection = firstStrongDirection(text);
+        lineElement.setAttribute('dir', lineDirection);
+
+        /* Keep screen-reader output in the song's language; vocal role stays data. */
+        lineElement.setAttribute('aria-label', text);
+        replaceChildrenCompat(lineElement);
 
         if (!cues.length) {
             lineElement.appendChild(createUntimedSpan(text));
             const bounds = calculateLineBounds(
-                lyric,
+                displayLyric,
                 lineIndex,
                 [],
                 [],
@@ -2054,12 +4143,15 @@
             );
             return {
                 element: lineElement,
-                lyric,
+                displayLyric,
+                lineIndex,
+                text,
                 cues: [],
                 words: [],
                 startTicks: bounds.startTicks,
                 endTicks: bounds.endTicks,
-                isBackgroundVocal
+                isBackgroundVocal,
+                backgroundVocalRoleSource
             };
         }
 
@@ -2163,23 +4255,22 @@
         const words = buildWordRecords(text, lineIndex, cueRecords);
         classifyWordMotion(words);
 
-        const hasAtomicScript =
+        const hasShapedScript =
             words.some(
                 word =>
-                    word.paintMode === 'atomic'
+                    word.paintMode === 'shaped'
             );
 
         lineElement.classList.toggle(
-            'ak-has-atomic-script',
-            hasAtomicScript
+            'ak-has-shaped-script',
+            hasShapedScript
         );
 
         /*
-         * Render exactly one shaped span per whitespace-delimited word.
-         * Spaces/punctuation between words remain normal text spans.
-         *
-         * This means Malayalam/Devanagari/Latin shaping happens at WORD scope,
-         * while cue timing remains available as invisible progress segments.
+         * Render exactly one shaped span per source word/token. Space-delimited
+         * scripts keep word scope; CJK/Thai/Lao/Khmer/Myanmar can preserve the
+         * exact ELRC cue token boundaries when the source provides them.
+         * Cue timing remains available as progress segments inside each span.
          */
         let textCursor = 0;
 
@@ -2200,10 +4291,8 @@
             );
         }
 
-        words.forEach(prepareWordGeometry);
-
         const bounds = calculateLineBounds(
-            lyric,
+            displayLyric,
             lineIndex,
             words,
             cues,
@@ -2212,18 +4301,123 @@
 
         return {
             element: lineElement,
-            lyric,
+            displayLyric,
+            lineIndex,
+            text,
             cues: cueRecords,
             words,
             startTicks: bounds.startTicks,
             endTicks: bounds.endTicks,
-            isBackgroundVocal
+            isBackgroundVocal,
+            backgroundVocalRoleSource
+        };
+    }
+
+    function backgroundVocalLaneForOrdinal(ordinal) {
+        const safeOrdinal = Math.max(
+            0,
+            Math.floor(Number(ordinal) || 0)
+        );
+
+        return BACKGROUND_VOCAL_LANE_PATTERN[
+            safeOrdinal
+                % BACKGROUND_VOCAL_LANE_PATTERN.length
+        ];
+    }
+
+    function applyBackgroundVocalLane(
+        lineRecord,
+        ordinal
+    ) {
+        if (
+            !lineRecord
+            || !lineRecord.isBackgroundVocal
+            || !lineRecord.element
+        ) {
+            return null;
+        }
+
+        const lane =
+            backgroundVocalLaneForOrdinal(
+                ordinal
+            );
+
+        lineRecord.backgroundVocalLane = lane;
+        const entryDirection =
+            safeBackgroundVocalEntryDirection(
+                ordinal
+            );
+        lineRecord.backgroundVocalEntryDirection =
+            entryDirection;
+        lineRecord.element.dataset.akBackgroundLane = lane;
+        lineRecord.element.dataset.akBackgroundEntry =
+            entryDirection;
+        lineRecord.element.classList.add(
+            `ak-bg-lane-${lane}`,
+            `ak-bg-enter-from-${entryDirection}`
+        );
+
+        return lane;
+    }
+
+    function safeBackgroundVocalEntryDirection(
+        ordinal
+    ) {
+        const safeOrdinal = Math.max(
+            0,
+            Math.floor(Number(ordinal) || 0)
+        );
+
+        return safeOrdinal % 4 < 2
+            ? 'start'
+            : 'end';
+    }
+
+    function inspectBackgroundVocals() {
+        const lines = state.lineData
+            .filter(line => line.isBackgroundVocal)
+            .map(line => ({
+                lineIndex: line.lineIndex,
+                text: line.text,
+                lane: line.backgroundVocalLane,
+                entryFrom:
+                    line.backgroundVocalEntryDirection,
+                roleSource:
+                    line.backgroundVocalRoleSource,
+                startSeconds:
+                    Number(
+                        (
+                            line.startTicks
+                            / TICKS_PER_SECOND
+                        ).toFixed(3)
+                    ),
+                endSeconds:
+                    Number(
+                        (
+                            line.endTicks
+                            / TICKS_PER_SECOND
+                        ).toFixed(3)
+                    )
+            }));
+
+        return {
+            detected: lines.length,
+            marker:
+                '[ak:bg] (legacy U+2063 U+2060 accepted)',
+            sequence:
+                BACKGROUND_VOCAL_LANE_PATTERN
+                    .slice(),
+            lines,
+            cacheHint:
+                lines.length
+                    ? null
+                    : 'No x-bg role reached the renderer. Reconvert with preview.4; complete parenthetical responses are also recovered when Jellyfin stripped the old marker.'
         };
     }
 
     function decorateExistingLines() {
         if (!state.lyrics || !isLyricsPage()) return false;
-        const container = document.querySelector('.lyricsContainer');
+        const container = getCurrentLyricsContainer(false);
         if (!container) return false;
 
         const lines = Array.from(container.querySelectorAll('.lyricsLine'));
@@ -2231,19 +4425,10 @@
 
         const count = Math.min(lines.length, state.lyrics.length);
         state.lineData = [];
-        state.atomicWordCount = 0;
+        state.shapedWordCount = 0;
         state.scriptProfileCounts = {};
         state.backgroundVocalCount = 0;
-
-        state.tvStockTimingObserved =
-            lines.some(line =>
-                line.classList.contains(
-                    'pastLyric'
-                )
-                || line.classList.contains(
-                    'futureLyric'
-                )
-            );
+        state.romanizationLineCount = 0;
 
         for (let i = 0; i < count; i += 1) {
             const lineRecord =
@@ -2256,6 +4441,10 @@
             state.lineData.push(lineRecord);
 
             if (lineRecord.isBackgroundVocal) {
+                applyBackgroundVocalLane(
+                    lineRecord,
+                    state.backgroundVocalCount
+                );
                 state.backgroundVocalCount += 1;
             }
 
@@ -2274,8 +4463,8 @@
                         )
                         + 1;
 
-                    if (word.paintMode === 'atomic') {
-                        state.atomicWordCount += 1;
+                    if (word.paintMode === 'shaped') {
+                        state.shapedWordCount += 1;
                     }
                 });
         }
@@ -2296,17 +4485,22 @@
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
-        resetTvActivationState(false);
 
         container.classList.add('ak-karaoke-container');
+        container.classList.toggle(
+            'ak-romanized-mode',
+            state.romanizationMode === 'romanized'
+                && state.romanizationAvailable
+        );
+        ensureRomanizationToggle();
+        ensureTimingControls();
 
         applyAccentTheme();
         applyPerformanceProfile(false);
+        /* Geometry is measured once after all lyric DOM has been decorated.
+         * FontFaceSet hooks below schedule another pass only if fonts actually
+         * finish loading later. Avoid synchronous per-line layout reads here. */
         queueMotionGeometryRefresh();
-
-        if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(queueMotionGeometryRefresh).catch(() => {});
-        }
 
         ensureAnimationLoop();
         return true;
@@ -2314,14 +4508,87 @@
 
     let decorateTimer = 0;
 
+    function cancelDecorationRetry(
+        resetWindow = true
+    ) {
+        if (decorateTimer) {
+            clearTimeout(decorateTimer);
+            decorateTimer = 0;
+        }
+
+        if (resetWindow) {
+            state.decorationRetryStartedAt = 0;
+            state.decorationRetryCount = 0;
+        }
+    }
+
+    function runDecorationAttempt() {
+        decorateTimer = 0;
+
+        if (
+            document.hidden
+            || !state.lyrics
+            || !isLyricsPage()
+        ) {
+            cancelDecorationRetry(true);
+            return;
+        }
+
+        if (decorateExistingLines()) {
+            cancelDecorationRetry(true);
+            return;
+        }
+
+        const now = performance.now();
+
+        if (!state.decorationRetryStartedAt) {
+            state.decorationRetryStartedAt = now;
+        }
+
+        if (
+            now - state.decorationRetryStartedAt
+                >= DECORATION_RETRY_WINDOW_MS
+        ) {
+            state.decorationRetryExpiredCount += 1;
+            cancelDecorationRetry(true);
+            warn(
+                'Lyrics DOM did not become ready before the decoration retry window expired.'
+            );
+            return;
+        }
+
+        state.decorationRetryCount += 1;
+        decorateTimer = window.setTimeout(
+            runDecorationAttempt,
+            DECORATION_RETRY_MS
+        );
+    }
+
     function queueDecoration() {
-        clearTimeout(decorateTimer);
-        decorateTimer = window.setTimeout(() => {
-            if (!decorateExistingLines()) {
-                clearTimeout(decorateTimer);
-                decorateTimer = window.setTimeout(decorateExistingLines, 120);
-            }
-        }, 0);
+        if (
+            document.hidden
+            || !state.lyrics
+            || !isLyricsPage()
+        ) {
+            cancelDecorationRetry(true);
+            return false;
+        }
+
+        if (!state.decorationRetryStartedAt) {
+            state.decorationRetryStartedAt =
+                performance.now();
+        }
+
+        if (decorateTimer) {
+            clearTimeout(decorateTimer);
+        }
+
+        decorateTimer = window.setTimeout(
+            runDecorationAttempt,
+            0
+        );
+
+        return true;
     }
 
     function isMobileEnvironment() {
@@ -2348,7 +4615,6 @@
                 stored === 'auto'
                 || stored === 'desktop'
                 || stored === 'mobile'
-                || stored === 'tv'
                 || stored === 'eco'
             ) {
                 return stored;
@@ -2368,39 +4634,11 @@
             return state.performanceMode;
         }
 
-        if (isWebOsEnvironment()) {
-            return 'tv';
-        }
-
         if (isMobileEnvironment()) {
             return 'mobile';
         }
 
-        const cores =
-            Number(
-                navigator.hardwareConcurrency
-            );
-
-        const memory =
-            Number(
-                navigator.deviceMemory
-            );
-
-        if (
-            (
-                Number.isFinite(cores)
-                && cores > 0
-                && cores <= 2
-            )
-            || (
-                Number.isFinite(memory)
-                && memory > 0
-                && memory <= 2
-            )
-        ) {
-            return 'eco';
-        }
-
+        /* Eco is now explicit only; auto never weakens the visual renderer. */
         return 'desktop';
     }
 
@@ -2410,7 +4648,6 @@
         for (const name of [
             'desktop',
             'mobile',
-            'tv',
             'eco'
         ]) {
             page.classList.remove(
@@ -2435,28 +4672,24 @@
         if (
             previous !== state.performanceProfile
         ) {
-            finishTvCompositorHandoff();
-            resetTvActivationState(true);
             state.lastRenderedFrameAt = 0;
+
+            /* Profile-sized atmosphere rasters must be rebuilt after a real
+             * desktop/mobile/eco profile change. */
+            invalidateAtmosphereLoads(
+                'performance-profile-change'
+            );
+            state.atmosphereMediaKey = '';
+            state.atmosphereLastCheck = 0;
         }
 
         const page =
-            document.querySelector(
-                '.lyricPage'
-            );
+            isLyricsPage()
+                ? getCurrentLyricPage()
+                : null;
 
         applyPerformanceClassToPage(page);
         applyAccentTheme();
-
-        if (
-            state.atmosphereRoot
-            && state.atmosphereRoot.isConnected
-        ) {
-            state.atmosphereRoot.classList.toggle(
-                'ak-atmosphere-tv',
-                state.performanceProfile === 'tv'
-            );
-        }
 
         if (
             refreshGeometry
@@ -2477,12 +4710,11 @@
             normalized !== 'auto'
             && normalized !== 'desktop'
             && normalized !== 'mobile'
-            && normalized !== 'tv'
             && normalized !== 'eco'
         ) {
             throw new Error(
                 'Performance mode must be: '
-                + '"auto", "desktop", "mobile", "tv", or "eco".'
+                + '"auto", "desktop", "mobile", or "eco".'
             );
         }
 
@@ -2515,20 +4747,12 @@
         glyphCount
     ) {
         if (
-            state.performanceProfile === 'tv'
-            || state.performanceProfile === 'eco'
+            state.performanceProfile === 'eco'
         ) {
             return false;
         }
 
-        if (
-            state.performanceProfile === 'mobile'
-            && glyphCount > 4
-        ) {
-            return false;
-        }
-
-        return true;
+        return Number(glyphCount) > 0;
     }
 
     function getTargetFrameInterval(media) {
@@ -2605,19 +4829,10 @@
         return 'balanced';
     }
 
-    function isWebOsEnvironment() {
-        const ua =
-            String(
-                navigator.userAgent || ''
-            ).toLowerCase();
-
-        return ua.includes('web0s')
-            || ua.includes('webos')
-            || ua.includes('netcast');
-    }
 
     function getAtmospherePage() {
-        return document.querySelector('.lyricPage');
+        if (!isLyricsPage()) return null;
+        return getCurrentLyricPage();
     }
 
     function ensureAtmosphereRoot() {
@@ -2638,11 +4853,12 @@
         }
 
         const old =
-            page.querySelector(
-                ':scope > .ak-atmosphere'
+            directChildByClass(
+                page,
+                'ak-atmosphere'
             );
 
-        if (old) old.remove();
+        removeNodeCompat(old);
 
         const root =
             document.createElement('div');
@@ -2651,12 +4867,6 @@
         root.setAttribute('aria-hidden', 'true');
         root.dataset.akMode =
             state.atmosphereMode;
-
-        if (isWebOsEnvironment()) {
-            root.classList.add(
-                'ak-atmosphere-tv'
-            );
-        }
 
         for (let i = 0; i < 2; i += 1) {
             const scene =
@@ -2706,10 +4916,6 @@
             page
         );
 
-        root.classList.toggle(
-            'ak-atmosphere-tv',
-            state.performanceProfile === 'tv'
-        );
 
         state.atmosphereRoot = root;
 
@@ -2734,8 +4940,20 @@
             );
         }
 
+        const previousMode =
+            state.atmosphereMode;
+
         state.atmosphereMode =
             normalized;
+
+        if (normalized === 'off') {
+            invalidateAtmosphereLoads(
+                'atmosphere-off'
+            );
+        } else if (previousMode === 'off') {
+            state.atmosphereMediaKey = '';
+            state.atmosphereLastCheck = 0;
+        }
 
         try {
             localStorage.setItem(
@@ -2753,6 +4971,9 @@
             root.dataset.akMode =
                 normalized;
         }
+
+        /* Apply a mode change promptly even while playback is paused. */
+        wakeAnimationLoop();
 
         return {
             mode: normalized,
@@ -3406,20 +5627,55 @@
         return `${src}|${lyricKey}`;
     }
 
+    function invalidateAtmosphereLoads(
+        source = 'invalidate'
+    ) {
+        state.atmosphereLoadSeq += 1;
+        state.atmospherePendingKey = '';
+        state.atmospherePendingSince = 0;
+        return source;
+    }
+
     function preloadAtmosphereImage(url) {
         return new Promise(
             (resolve, reject) => {
                 const image =
                     new Image();
 
+                let settled = false;
+
+                const finish = (
+                    callback,
+                    value
+                ) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timeoutId);
+                    image.onload = null;
+                    image.onerror = null;
+                    callback(value);
+                };
+
+                const timeoutId =
+                    window.setTimeout(() => {
+                        state.atmosphereTimeoutCount += 1;
+                        finish(
+                            reject,
+                            new Error(
+                                'Artwork image load timed out.'
+                            )
+                        );
+                    }, ATMOSPHERE_IMAGE_TIMEOUT_MS);
+
                 image.decoding =
                     'async';
 
                 image.onload =
-                    () => resolve(image);
+                    () => finish(resolve, image);
 
                 image.onerror =
-                    () => reject(
+                    () => finish(
+                        reject,
                         new Error(
                             'Artwork image failed to load.'
                         )
@@ -3578,7 +5834,7 @@
         height
     ) {
         /*
-         * Older embedded browsers may not support CanvasRenderingContext2D
+         * Older browsers may not support CanvasRenderingContext2D
          * filters. Multi-stage downsample/upscale creates a smooth light field
          * ONCE per song without leaving a live CSS blur on the GPU.
          */
@@ -3588,9 +5844,9 @@
             );
 
         const tinyLong =
-            state.performanceProfile === 'desktop'
-                ? 38
-                : 28;
+            state.performanceProfile === 'eco'
+                ? 28
+                : 38;
 
         if (width >= height) {
             tiny.width =
@@ -3782,7 +6038,7 @@
                 'multistage-soften';
 
             /*
-             * Chrome/webOS versions that implement canvas filters get a true
+             * Browsers that implement canvas filters get a true
              * one-time prebaked blur. The draw is oversized so blur kernels do
              * not expose transparent/dark edges.
              */
@@ -4040,6 +6296,14 @@
          */
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
+                if (
+                    !isLyricsPage()
+                    || !root.isConnected
+                    || state.atmosphereRoot !== root
+                ) {
+                    return;
+                }
+
                 nextScene.classList.add(
                     'ak-atmosphere-active'
                 );
@@ -4134,6 +6398,14 @@
             return;
         }
 
+        if (
+            !force
+            && key
+            && key === state.atmospherePendingKey
+        ) {
+            return;
+        }
+
         /*
          * Do not hammer a missing art endpoint every animation frame.
          */
@@ -4149,114 +6421,136 @@
 
         state.atmosphereMediaKey =
             key;
+        state.atmospherePendingKey =
+            key;
+        state.atmospherePendingSince =
+            performance.now();
 
         const sequence =
             ++state.atmosphereLoadSeq;
 
-        const candidates = [];
-
-        const direct =
-            mediaItemArtworkCandidate(
-                media
-            );
-
-        if (direct) {
-            candidates.push({
-                url: direct,
-                source: 'media-item-primary'
-            });
-        }
-
-        for (
-            const url
-            of domArtworkCandidates()
-        ) {
+        const finishPending = () => {
             if (
-                !candidates.some(
-                    candidate =>
-                        candidate.url === url
-                )
+                sequence === state.atmosphereLoadSeq
+                && state.atmospherePendingKey === key
             ) {
+                state.atmospherePendingKey = '';
+                state.atmospherePendingSince = 0;
+            }
+        };
+
+        try {
+            const candidates = [];
+
+            const direct =
+                mediaItemArtworkCandidate(
+                    media
+                );
+
+            if (direct) {
                 candidates.push({
-                    url,
-                    source: 'jellyfin-dom-artwork'
+                    url: direct,
+                    source: 'media-item-primary'
                 });
             }
-        }
 
-        for (const candidate of candidates) {
-            try {
-                const image =
-                    await preloadAtmosphereImage(
+            for (
+                const url
+                of domArtworkCandidates()
+            ) {
+                if (
+                    !candidates.some(
+                        candidate =>
+                            candidate.url === url
+                    )
+                ) {
+                    candidates.push({
+                        url,
+                        source: 'jellyfin-dom-artwork'
+                    });
+                }
+            }
+
+            for (const candidate of candidates) {
+                try {
+                    const image =
+                        await preloadAtmosphereImage(
+                            candidate.url
+                        );
+
+                    if (
+                        sequence
+                        !== state.atmosphereLoadSeq
+                        || !isLyricsPage()
+                        || key !== atmosphereMediaKey(media)
+                    ) {
+                        return;
+                    }
+
+                    const extracted =
+                        extractAtmosphereColors(
+                            image
+                        );
+
+                    const colors =
+                        extracted
+                        || fallbackAtmosphereColors();
+
+                    const raster =
+                        createAtmosphereRaster(
+                            image
+                        );
+
+                    activateAtmosphereScene(
+                        raster || null,
+                        colors,
+                        (
+                            extracted
+                                ? `${candidate.source}+canvas-colors`
+                                : `${candidate.source}+accent-colors`
+                        )
+                        + (
+                            raster
+                                ? `+${state.atmosphereRasterMethod}`
+                                : '+premium-color-field'
+                        ),
                         candidate.url
                     );
 
-                if (
-                    sequence
-                    !== state.atmosphereLoadSeq
-                ) {
+                    state.atmosphereFailedKey = '';
                     return;
+                } catch {
+                    // Try the next candidate.
                 }
-
-                const extracted =
-                    extractAtmosphereColors(
-                        image
-                    );
-
-                const colors =
-                    extracted
-                    || fallbackAtmosphereColors();
-
-                const raster =
-                    createAtmosphereRaster(
-                        image
-                    );
-
-                activateAtmosphereScene(
-                    raster || null,
-                    colors,
-                    (
-                        extracted
-                            ? `${candidate.source}+canvas-colors`
-                            : `${candidate.source}+accent-colors`
-                    )
-                    + (
-                        raster
-                            ? `+${state.atmosphereRasterMethod}`
-                            : '+premium-color-field'
-                    ),
-                    candidate.url
-                );
-
-                state.atmosphereFailedKey = '';
-                return;
-            } catch {
-                // Try the next candidate.
             }
+
+            if (
+                sequence
+                !== state.atmosphereLoadSeq
+                || !isLyricsPage()
+                || key !== atmosphereMediaKey(media)
+            ) {
+                return;
+            }
+
+            /*
+             * Even without readable artwork, retain a tasteful colored atmosphere
+             * based on the song's existing stable accent. Lyrics never depend on it.
+             */
+            activateAtmosphereScene(
+                null,
+                fallbackAtmosphereColors(),
+                'accent-fallback'
+            );
+
+            state.atmosphereFailedKey =
+                key;
+
+            state.atmosphereFailedAt =
+                performance.now();
+        } finally {
+            finishPending();
         }
-
-        if (
-            sequence
-            !== state.atmosphereLoadSeq
-        ) {
-            return;
-        }
-
-        /*
-         * Even without readable artwork, retain a tasteful colored atmosphere
-         * based on the song's existing stable accent. Lyrics never depend on it.
-         */
-        activateAtmosphereScene(
-            null,
-            fallbackAtmosphereColors(),
-            'accent-fallback'
-        );
-
-        state.atmosphereFailedKey =
-            key;
-
-        state.atmosphereFailedAt =
-            performance.now();
     }
 
     function maybeRefreshAtmosphere(
@@ -4266,7 +6560,6 @@
         const interval =
             (
                 state.performanceProfile === 'mobile'
-                || state.performanceProfile === 'tv'
                 || state.performanceProfile === 'eco'
             )
                 ? 2000
@@ -4290,10 +6583,6 @@
             root.dataset.akMode =
                 state.atmosphereMode;
 
-            root.classList.toggle(
-                'ak-atmosphere-tv',
-                state.performanceProfile === 'tv'
-            );
         }
 
         refreshAtmosphere(
@@ -4307,34 +6596,123 @@
         });
     }
 
-    function getLocalMediaElement() {
-        if (
-            state.mediaElement
-            && state.mediaElement.isConnected
-        ) {
-            return state.mediaElement;
+    function mediaElementScore(element) {
+        if (!element || !element.isConnected) {
+            return -Infinity;
         }
 
-        const media =
+        let score = 0;
+        const classList = element.classList;
+
+        if (
+            classList
+            && (
+                classList.contains('mediaPlayerAudio')
+                || classList.contains('mediaPlayerVideo')
+            )
+        ) {
+            score += 40;
+        }
+
+        if (element.currentSrc || element.src) {
+            score += 22;
+        }
+
+        if (!element.paused && !element.ended) {
+            score += 18;
+        }
+
+        if (Number(element.readyState) >= 2) {
+            score += 8;
+        }
+
+        if ((Number(element.currentTime) || 0) > 0) {
+            score += 2;
+        }
+
+        if (element === state.mediaElement) {
+            score += 1;
+        }
+
+        return score;
+    }
+
+    function getLocalMediaElement(
+        forceProbe = false
+    ) {
+        const cached =
+            state.mediaElement;
+
+        const now =
+            performance.now();
+
+        if (
+            !forceProbe
+            && cached
+            && cached.isConnected
+            && now < state.mediaProbeAt
+        ) {
+            return cached;
+        }
+
+        state.mediaProbeAt =
+            now + 1000;
+
+        const candidates = [];
+        const addCandidate = element => {
+            if (
+                element
+                && !candidates.includes(element)
+            ) {
+                candidates.push(element);
+            }
+        };
+
+        addCandidate(
             document.querySelector(
                 '.mediaPlayerAudio'
             )
-            || document.querySelector(
+        );
+        addCandidate(
+            document.querySelector(
                 '.mediaPlayerVideo'
             )
-            || Array.from(
-                document.querySelectorAll(
-                    'audio,video'
-                )
-            ).find(
-                element =>
-                    element.currentSrc
-                    || element.src
-            )
-            || null;
+        );
 
-        state.mediaElement =
-            media;
+        Array.from(
+            document.querySelectorAll(
+                'audio,video'
+            )
+        ).forEach(addCandidate);
+
+        if (cached && cached.isConnected) {
+            addCandidate(cached);
+        }
+
+        let media = null;
+        let bestScore = -Infinity;
+
+        candidates.forEach(candidate => {
+            const score =
+                mediaElementScore(candidate);
+
+            if (score > bestScore) {
+                bestScore = score;
+                media = candidate;
+            }
+        });
+
+        if (media !== cached) {
+            state.mediaElement = media;
+            state.mediaProbeAt = now + 1000;
+            state.mediaStartOffsetSource = '';
+            state.mediaStartOffsetTicks = 0;
+            state.mediaSwitchCount += 1;
+            resetPlaybackClock(
+                media,
+                now
+            );
+        }
 
         if (media) {
             ensureMediaWakeHooks(media);
@@ -4372,15 +6750,15 @@
     }
 
     function findLineIndexAtTicks(ticks) {
-        if (!state.lyrics || !state.lyrics.length) return -1;
+        if (!state.lineData || !state.lineData.length) return -1;
 
         let low = 0;
-        let high = state.lyrics.length - 1;
+        let high = state.lineData.length - 1;
         let result = -1;
 
         while (low <= high) {
             const mid = (low + high) >> 1;
-            const start = Number(lyricValue(state.lyrics[mid], 'Start', 'start'));
+            const start = Number(state.lineData[mid].startTicks);
 
             if (Number.isFinite(start) && start <= ticks) {
                 result = mid;
@@ -4393,23 +6771,37 @@
         return result;
     }
 
+    function sameIndexList(left, right) {
+        if (left === right) return true;
+        if (!left || !right || left.length !== right.length) return false;
+
+        for (let index = 0; index < left.length; index += 1) {
+            if (left[index] !== right[index]) return false;
+        }
+
+        return true;
+    }
+
     function findActiveLineIndexesAtTicks(
         ticks,
         presentationLine
     ) {
+        const active =
+            state.activeLineScratch
+            || (state.activeLineScratch = []);
+        active.length = 0;
+
         if (
             presentationLine < 0
             || !state.lineData.length
         ) {
-            return [];
+            return active;
         }
 
         const upper = Math.min(
             presentationLine,
             state.lineData.length - 1
         );
-
-        const active = [];
 
         for (
             let index = upper;
@@ -4438,18 +6830,18 @@
             }
         }
 
+        active.reverse();
+
         if (
             !active.includes(presentationLine)
             && presentationLine >= 0
+            && presentationLine < state.lineData.length
         ) {
-            /*
-             * Host-delayed TV activation may hold a line for a few frames.
-             * Keep that presentation line alive until the synchronized commit.
-             */
+            /* The presentation line is the upper bound, so after reversing the
+             * descending scan it belongs at the end of this ascending list. */
             active.push(presentationLine);
         }
 
-        active.sort((left, right) => left - right);
         return active;
     }
 
@@ -4459,700 +6851,16 @@
         presentationWordTicks,
         timelineTicks
     ) {
-        if (state.performanceProfile !== 'tv') {
-            return timelineTicks;
-        }
-
-        const lineRecord =
-            state.lineData[lineIndex];
-
-        const presentationRecord =
-            state.lineData[presentationLine];
-
-        const sharesPresentationStart =
-            lineRecord
-            && presentationRecord
-            && Number(lineRecord.startTicks)
-                === Number(
-                    presentationRecord.startTicks
-                );
-
-        return (
-            lineIndex === presentationLine
-            || sharesPresentationStart
-        )
-            ? presentationWordTicks
-            : timelineTicks;
-    }
-
-    function getJellyfinLineSnapshot() {
-        let neutralIndex = -1;
-        let neutralCount = 0;
-        let phasedCount = 0;
-
-        for (
-            let index = 0;
-            index < state.lineData.length;
-            index += 1
-        ) {
-            const element =
-                state.lineData[index].element;
-
-            const phased =
-                element.classList.contains(
-                    'pastLyric'
-                )
-                || element.classList.contains(
-                    'futureLyric'
-                );
-
-            if (phased) {
-                phasedCount += 1;
-            } else {
-                neutralIndex = index;
-                neutralCount += 1;
-            }
-        }
-
-        if (phasedCount > 0) {
-            state.tvStockTimingObserved = true;
-        }
-
-        return {
-            index:
-                neutralCount === 1
-                    ? neutralIndex
-                    : -1,
-            neutralCount,
-            phasedCount
-        };
-    }
-
-    function getJellyfinActiveLineIndex() {
-        for (
-            let index = 0;
-            index < state.lineData.length;
-            index += 1
-        ) {
-            const element =
-                state.lineData[index].element;
-
-            if (
-                !element.classList.contains(
-                    'pastLyric'
-                )
-                && !element.classList.contains(
-                    'futureLyric'
-                )
-            ) {
-                return index;
-            }
-        }
-
-        return -1;
-    }
-
-    function resetTvActivationState(
-        forceTimingCommit = false
-    ) {
-        state.tvTimingLine = -1;
-        state.tvPresentationLine = -999;
-        state.tvPendingLine = -1;
-        state.tvPendingSince = 0;
-        state.tvPendingHostFrames = 0;
-        state.tvHostLine = -1;
-        state.tvHostSignalAt = 0;
-        state.tvLastHostPollAt = 0;
-        state.tvFocusedLine = -1;
-        state.tvArmUntil = 0;
-        state.tvVisualTicks = 0;
-        state.tvVisualFrameAt = 0;
-        state.tvVisualDebtMs = 0;
-        state.tvLastActivationWaitMs = 0;
-        state.tvActivationSource =
-            forceTimingCommit
-                ? 'clock-reset'
-                : 'initial';
-        state.tvForceTimingCommit =
-            !!forceTimingCommit;
-
-        if (!forceTimingCommit) {
-            state.tvActivationFallbacks = 0;
-        }
-    }
-
-    function findEnhancedLyricLine(
-        target
-    ) {
-        let element = target;
-
-        while (
-            element
-            && element !== document.documentElement
-        ) {
-            if (
-                element.classList
-                && element.classList.contains(
-                    'lyricsLine'
-                )
-                && element.classList.contains(
-                    'ak-enhanced-line'
-                )
-            ) {
-                return element;
-            }
-
-            element = element.parentElement;
-        }
-
-        return null;
-    }
-
-    function handleTvLyricFocus(
-        event
-    ) {
-        if (
-            state.performanceProfile !== 'tv'
-        ) {
-            return;
-        }
-
-        const element =
-            findEnhancedLyricLine(
-                event && event.target
-            );
-
-        if (!element) {
-            state.tvFocusedLine = -1;
-            return;
-        }
-
-        const lineIndex =
-            Number(
-                element.dataset.akLineIndex
-            );
-
-        if (
-            !Number.isInteger(lineIndex)
-            || lineIndex < 0
-            || lineIndex >= state.lineData.length
-        ) {
-            return;
-        }
-
-        state.tvFocusedLine = lineIndex;
-
-        const hostCurrent =
-            !element.classList.contains(
-                'pastLyric'
-            )
-            && !element.classList.contains(
-                'futureLyric'
-            );
-
-        if (!hostCurrent) {
-            return;
-        }
-
-        state.tvStockTimingObserved = true;
-        state.tvHostLine = lineIndex;
-        state.tvHostSignalAt =
-            performance.now();
-
-        wakeAnimationLoop();
-    }
-
-    function firstTimedTickForLine(
-        lineIndex
-    ) {
-        const line =
-            state.lineData[lineIndex];
-
-        let first = Infinity;
-
-        if (line) {
-            (line.words || [])
-                .forEach(word => {
-                    if (
-                        Number.isFinite(word.start)
-                        && word.start < first
-                    ) {
-                        first = word.start;
-                    }
-                });
-        }
-
-        if (Number.isFinite(first)) {
-            return first;
-        }
-
-        const lyric =
-            state.lyrics
-            && state.lyrics[lineIndex];
-
-        const lineStart =
-            Number(
-                lyricValue(
-                    lyric,
-                    'Start',
-                    'start'
-                )
-            );
-
-        return Number.isFinite(lineStart)
-            ? lineStart
-            : 0;
-    }
-
-    function commitTvPresentationLine(
-        lineIndex,
-        timelineTicks,
-        frameNow,
-        source,
-        armWipe
-    ) {
-        const waited =
-            state.tvPendingSince > 0
-                ? Math.max(
-                    0,
-                    frameNow
-                        - state.tvPendingSince
-                )
-                : 0;
-
-        state.tvPresentationLine = lineIndex;
-        state.tvPendingLine = -1;
-        state.tvPendingSince = 0;
-        state.tvPendingHostFrames = 0;
-        state.tvLastActivationWaitMs =
-            Math.round(waited * 10) / 10;
-        state.tvActivationSource = source;
-        state.tvForceTimingCommit = false;
-
-        const canArm =
-            armWipe
-            && lineIndex >= 0
-            && state.timedCueCount > 0;
-
-        state.tvArmUntil =
-            canArm
-                ? frameNow + TV_FOCUS_ARM_MS
-                : 0;
-
-        state.tvVisualTicks =
-            canArm
-                ? Math.min(
-                    timelineTicks,
-                    firstTimedTickForLine(
-                        lineIndex
-                    )
-                )
-                : timelineTicks;
-
-        state.tvVisualFrameAt = frameNow;
-        state.tvVisualDebtMs =
-            Math.max(
-                0,
-                (
-                    timelineTicks
-                    - state.tvVisualTicks
-                )
-                / 10000
-            );
-    }
-
-    function advanceTvVisualTicks(
-        timelineTicks,
-        frameNow,
-        media
-    ) {
-        if (
-            !Number.isFinite(
-                state.tvVisualTicks
-            )
-        ) {
-            state.tvVisualTicks =
-                timelineTicks;
-        }
-
-        if (
-            timelineTicks
-                < state.tvVisualTicks
-        ) {
-            state.tvVisualTicks =
-                timelineTicks;
-        }
-
-        if (
-            frameNow < state.tvArmUntil
-        ) {
-            state.tvVisualFrameAt = frameNow;
-            state.tvVisualDebtMs =
-                Math.max(
-                    0,
-                    (
-                        timelineTicks
-                        - state.tvVisualTicks
-                    )
-                    / 10000
-                );
-
-            return state.tvVisualTicks;
-        }
-
-        let elapsed =
-            frameNow
-            - state.tvVisualFrameAt;
-
-        state.tvVisualFrameAt = frameNow;
-
-        if (
-            !Number.isFinite(elapsed)
-            || elapsed < 0
-        ) {
-            elapsed = 0;
-        }
-
-        elapsed = Math.min(elapsed, 64);
-
-        if (
-            !media
-            || media.paused
-            || media.seeking
-            || state.playbackClockSuspended
-        ) {
-            state.tvVisualDebtMs =
-                Math.max(
-                    0,
-                    (
-                        timelineTicks
-                        - state.tvVisualTicks
-                    )
-                    / 10000
-                );
-
-            return state.tvVisualTicks;
-        }
-
-        const rateValue =
-            Number(media.playbackRate);
-
-        const playbackRate =
-            Number.isFinite(rateValue)
-            && rateValue > 0
-                ? rateValue
-                : 1;
-
-        const advance =
-            elapsed
-            / 1000
-            * TICKS_PER_SECOND
-            * playbackRate
-            * TV_VISUAL_CATCHUP_RATE;
-
-        state.tvVisualTicks =
-            Math.min(
-                timelineTicks,
-                state.tvVisualTicks
-                    + advance
-            );
-
-        state.tvVisualDebtMs =
-            Math.max(
-                0,
-                (
-                    timelineTicks
-                    - state.tvVisualTicks
-                )
-                / 10000
-            );
-
-        if (state.tvVisualDebtMs < 0.5) {
-            state.tvVisualTicks =
-                timelineTicks;
-            state.tvVisualDebtMs = 0;
-        }
-
-        return state.tvVisualTicks;
-    }
-
-    function resolveTvLineActivation(
-        timingLine,
-        timelineTicks,
-        frameNow,
-        media
-    ) {
-        state.tvTimingLine = timingLine;
-
-        /*
-         * The focus event carries ordinary host changes. Avoid walking every
-         * lyric at 60fps; inspect stock classes only during initialization or
-         * while the projected and presented lines disagree.
-         */
-        if (
-            state.tvPresentationLine !== -999
-            && !state.tvForceTimingCommit
-            && timingLine
-                === state.tvPresentationLine
-        ) {
-            state.tvPendingLine = -1;
-            state.tvPendingSince = 0;
-            state.tvPendingHostFrames = 0;
-
-            return {
-                activeLine:
-                    state.tvPresentationLine,
-                wordTicks:
-                    advanceTvVisualTicks(
-                        timelineTicks,
-                        frameNow,
-                        media
-                    )
-            };
-        }
-
-        const focusSignalMatches =
-            state.tvHostLine === timingLine
-            && state.tvFocusedLine
-                === timingLine;
-
-        let snapshot = {
-            index:
-                focusSignalMatches
-                    ? timingLine
-                    : state.tvHostLine,
-            neutralCount: 0,
-            phasedCount: 0
-        };
-
-        const pollHostClasses =
-            !focusSignalMatches
-            && !state.tvForceTimingCommit
-            && (
-                state.tvPresentationLine === -999
-                || state.tvPendingLine
-                    !== timingLine
-                || frameNow
-                    - state.tvLastHostPollAt
-                    >= TV_HOST_POLL_INTERVAL_MS
-            );
-
-        if (pollHostClasses) {
-            snapshot =
-                getJellyfinLineSnapshot();
-
-            state.tvLastHostPollAt =
-                frameNow;
-        }
-
-        if (snapshot.index >= 0) {
-            if (
-                state.tvHostLine
-                    !== snapshot.index
-            ) {
-                state.tvHostSignalAt =
-                    frameNow;
-            }
-
-            state.tvHostLine =
-                snapshot.index;
-        }
-
-        if (
-            state.tvPresentationLine === -999
-        ) {
-            let initialLine = timingLine;
-            let source =
-                state.tvForceTimingCommit
-                    ? 'clock-reset'
-                    : 'initial-timing';
-
-            if (
-                !state.tvForceTimingCommit
-                && timingLine >= 0
-                && snapshot.index >= 0
-                && Math.abs(
-                    snapshot.index
-                        - timingLine
-                ) <= 1
-            ) {
-                initialLine = snapshot.index;
-                source = 'initial-host';
-            }
-
-            commitTvPresentationLine(
-                initialLine,
-                timelineTicks,
-                frameNow,
-                source,
-                false
-            );
-        }
-
-        if (state.tvForceTimingCommit) {
-            commitTvPresentationLine(
-                timingLine,
-                timelineTicks,
-                frameNow,
-                'clock-reset',
-                false
-            );
-        }
-
-        if (
-            timingLine
-                === state.tvPresentationLine
-        ) {
-            state.tvPendingLine = -1;
-            state.tvPendingSince = 0;
-            state.tvPendingHostFrames = 0;
-
-            return {
-                activeLine:
-                    state.tvPresentationLine,
-                wordTicks:
-                    advanceTvVisualTicks(
-                        timelineTicks,
-                        frameNow,
-                        media
-                    )
-            };
-        }
-
-        const adjacentForward =
-            timingLine
-                === state.tvPresentationLine + 1;
-
-        if (!adjacentForward) {
-            commitTvPresentationLine(
-                timingLine,
-                timelineTicks,
-                frameNow,
-                'timing-jump',
-                false
-            );
-
-            return {
-                activeLine: timingLine,
-                wordTicks: timelineTicks
-            };
-        }
-
-        if (
-            state.tvPendingLine
-                !== timingLine
-        ) {
-            state.tvPendingLine = timingLine;
-            state.tvPendingSince = frameNow;
-            state.tvPendingHostFrames = 0;
-        }
-
-        const hostMatches =
-            snapshot.index === timingLine;
-
-        const focusMatches =
-            state.tvFocusedLine === timingLine;
-
-        if (hostMatches && focusMatches) {
-            commitTvPresentationLine(
-                timingLine,
-                timelineTicks,
-                frameNow,
-                'host-focus',
-                true
-            );
-        } else if (hostMatches) {
-            state.tvPendingHostFrames += 1;
-
-            if (
-                state.tvPendingHostFrames >= 2
-            ) {
-                commitTvPresentationLine(
-                    timingLine,
-                    timelineTicks,
-                    frameNow,
-                    'host-class',
-                    true
-                );
-            }
-        } else {
-            state.tvPendingHostFrames = 0;
-        }
-
-        if (
-            state.tvPresentationLine
-                !== timingLine
-            && !state.tvStockTimingObserved
-        ) {
-            commitTvPresentationLine(
-                timingLine,
-                timelineTicks,
-                frameNow,
-                'timing-no-host',
-                true
-            );
-        }
-
-        const playbackHeld =
-            !media
-            || media.paused
-            || media.seeking
-            || state.playbackClockSuspended;
-
-        if (
-            state.tvPresentationLine
-                !== timingLine
-            && !playbackHeld
-            && frameNow
-                - state.tvPendingSince
-                >= TV_HOST_MAX_WAIT_MS
-        ) {
-            state.tvActivationFallbacks += 1;
-
-            commitTvPresentationLine(
-                timingLine,
-                timelineTicks,
-                frameNow,
-                'host-timeout',
-                true
-            );
-        } else if (
-            state.tvPresentationLine
-                !== timingLine
-            && playbackHeld
-        ) {
-            state.tvPendingSince = frameNow;
-        }
-
-        if (
-            state.tvPresentationLine
-                === timingLine
-        ) {
-            return {
-                activeLine: timingLine,
-                wordTicks:
-                    advanceTvVisualTicks(
-                        timelineTicks,
-                        frameNow,
-                        media
-                    )
-            };
-        }
-
-        return {
-            activeLine:
-                state.tvPresentationLine,
-            wordTicks: timelineTicks
-        };
+        void lineIndex;
+        void presentationLine;
+        void presentationWordTicks;
+        return timelineTicks;
     }
 
     function resetPlaybackClock(
         media = null,
         frameNow = performance.now()
     ) {
-        const mediaChanged =
-            state.playbackClockMedia !== media;
-
         const raw =
             media
                 ? Math.max(
@@ -5167,9 +6875,6 @@
         state.playbackClockFrameNow = frameNow;
         state.playbackClockCorrectionMs = 0;
 
-        if (mediaChanged) {
-            resetTvActivationState(true);
-        }
     }
 
     function projectedMediaSeconds(
@@ -5255,9 +6960,6 @@
                 state.playbackClockHardSnaps += 1;
                 state.playbackClockCorrectionMs = 0;
 
-                if (allowRegression) {
-                    resetTvActivationState(true);
-                }
             } else {
                 const correction =
                     Math.max(
@@ -5305,6 +7007,15 @@
         return state.playbackClockSeconds;
     }
 
+    function applyUserTimingOffsetTicks(ticks) {
+        /* Positive UI offset means "lyrics later", so the lyric timeline
+         * intentionally runs behind media by that amount. */
+        return ticks - (
+            clampTimingOffsetSeconds(state.timingOffsetSeconds)
+            * TICKS_PER_SECOND
+        );
+    }
+
     function chooseTimelineTicks(
         media,
         frameNow
@@ -5316,29 +7027,34 @@
             )
             * TICKS_PER_SECOND;
         const startOffset = getStartTimeTicksFromUrl(media);
+        let timelineTicks = rawTicks;
 
-        if (!startOffset) return rawTicks;
+        if (startOffset) {
+            /*
+             * When transcoding starts at a non-zero point, Jellyfin may keep
+             * the original timeline offset outside the HTML media element.
+             * Choose the source timeline first; the user's display offset is
+             * applied only afterwards so it cannot confuse this detection.
+             */
+            const jellyIndex = getJellyfinActiveLineIndex();
 
-        /*
-         * When transcoding starts at a non-zero point, Jellyfin may keep the
-         * original timeline offset outside the HTML media element. Compare the
-         * raw and offset candidates with Jellyfin's own active line and pick
-         * whichever agrees with Jellyfin.
-         */
-        const jellyIndex = getJellyfinActiveLineIndex();
+            if (jellyIndex >= 0) {
+                const rawIndex = findLineIndexAtTicks(rawTicks);
+                const offsetIndex = findLineIndexAtTicks(rawTicks + startOffset);
 
-        if (jellyIndex >= 0) {
-            const rawIndex = findLineIndexAtTicks(rawTicks);
-            const offsetIndex = findLineIndexAtTicks(rawTicks + startOffset);
-
-            if (offsetIndex === jellyIndex && rawIndex !== jellyIndex) {
-                return rawTicks + startOffset;
+                if (offsetIndex === jellyIndex && rawIndex !== jellyIndex) {
+                    timelineTicks = rawTicks + startOffset;
+                } else if (rawIndex === jellyIndex) {
+                    timelineTicks = rawTicks;
+                } else {
+                    timelineTicks = rawTicks + startOffset;
+                }
+            } else {
+                timelineTicks = rawTicks + startOffset;
             }
-
-            if (rawIndex === jellyIndex) return rawTicks;
         }
 
-        return rawTicks + startOffset;
+        return applyUserTimingOffsetTicks(timelineTicks);
     }
 
     function cueEndTicks(lineIndex, cueIndex, cue, cues) {
@@ -5588,15 +7304,12 @@
 
     function glowBucketSteps() {
         if (
-            state.performanceProfile === 'tv'
-            || state.performanceProfile === 'eco'
+            state.performanceProfile === 'eco'
         ) {
             return 48;
         }
 
-        return state.performanceProfile === 'mobile'
-            ? 56
-            : 64;
+        return 64;
     }
 
     function classicGlowEnergies(
@@ -5634,15 +7347,8 @@
             * (0.74 * bloom + 0.26 * afterglow)
             * (0.82 + 0.10 * sustain);
 
-        /* Joined scripts use the same bloom shape at gentler colored energy. */
-        if (word && word.paintMode === 'atomic') {
-            core *= 0.76;
-            halo *= 0.70;
-        }
-
         if (
-            state.performanceProfile === 'tv'
-            || state.performanceProfile === 'eco'
+            state.performanceProfile === 'eco'
         ) {
             halo *= 0.92;
         }
@@ -5851,18 +7557,9 @@
             )
             * continuityGain;
 
-        if (word.paintMode === 'atomic') {
-            /* Never transform a joined shaping unit: it can expose seams. */
-            if (!word._akAtomicTransformCleared) {
-                word.element.style.transform = '';
-                word._akAtomicTransformCleared = true;
-            }
-        } else {
-            word._akAtomicTransformCleared = false;
-            word.element.style.transform =
-                `translate3d(0, ${yEm.toFixed(4)}em, 0) `
-                + `scale3d(${scale.toFixed(4)}, ${scale.toFixed(4)}, 1)`;
-        }
+        word.element.style.transform =
+            `translate3d(0, ${yEm.toFixed(4)}em, 0) `
+            + `scale3d(${scale.toFixed(4)}, ${scale.toFixed(4)}, 1)`;
 
         if (!word._akWholeFilterCleared) {
             word.element.style.filter = 'none';
@@ -5907,16 +7604,8 @@
                 * easeMotion(progress);
         }
 
-        if (word.paintMode === 'atomic') {
-            if (!word._akAtomicTransformCleared) {
-                word.element.style.transform = '';
-                word._akAtomicTransformCleared = true;
-            }
-        } else {
-            word._akAtomicTransformCleared = false;
-            word.element.style.transform =
-                `translate3d(0, ${lift.toFixed(4)}em, 0)`;
-        }
+        word.element.style.transform =
+            `translate3d(0, ${lift.toFixed(4)}em, 0)`;
 
         word._akMotionIsReset = false;
     }
@@ -5944,7 +7633,6 @@
 
         word._akGlowCoreBucket = 0;
         word._akGlowHaloBucket = 0;
-        word._akAtomicTransformCleared = false;
         word._akWholeFilterCleared = false;
 
         (word.motionGlyphs || []).forEach(glyph => {
@@ -5967,13 +7655,11 @@
         painted
     ) {
         if (
-            state.performanceProfile === 'tv'
-            || state.performanceProfile === 'eco'
+            state.performanceProfile === 'eco'
         ) {
             /*
-             * One update per visible CSS pixel is smooth at TV distance and
-             * avoids repainting a text gradient for sub-pixel changes that the
-             * panel cannot show.
+             * Eco mode updates at visible-pixel granularity to avoid repainting
+             * a text gradient for sub-pixel changes that cannot be perceived.
              */
             const width =
                 Math.max(
@@ -6008,7 +7694,7 @@
         const renderTicks =
             timelineTicks
             + (
-                state.performanceProfile === 'tv'
+                state.performanceProfile === 'eco'
                     ? 0
                     : WORD_RENDER_LOOKAHEAD_TICKS
             );
@@ -6060,37 +7746,7 @@
                 painted
             );
 
-        if (word.paintMode === 'atomic') {
-            const atomicSteps =
-                state.performanceProfile === 'tv'
-                || state.performanceProfile === 'eco'
-                    ? 48
-                    : 64;
-
-            const atomicAlpha =
-                Math.round(
-                    (
-                        ATOMIC_FUTURE_ALPHA
-                        + (1 - ATOMIC_FUTURE_ALPHA)
-                            * easeMotion(painted)
-                    )
-                    * atomicSteps
-                )
-                / atomicSteps;
-
-            if (
-                word._akAtomicAlphaBucket
-                !== atomicAlpha
-            ) {
-                word._akAtomicAlphaBucket =
-                    atomicAlpha;
-
-                word.element.style.setProperty(
-                    '--ak-atomic-alpha',
-                    atomicAlpha.toFixed(4)
-                );
-            }
-        } else if (
+        if (
             word._akProgressBucket
             !== progressBucket
         ) {
@@ -6100,8 +7756,7 @@
             word.element.style.setProperty(
                 '--ak-word-progress',
                 `${progressBucket.toFixed(
-                    state.performanceProfile === 'tv'
-                    || state.performanceProfile === 'eco'
+                    state.performanceProfile === 'eco'
                         ? 2
                         : 1
                 )}%`
@@ -6206,14 +7861,6 @@
                 '100%'
             );
 
-            if (word.paintMode === 'atomic') {
-                word._akAtomicAlphaBucket = 1;
-                word.element.style.setProperty(
-                    '--ak-atomic-alpha',
-                    '1'
-                );
-            }
-
             word.element.classList.remove(
                 'ak-word-zero',
                 'ak-word-active',
@@ -6236,15 +7883,6 @@
                 '0%'
             );
 
-            if (word.paintMode === 'atomic') {
-                word._akAtomicAlphaBucket =
-                    ATOMIC_FUTURE_ALPHA;
-                word.element.style.setProperty(
-                    '--ak-atomic-alpha',
-                    String(ATOMIC_FUTURE_ALPHA)
-                );
-            }
-
             word.element.classList.add(
                 'ak-word-zero'
             );
@@ -6265,17 +7903,17 @@
         }
     }
 
-    function finishTvCompositorHandoff() {
+    function finishEcoCompositorHandoff() {
         const lineIndex =
-            state.tvHandoffLineIndex;
+            state.ecoHandoffLineIndex;
 
         if (
             lineIndex < 0
             || lineIndex
                 >= state.lineData.length
         ) {
-            state.tvHandoffLineIndex = -1;
-            state.tvHandoffUntil = 0;
+            state.ecoHandoffLineIndex = -1;
+            state.ecoHandoffUntil = 0;
             return;
         }
 
@@ -6296,17 +7934,17 @@
             resetWordMotion(word);
         });
 
-        state.tvHandoffLineIndex = -1;
-        state.tvHandoffUntil = 0;
+        state.ecoHandoffLineIndex = -1;
+        state.ecoHandoffUntil = 0;
     }
 
-    function beginTvCompositorHandoff(
+    function beginEcoCompositorHandoff(
         lineIndex,
         ticks,
         frameNow
     ) {
-        if (state.tvHandoffLineIndex >= 0) {
-            finishTvCompositorHandoff();
+        if (state.ecoHandoffLineIndex >= 0) {
+            finishEcoCompositorHandoff();
         }
 
         if (
@@ -6372,30 +8010,12 @@
             'ak-motion-handoff'
         );
 
-        state.tvHandoffLineIndex =
+        state.ecoHandoffLineIndex =
             lineIndex;
 
-        state.tvHandoffUntil =
+        state.ecoHandoffUntil =
             frameNow
-            + TV_COMPOSITOR_HANDOFF_MS;
-    }
-
-    function lineDistanceBand(
-        lineIndex,
-        activeLine
-    ) {
-        if (activeLine < 0) return 'far';
-
-        const distance =
-            Math.abs(
-                lineIndex - activeLine
-            );
-
-        if (distance === 0) return 'current';
-        if (distance === 1) return 'near';
-        if (distance === 2) return 'near2';
-        if (distance >= 5) return 'far';
-        return 'middle';
+            + ECO_COMPOSITOR_HANDOFF_MS;
     }
 
     function distanceToActiveLines(
@@ -6545,15 +8165,14 @@
         }
 
         if (phase === 'past') {
-            const tvCarry =
+            const ecoCarry =
                 lineIndex
-                    === state.tvHandoffLineIndex
+                    === state.ecoHandoffLineIndex
                 && frameNow
-                    < state.tvHandoffUntil;
+                    < state.ecoHandoffUntil;
 
             const dynamicCarry =
-                state.performanceProfile !== 'tv'
-                && state.performanceProfile !== 'eco'
+                state.performanceProfile !== 'eco'
                 && activeLines.some(
                     index => lineIndex === index - 1
                 );
@@ -6561,7 +8180,7 @@
             words.forEach(word => {
                 const keep =
                     (
-                        tvCarry
+                        ecoCarry
                         && word.element
                         && word.element.classList.contains(
                             'ak-word-handoff'
@@ -6609,9 +8228,8 @@
             previous >= 0
             && activeLine === previous + 1;
 
-        const tvProfile =
-            state.performanceProfile === 'tv'
-            || state.performanceProfile === 'eco';
+        const ecoProfile =
+            state.performanceProfile === 'eco';
 
         const removedActiveLines =
             state.activeLineIndexes.filter(
@@ -6624,19 +8242,19 @@
             && Math.abs(activeLine - previous) <= 1;
 
         if (
-            tvProfile
+            ecoProfile
             && !sequential
-            && state.tvHandoffLineIndex >= 0
+            && state.ecoHandoffLineIndex >= 0
         ) {
-            finishTvCompositorHandoff();
+            finishEcoCompositorHandoff();
         }
 
         if (
-            tvProfile
+            ecoProfile
             && naturalTransition
             && removedActiveLines.length
         ) {
-            beginTvCompositorHandoff(
+            beginEcoCompositorHandoff(
                 removedActiveLines[
                     removedActiveLines.length - 1
                 ],
@@ -6709,7 +8327,7 @@
             }
         });
 
-        if (!tvProfile) {
+        if (!ecoProfile) {
             const previousLine =
                 state.lineData[
                     activeLine - 1
@@ -6755,8 +8373,7 @@
         ticks
     ) {
         if (
-            state.performanceProfile === 'tv'
-            || state.performanceProfile === 'eco'
+            state.performanceProfile === 'eco'
         ) {
             return;
         }
@@ -6836,10 +8453,69 @@
         );
     }
 
+    function shouldRunAnimationLoop() {
+        return !document.hidden
+            && !!state.lyrics
+            && state.lineData.length > 0
+            && isLyricsPage();
+    }
+
+    function stopAnimationLoop(
+        reason = 'idle'
+    ) {
+        const wasRunning =
+            state.animationLoopRunning
+            || !!state.rafId
+            || !!state.frameTimer;
+
+        if (state.rafId) {
+            try {
+                cancelAnimationFrame(
+                    state.rafId
+                );
+            } catch {
+                // Ignore incomplete embedded-browser cancellation APIs.
+            }
+            state.rafId = 0;
+        }
+
+        if (state.frameTimer) {
+            clearTimeout(
+                state.frameTimer
+            );
+            state.frameTimer = 0;
+        }
+
+        state.forceNextFrame = false;
+        state.animationLoopRunning = false;
+        state.lastRenderedFrameAt = 0;
+        state.performanceWindowStart = 0;
+        state.performanceFrameCount = 0;
+        state.measuredFps = 0;
+
+        if (wasRunning) {
+            state.animationLoopStops += 1;
+        }
+
+        return reason;
+    }
+
+    function markAnimationLoopRunning() {
+        if (!state.animationLoopRunning) {
+            state.animationLoopRunning = true;
+            state.animationLoopStarts += 1;
+        }
+    }
+
     function scheduleNextFrame(
         media,
         immediate = false
     ) {
+        if (!shouldRunAnimationLoop()) {
+            stopAnimationLoop('inactive');
+            return;
+        }
+
         if (immediate) {
             state.forceNextFrame = true;
         }
@@ -6850,6 +8526,8 @@
         ) {
             return;
         }
+
+        markAnimationLoopRunning();
 
         const interval =
             immediate
@@ -6876,6 +8554,11 @@
             window.setTimeout(() => {
                 state.frameTimer = 0;
 
+                if (!shouldRunAnimationLoop()) {
+                    stopAnimationLoop('timer-inactive');
+                    return;
+                }
+
                 state.rafId =
                     requestAnimationFrame(
                         renderFrame
@@ -6883,7 +8566,39 @@
             }, delay);
     }
 
+    function scheduleMediaDiscoveryFrame() {
+        if (!shouldRunAnimationLoop()) {
+            stopAnimationLoop('media-discovery-inactive');
+            return;
+        }
+
+        if (state.rafId || state.frameTimer) {
+            return;
+        }
+
+        markAnimationLoopRunning();
+
+        state.frameTimer = window.setTimeout(() => {
+            state.frameTimer = 0;
+
+            if (!shouldRunAnimationLoop()) {
+                stopAnimationLoop('media-discovery-inactive');
+                return;
+            }
+
+            state.rafId =
+                requestAnimationFrame(
+                    renderFrame
+                );
+        }, MEDIA_DISCOVERY_RETRY_MS);
+    }
+
     function wakeAnimationLoop() {
+        if (!shouldRunAnimationLoop()) {
+            stopAnimationLoop('wake-inactive');
+            return;
+        }
+
         if (state.frameTimer) {
             clearTimeout(
                 state.frameTimer
@@ -6910,6 +8625,23 @@
         const handleMediaWake = event => {
             const type =
                 event && event.type;
+
+            if (
+                state.mediaElement
+                && state.mediaElement !== media
+                && state.mediaElement.isConnected
+            ) {
+                state.staleMediaEventDrops += 1;
+                return;
+            }
+
+            if (
+                !media.isConnected
+                && state.mediaElement !== media
+            ) {
+                state.staleMediaEventDrops += 1;
+                return;
+            }
 
             if (type === 'ended') {
                 state.accentReplayArmed = true;
@@ -6963,6 +8695,14 @@
                 state.playbackClockSuspended = false;
             }
 
+            if (
+                type === 'loadedmetadata'
+                || type === 'emptied'
+                || type === 'durationchange'
+            ) {
+                state.mediaProbeAt = 0;
+            }
+
             const replayFromBeginning =
                 (
                     type === 'play'
@@ -6973,6 +8713,8 @@
                     || 0
                 ) < 0.75;
 
+            const frameNow = performance.now();
+
             if (
                 type === 'seeking'
                 || type === 'seeked'
@@ -6980,7 +8722,6 @@
                 || type === 'emptied'
                 || replayFromBeginning
             ) {
-                resetTvActivationState(true);
                 state.lastActiveLine = -999;
                 state.lastActiveLineSignature = '';
                 state.activeLineIndexes = [];
@@ -6989,7 +8730,7 @@
             if (type !== 'timeupdate') {
                 resetPlaybackClock(
                     media,
-                    performance.now()
+                    frameNow
                 );
             }
 
@@ -7025,15 +8766,22 @@
     function renderFrame() {
         state.rafId = 0;
 
+        if (!shouldRunAnimationLoop()) {
+            stopAnimationLoop('render-inactive');
+            return;
+        }
+
+        const firstDecoratedLine =
+            state.lineData[0]
+            && state.lineData[0].element;
+
         if (
-            !state.lyrics
-            || !state.lineData.length
-            || !isLyricsPage()
+            !firstDecoratedLine
+            || !firstDecoratedLine.isConnected
         ) {
-            scheduleNextFrame(
-                state.mediaElement,
-                false
-            );
+            state.decoratedGeneration = -1;
+            queueDecoration();
+            stopAnimationLoop('stale-lyric-dom');
             return;
         }
 
@@ -7056,10 +8804,7 @@
                 );
             }
 
-            scheduleNextFrame(
-                null,
-                false
-            );
+            scheduleMediaDiscoveryFrame();
             return;
         }
 
@@ -7108,37 +8853,12 @@
             frameNow
         );
 
-        if (
-            state.tvHandoffLineIndex >= 0
-            && frameNow
-                >= state.tvHandoffUntil
-        ) {
-            finishTvCompositorHandoff();
-        }
-
-        const timingLine =
+        const activeLine =
             findLineIndexAtTicks(
                 ticks
             );
 
-        const tvActivation =
-            state.performanceProfile === 'tv'
-                ? resolveTvLineActivation(
-                    timingLine,
-                    ticks,
-                    frameNow,
-                    media
-                )
-                : {
-                    activeLine: timingLine,
-                    wordTicks: ticks
-                };
-
-        const activeLine =
-            tvActivation.activeLine;
-
-        const wordTicks =
-            tvActivation.wordTicks;
+        const wordTicks = ticks;
 
         const activeLines =
             findActiveLineIndexesAtTicks(
@@ -7146,15 +8866,14 @@
                 activeLine
             );
 
-        const activeLineSignature =
-            activeLines.join(',');
+        const activeSetChanged =
+            activeLine !== state.lastActiveLine
+            || !sameIndexList(
+                activeLines,
+                state.activeLineIndexes
+            );
 
-        if (
-            activeLine
-            !== state.lastActiveLine
-            || activeLineSignature
-                !== state.lastActiveLineSignature
-        ) {
+        if (activeSetChanged) {
             syncStaticLineStates(
                 activeLine,
                 activeLines,
@@ -7162,12 +8881,13 @@
                 frameNow
             );
 
+            /* Diagnostics keep a human-readable signature, but build it only
+             * when the active set changes instead of allocating every frame. */
             state.lastActiveLineSignature =
-                activeLineSignature;
+                activeLines.join(',');
+            state.activeLineIndexes =
+                activeLines.slice();
         }
-
-        state.activeLineIndexes =
-            activeLines.slice();
 
         if (activeLines.length > 1) {
             state.overlapFrameCount += 1;
@@ -7217,83 +8937,232 @@
     }
 
     function ensureAnimationLoop() {
+        if (!shouldRunAnimationLoop()) {
+            stopAnimationLoop('ensure-inactive');
+            return false;
+        }
+
         scheduleNextFrame(
             state.mediaElement,
             true
         );
+        return true;
     }
 
 
     function installDomObserver() {
+        const lyricSelector =
+            '.lyricPage, .lyricsContainer, .lyricsLine';
+
         const observer = new MutationObserver(mutations => {
+            if (document.hidden || !isLyricsPage() || !state.lyrics) return;
+
             let shouldDecorate = false;
 
             for (const mutation of mutations) {
-                if (mutation.type === 'childList' && mutation.addedNodes.length) {
-                    shouldDecorate = true;
-                    break;
+                if (
+                    mutation.type !== 'childList'
+                    || !mutation.addedNodes.length
+                ) {
+                    continue;
                 }
+
+                for (const node of mutation.addedNodes) {
+                    if (!node || node.nodeType !== 1) continue;
+
+                    const matches =
+                        typeof node.matches === 'function';
+                    const canQuery =
+                        typeof node.querySelector === 'function';
+
+                    if (
+                        (matches && node.matches(lyricSelector))
+                        || (canQuery && node.querySelector(lyricSelector))
+                    ) {
+                        shouldDecorate = true;
+                        break;
+                    }
+                }
+
+                if (shouldDecorate) break;
             }
 
-            if (shouldDecorate && state.lyrics && isLyricsPage()) {
-                const container = document.querySelector('.lyricsContainer');
-                const lines = container
-                    ? container.querySelectorAll('.lyricsLine')
-                    : [];
+            if (!shouldDecorate) return;
 
-                const needsDecoration =
-                    state.decoratedGeneration !== state.generation
-                    || Array.from(lines)
-                        .some(line => !line.classList.contains('ak-enhanced-line'));
+            const container = getCurrentLyricsContainer(false);
+            const lines = container
+                ? container.querySelectorAll('.lyricsLine')
+                : [];
 
-                if (needsDecoration) queueDecoration();
+            const needsDecoration =
+                state.decoratedGeneration !== state.generation
+                || Array.from(lines).some(line =>
+                    !line.classList.contains('ak-enhanced-line')
+                    || Number(line.dataset.akGeneration) !== state.generation
+                );
+
+            if (needsDecoration) queueDecoration();
+        });
+
+        const startObserver = () => observer.observe(
+            document.documentElement,
+            { childList: true, subtree: true }
+        );
+
+        if (document.documentElement) startObserver();
+        else document.addEventListener(
+            'DOMContentLoaded',
+            startObserver,
+            { once: true }
+        );
+    }
+
+    function installFontGeometryHooks() {
+        const fonts = document.fonts;
+        if (!fonts) return;
+
+        const refreshForFonts = () => {
+            state.fontGeometryRefreshCount += 1;
+            queueMotionGeometryRefresh();
+            wakeAnimationLoop();
+        };
+
+        try {
+            if (fonts.ready && typeof fonts.ready.then === 'function') {
+                fonts.ready.then(refreshForFonts).catch(() => {});
             }
-        });
+        } catch {
+            // FontFaceSet readiness is optional on older mobile WebViews.
+        }
 
-        const start = () => observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true
-        });
-
-        if (document.documentElement) start();
-        else document.addEventListener('DOMContentLoaded', start, { once: true });
+        try {
+            if (typeof fonts.addEventListener === 'function') {
+                fonts.addEventListener('loadingdone', refreshForFonts);
+            }
+        } catch {
+            // Geometry still refreshes on resize/orientation if unsupported.
+        }
     }
 
     function installRouteHooks() {
         window.addEventListener('hashchange', () => {
-            if (isLyricsPage()) {
+            if (ROUTE_RE.test(location.hash)) {
                 queueDecoration();
+                ensureRomanizationToggle();
+                ensureTimingControls();
                 state.atmosphereMediaKey = '';
                 state.lastActiveLine = -999;
                 state.lastActiveLineSignature = '';
                 state.activeLineIndexes = [];
-                resetTvActivationState(true);
                 wakeAnimationLoop();
+            } else {
+                removeRomanizationToggle();
+                removeTimingControls();
+                if (state.lyricToolsHost && state.lyricToolsHost.parentNode) {
+                    state.lyricToolsHost.parentNode.removeChild(state.lyricToolsHost);
+                }
+                state.lyricToolsHost = null;
+                cancelDecorationRetry(true);
+
+                if (state.geometryTimer) {
+                    clearTimeout(state.geometryTimer);
+                    state.geometryTimer = 0;
+                }
+
+                invalidateAtmosphereLoads(
+                    'route-leave'
+                );
+                stopAnimationLoop(
+                    'route-leave'
+                );
             }
         });
 
         window.addEventListener(
             'resize',
-            queueMotionGeometryRefresh,
+            () => {
+                queueMotionGeometryRefresh();
+                wakeAnimationLoop();
+            },
             { passive: true }
         );
+
+        window.addEventListener(
+            'orientationchange',
+            () => {
+                queueMotionGeometryRefresh();
+                wakeAnimationLoop();
+            },
+            { passive: true }
+        );
+
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener(
+                'resize',
+                () => {
+                    queueMotionGeometryRefresh();
+                    wakeAnimationLoop();
+                },
+                { passive: true }
+            );
+        }
 
         document.addEventListener(
             'visibilitychange',
-            wakeAnimationLoop,
+            () => {
+                if (document.hidden) {
+                    stopAnimationLoop(
+                        'document-hidden'
+                    );
+                    return;
+                }
+
+                const firstLine =
+                    state.lineData[0]
+                    && state.lineData[0].element;
+
+                if (
+                    state.lyrics
+                    && isLyricsPage()
+                    && (
+                        state.decoratedGeneration !== state.generation
+                        || !firstLine
+                        || !firstLine.isConnected
+                    )
+                ) {
+                    queueDecoration();
+                }
+
+                resetPlaybackClock(
+                    getLocalMediaElement(true),
+                    performance.now()
+                );
+                wakeAnimationLoop();
+            },
             { passive: true }
         );
 
-        /*
-         * Jellyfin TV renders lyric lines as focused buttons. Capture that
-         * host focus synchronously without observing layout or polling every
-         * lyric on every animation frame.
-         */
-        document.addEventListener(
-            'focus',
-            handleTvLyricFocus,
-            true
+        window.addEventListener(
+            'pagehide',
+            () => {
+                cancelDecorationRetry(true);
+                invalidateAtmosphereLoads('pagehide');
+                stopAnimationLoop('pagehide');
+            },
+            { passive: true }
         );
+
+        window.addEventListener(
+            'pageshow',
+            () => {
+                if (state.lyrics && isLyricsPage()) {
+                    queueDecoration();
+                    wakeAnimationLoop();
+                }
+            },
+            { passive: true }
+        );
+
     }
 
     /*
@@ -7314,7 +9183,123 @@
     installXhrInterceptor();
     installDomObserver();
     installRouteHooks();
-    ensureAnimationLoop();
+    installFontGeometryHooks();
+
+    function rendererFingerprint() {
+        const words = [];
+
+        state.lineData.forEach(line => {
+            (line.words || []).forEach(word => words.push(word));
+        });
+
+        const geometry = {
+            words: words.length,
+            perGlyphWords: 0,
+            rangeWords: 0,
+            canvasFallbackWords: 0,
+            wholeScriptWords: 0,
+            wholeFallbackWords: 0
+        };
+
+        words.forEach(word => {
+            const source = word.geometrySource || 'unprepared';
+
+            if (word.motionGlyphs && word.motionGlyphs.length) {
+                geometry.perGlyphWords += 1;
+            }
+
+            if (source === 'range') geometry.rangeWords += 1;
+            else if (source === 'canvas-fallback') {
+                geometry.canvasFallbackWords += 1;
+            } else if (source === 'whole-script') {
+                geometry.wholeScriptWords += 1;
+            } else if (source.indexOf('whole-') === 0) {
+                geometry.wholeFallbackWords += 1;
+            }
+        });
+
+        let reducedMotionRequested = false;
+
+        try {
+            reducedMotionRequested = !!(
+                window.matchMedia
+                && window.matchMedia(
+                    '(prefers-reduced-motion: reduce)'
+                ).matches
+            );
+        } catch {
+            // Old embedded browsers may not implement matchMedia fully.
+        }
+
+        const currentWords = [];
+
+        state.lineData.forEach(line => {
+            if (
+                !line.element.classList.contains('ak-current')
+                && !line.element.classList.contains('ak-overlap-current')
+            ) {
+                return;
+            }
+
+            (line.words || []).forEach(word => {
+                currentWords.push({
+                    text: word.text,
+                    motionMode: word.motionMode,
+                    paintMode: word.paintMode,
+                    geometrySource: word.geometrySource,
+                    motionGlyphCount:
+                        (word.motionGlyphs || []).length,
+                    glowLayersPerGlyph:
+                        word.motionGlyphs
+                        && word.motionGlyphs[0]
+                            ? (
+                                word.motionGlyphs[0]
+                                    .glowLayers || []
+                            ).length
+                            : 0
+                });
+            });
+        });
+
+        return {
+            version: VERSION,
+            visualSignature:
+                UNIFIED_RENDERER_SIGNATURE,
+            requestedMode: state.performanceMode,
+            detectedProfile: state.performanceProfile,
+            fullQuality:
+                state.performanceProfile === 'desktop'
+                || state.performanceProfile === 'mobile',
+            targetFps:
+                PERFORMANCE_TARGET_FPS[
+                    state.performanceProfile
+                ],
+            glowBuckets: glowBucketSteps(),
+            glowRenderer:
+                'classic-bloom-prepainted-core+halo',
+            segmentSafeMotion:
+                state.performanceProfile === 'eco'
+                    ? 'whole-word'
+                    : 'per-grapheme-with-measured-fallback',
+            contextualScriptMotion:
+                'grapheme-safe-akshara-bloom+whole-joining-fallback',
+            rtlSwipeDirection:
+                'per-word-natural-reading-direction',
+            cueTokenization:
+                'source-preserved-for-cjk-thai-lao-khmer-myanmar',
+            atmosphere:
+                `${ATMOSPHERE_RASTER_LONG_EDGE[
+                    state.performanceProfile
+                ]}px/${ATMOSPHERE_RASTER_BLUR_PX[
+                    state.performanceProfile
+                ]}px`,
+            reducedMotionRequested,
+            reducedMotionApplied:
+                state.performanceProfile === 'eco',
+            geometry,
+            currentWords
+        };
+    }
 
     const publicApi = Object.freeze({
         version: VERSION,
@@ -7331,6 +9316,46 @@
         setAccent: setAccentMode,
         nextAccent: rerollAccent,
         setPerformance: setPerformanceMode,
+        setRomanization: setRomanizationMode,
+        romanization() {
+            const romanizer = getRomanizer();
+            return {
+                mode: state.romanizationMode,
+                available: state.romanizationAvailable,
+                candidate: state.romanizationCandidate,
+                loadState: state.romanizationLoadState,
+                loadError: state.romanizationLoadError,
+                source: state.romanizationSource,
+                romanizerVersion: romanizer ? romanizer.version : null,
+                strategy: romanizer ? romanizer.strategy : null,
+                transformedLines: state.romanizationLineCount,
+                toggleCount: state.romanizationToggleCount,
+                offlineOnly: true,
+                networkSources: false,
+                supportedLanguageFamilies: romanizer && romanizer.supportedLanguageFamilies
+                    ? romanizer.supportedLanguageFamilies.slice()
+                    : [],
+                songKey: state.songPreferenceKey
+            };
+        },
+        setTimingOffset: setTimingOffsetSeconds,
+        adjustTimingOffset: adjustTimingOffsetSeconds,
+        resetTimingOffset() {
+            return setTimingOffsetSeconds(0, true);
+        },
+        timing() {
+            return {
+                seconds: state.timingOffsetSeconds,
+                display: formatTimingOffset(),
+                stepSeconds: TIMING_OFFSET_STEP_SECONDS,
+                minSeconds: TIMING_OFFSET_MIN_SECONDS,
+                maxSeconds: TIMING_OFFSET_MAX_SECONDS,
+                changeCount: state.timingOffsetChangeCount,
+                songKey: state.songPreferenceKey
+            };
+        },
+        backgroundVocals: inspectBackgroundVocals,
+        rendererFingerprint,
         performance() {
             return {
                 mode: state.performanceMode,
@@ -7348,24 +9373,24 @@
                 timedCueCount:
                     state.timedCueCount,
                 perGlyphMotion:
-                    state.performanceProfile
-                        === 'desktop'
-                        ? 'full'
-                        : (
-                            state.performanceProfile
-                                === 'mobile'
-                                ? 'short-words-only'
-                                : 'whole-word'
-                        ),
+                    state.performanceProfile === 'eco'
+                        ? 'whole-word'
+                        : 'multiscript-grapheme+whole-shaped',
                 playbackClock:
                     'phase-locked-monotonic',
-                tvLineActivation:
-                    'host-focus-synchronized',
-                tvGlowRenderer:
-                    'classic-bloom-prepainted-core+halo',
                 rafTargetGate: true,
                 skippedRafFrames:
-                    state.skippedRafFrames
+                    state.skippedRafFrames,
+                animationLoopRunning:
+                    state.animationLoopRunning,
+                animationLoopStarts:
+                    state.animationLoopStarts,
+                animationLoopStops:
+                    state.animationLoopStops,
+                mediaSwitchCount:
+                    state.mediaSwitchCount,
+                staleMediaEventDrops:
+                    state.staleMediaEventDrops
             };
         },
         setAtmosphere: setAtmosphereMode,
@@ -7374,7 +9399,20 @@
                 mode: state.atmosphereMode,
                 artwork: state.atmosphereArtwork,
                 source: state.atmosphereSource,
-                colors: state.atmosphereColors
+                colors: state.atmosphereColors,
+                pendingKey: state.atmospherePendingKey,
+                pendingMs:
+                    state.atmospherePendingSince > 0
+                        ? Number(
+                            Math.max(
+                                0,
+                                performance.now()
+                                    - state.atmospherePendingSince
+                            ).toFixed(1)
+                        )
+                        : 0,
+                timeoutCount:
+                    state.atmosphereTimeoutCount
             };
         },
         refreshAtmosphere() {
@@ -7430,7 +9468,45 @@
                         )
                         : 0,
                 decoratedLines: state.lineData.length,
+                lyricsRequestSeq:
+                    state.lyricsRequestSeq,
+                lyricsRequestKey:
+                    state.lyricsRequestKey,
+                lyricsAcceptedKey:
+                    state.lyricsAcceptedKey,
+                lyricsAcceptedSeq:
+                    state.lyricsAcceptedSeq,
+                lyricsStaleResponseDrops:
+                    state.lyricsStaleResponseDrops,
+                decorationRetryActive:
+                    !!decorateTimer,
+                decorationRetryCount:
+                    state.decorationRetryCount,
+                decorationRetryExpiredCount:
+                    state.decorationRetryExpiredCount,
+                animationLoopRunning:
+                    state.animationLoopRunning,
+                animationLoopStarts:
+                    state.animationLoopStarts,
+                animationLoopStops:
+                    state.animationLoopStops,
                 mediaFound: !!media,
+                mediaSwitchCount:
+                    state.mediaSwitchCount,
+                staleMediaEventDrops:
+                    state.staleMediaEventDrops,
+                romanizationMode: state.romanizationMode,
+                romanizationAvailable: state.romanizationAvailable,
+                romanizationCandidate: state.romanizationCandidate,
+                romanizationLoadState: state.romanizationLoadState,
+                romanizationLoadError: state.romanizationLoadError,
+                romanizationSource: state.romanizationSource,
+                romanizationTransformedLines: state.romanizationLineCount,
+                romanizationToggleCount: state.romanizationToggleCount,
+                songPreferenceKey: state.songPreferenceKey,
+                timingOffsetSeconds: state.timingOffsetSeconds,
+                timingOffsetDisplay: formatTimingOffset(),
+                timingOffsetChangeCount: state.timingOffsetChangeCount,
                 mediaCurrentTime:
                     media ? media.currentTime : null,
                 mode:
@@ -7461,8 +9537,22 @@
                 backgroundVocalCount:
                     state.backgroundVocalCount,
                 backgroundVocalTransport:
-                    'invisible-elrc-role-sentinel',
-                effectModel: 'phase-locked-motion+classic-bloom-v3.1',
+                    'ascii-elrc-role-token+legacy+parenthetical-recovery',
+                backgroundVocalLayout:
+                    'center+inset-end+center+inset-start',
+                backgroundVocalInspection:
+                    inspectBackgroundVocals(),
+                crossPlatformQuality:
+                    'pc-mobile-multilingual-preview4-renderer',
+                platformVisualOverrides:
+                    state.performanceProfile === 'eco'
+                        ? 'eco-opt-in'
+                        : 'none',
+                tvPolicy:
+                    'stock-jellyfin-bootstrap-bypass',
+                rendererFingerprint:
+                    rendererFingerprint(),
+                effectModel: 'phase-locked-motion+classic-bloom-v3.1-multiscript-unified',
                 coloredGlow: true,
                 coloredGlowOnlyOnMotionGlyphs: false,
                 complexScriptShapedGlow: true,
@@ -7528,78 +9618,6 @@
                     ),
                 playbackClockHardSnaps:
                     state.playbackClockHardSnaps,
-                tvLineActivation:
-                    'host-focus-synchronized-two-stage',
-                tvTimingLine:
-                    state.tvTimingLine,
-                tvHostLine:
-                    state.tvHostLine,
-                tvFocusedLine:
-                    state.tvFocusedLine,
-                tvPresentationLine:
-                    state.tvPresentationLine === -999
-                        ? null
-                        : state.tvPresentationLine,
-                tvPendingLine:
-                    state.tvPendingLine,
-                tvActivationSource:
-                    state.tvActivationSource,
-                tvActivationWaitMs:
-                    state.tvLastActivationWaitMs,
-                tvPendingWaitMs:
-                    state.tvPendingSince > 0
-                        ? Number(
-                            Math.max(
-                                0,
-                                performance.now()
-                                    - state.tvPendingSince
-                            ).toFixed(1)
-                        )
-                        : 0,
-                tvActivationFallbacks:
-                    state.tvActivationFallbacks,
-                tvFocusArmMs:
-                    TV_FOCUS_ARM_MS,
-                tvFocusArmRemainingMs:
-                    Math.max(
-                        0,
-                        Math.round(
-                            state.tvArmUntil
-                                - performance.now()
-                        )
-                    ),
-                tvHostMaxWaitMs:
-                    TV_HOST_MAX_WAIT_MS,
-                tvHostPollIntervalMs:
-                    TV_HOST_POLL_INTERVAL_MS,
-                tvHostSignalAgeMs:
-                    state.tvHostSignalAt > 0
-                        ? Number(
-                            Math.max(
-                                0,
-                                performance.now()
-                                    - state.tvHostSignalAt
-                            ).toFixed(1)
-                        )
-                        : null,
-                tvVisualCatchupRate:
-                    TV_VISUAL_CATCHUP_RATE,
-                tvVisualDebtMs:
-                    Number(
-                        state.tvVisualDebtMs
-                            .toFixed(1)
-                    ),
-                tvStockTimingObserved:
-                    state.tvStockTimingObserved,
-                tvWordLookaheadMs:
-                    state.performanceProfile === 'tv'
-                        ? 0
-                        : WORD_RENDER_LOOKAHEAD_TICKS
-                            / 10000,
-                tvGlowRenderer:
-                    'classic-bloom-prepainted-core+halo',
-                tvPerFrameFilterRebuild: false,
-                tvPixelQuantizedWipe: true,
                 glowEnvelope:
                     'soft-knee-crisp-core+chroma-halo+afterglow',
                 glowLuminanceLimiter: true,
@@ -7615,8 +9633,8 @@
                     state.lastLineSyncCount,
                 maxLineSyncCount:
                     state.maxLineSyncCount,
-                tvCompositorHandoffMs:
-                    TV_COMPOSITOR_HANDOFF_MS,
+                ecoCompositorHandoffMs:
+                    ECO_COMPOSITOR_HANDOFF_MS,
                 activeLineOnlyRendering: false,
                 activeSetOnlyRendering: true,
                 staticLinesUpdateOnlyOnLineChange: true,
@@ -7627,6 +9645,20 @@
                 atmosphereArtwork: state.atmosphereArtwork,
                 atmosphereSource: state.atmosphereSource,
                 atmosphereColors: state.atmosphereColors,
+                atmospherePendingKey:
+                    state.atmospherePendingKey,
+                atmospherePendingMs:
+                    state.atmospherePendingSince > 0
+                        ? Number(
+                            Math.max(
+                                0,
+                                performance.now()
+                                    - state.atmospherePendingSince
+                            ).toFixed(1)
+                        )
+                        : 0,
+                atmosphereTimeoutCount:
+                    state.atmosphereTimeoutCount,
                 atmosphereCrossfade: true,
                 atmosphereColorExtraction: 'canvas-with-accent-fallback',
                 atmosphereRasterized: true,
@@ -7644,17 +9676,18 @@
                 atmosphereSharpArtFallback: false,
                 atmosphereCrossfadeMs:
                     ATMOSPHERE_CROSSFADE_MS,
-                atmosphereTvAware: true,
                 geometryAwareSwipe: true,
                 connectedScriptPaint:
-                    'atomic-uniform-luminance',
-                atomicWordCount:
-                    state.atomicWordCount,
+                    'shaped-spatial-wipe',
+                shapedWordCount:
+                    state.shapedWordCount,
                 scriptProfileCounts:
                     Object.assign(
                         {},
                         state.scriptProfileCounts
                     ),
+                fontGeometryRefreshCount:
+                    state.fontGeometryRefreshCount,
                 wipeBaseEm: BASE_WIPE_GRADIENT_EM,
                 swipeSmoothingMs: WORD_PROGRESS_SMOOTH_TAU_MS,
                 currentMotionPlan:
@@ -7670,6 +9703,8 @@
                             durationMs:
                                 Math.round(word.motionDurationMs),
                             geometryReady: word.geometryReady,
+                            geometrySource:
+                                word.geometrySource,
                             glyphOverlay:
                                 !!(
                                     word.motionGlyphs

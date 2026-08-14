@@ -37,22 +37,18 @@ THIRD_PARTY_NOTICES.md
 
 ## Patch strategy
 
-1. Back up the user's current `index.html`.
-2. Remove existing LyricMotion loader tags.
-3. Find the `runtime.bundle.js` script element.
-4. Insert LyricMotion CSS/JS immediately before it.
-5. Copy LyricMotion assets into that webroot.
-6. Leave Jellyfin's bundles untouched.
+1. Validate the package version and required overlay assets.
+2. Back up the user's current `index.html`.
+3. Build an injection from the current `index.html`, removing older LyricMotion/legacy loader tags and locating `runtime.bundle.js`.
+4. Replace each overlay JS/CSS asset through a same-directory temporary file/atomic commit so an in-place upgrade never exposes a partially copied asset. On Windows PowerShell 5.1, `System.IO.File.Replace` receives a real same-directory transient backup path (never `$null`) and that transient backup is deleted after commit.
+5. Commit the edited `index.html` last through a same-directory atomic replacement.
+6. Inject only the main LyricMotion CSS/JS immediately before Jellyfin's runtime bundle; the Romanizer remains a lazy sibling asset.
+7. Leave Jellyfin's generated bundles untouched.
+
+A normal uninstall surgically removes LyricMotion loader tags and assets, then deletes LyricMotion-owned `index.html.before-jellyfin-lyric-motion*` backups so the webroot is clean. Use `--keep-backups` on shell or `-KeepBackups` on PowerShell when the safety copies should remain. The uninstaller does not roll `index.html` back wholesale, so unrelated Jellyfin/custom changes made after installation are preserved.
 
 ## Jellyfin updates
 
 Package managers and container updates may replace the webroot. Re-run or rebuild LyricMotion after an update when necessary.
 
 Each GitHub release should publish a tested Jellyfin compatibility matrix.
-
-## Automated release
-
-`scripts/package_release.py` creates both the extracted release folder and its
-deterministic ZIP under `dist/local-testing`. A pushed `v*` tag is validated by
-GitHub Actions, packaged from the matching `VERSION`, and published with its
-SHA-256 checksum. Generated `dist` content is intentionally not committed.

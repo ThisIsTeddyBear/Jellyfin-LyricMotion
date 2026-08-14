@@ -9,7 +9,24 @@ permissions:
   contents: write
 
 jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows PowerShell 5.1 install/uninstall gate
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $web = Join-Path $env:RUNNER_TEMP 'jlm-release-web'
+          New-Item -ItemType Directory -Force -Path $web | Out-Null
+          Set-Content -LiteralPath (Join-Path $web 'index.html') -Encoding UTF8 -Value '<html><body><script src="runtime.bundle.js"></script><main id="keep">keep</main></body></html>'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -WebDir $web
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with exit code $LASTEXITCODE" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -WebDir $web
+          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 failed with exit code $LASTEXITCODE" }
+
   release:
+    needs: windows-installer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,15 +38,8 @@ jobs:
           python-version: "3.12"
       - name: Validate release version
         run: test "${GITHUB_REF_NAME#v}" = "$(cat VERSION)"
-      - name: Run release tests
-        run: |
-          node --check src/jellyfin-lyric-motion.js
-          node scripts/test_overlap_background.js
-          node scripts/test_tv_overlap.js
-          node scripts/test_script_safety.js
-          node scripts/test_release_contract.js
-          python -m unittest discover -s scripts -p "test_*.py"
-          sh -n scripts/install.sh scripts/uninstall.sh
+      - name: Run full release tests
+        run: sh scripts/test-all.sh
       - name: Build deterministic release assets
         run: python scripts/package_release.py --version "${GITHUB_REF_NAME#v}"
       - name: Publish GitHub release
