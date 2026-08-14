@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Build a deterministic Jellyfin LyricMotion release folder and ZIP."""
-
 from __future__ import annotations
 
 import argparse
@@ -9,10 +8,8 @@ import shutil
 import zipfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist" / "local-testing"
-
 RELEASE_PATHS = (
     "VERSION",
     "README.md",
@@ -24,6 +21,7 @@ RELEASE_PATHS = (
     "UNINSTALL-WINDOWS.cmd",
     "src/jellyfin-lyric-motion.js",
     "src/jellyfin-lyric-motion.css",
+    "src/jellyfin-lyric-romanizer.js",
     "scripts/install.ps1",
     "scripts/install.sh",
     "scripts/uninstall.ps1",
@@ -31,14 +29,17 @@ RELEASE_PATHS = (
     "scripts/ttml_to_elrc.py",
     "docker/Dockerfile",
     "docs/INSTALLATION-ARCHITECTURE.md",
+    "docs/PLATFORM-ARCHITECTURE.md",
+    "docs/ROMANIZATION.md",
+    "docs/TIMING-OFFSET.md",
+    "docs/MULTILINGUAL-RENDERING.md",
     "docs/TTML-CONVERSION.md",
-    "docs/TV-VALIDATION.md",
+    "docs/TV-STOCK-BYPASS.md",
+    "docs/FULL-AUDIT-3.1.0.md",
     "docs/screenshots/classic-bloom-atmosphere.png",
     "docs/screenshots/overlap-background-vocals.png",
-    "docs/screenshots/script-safe-tv.png",
     "examples/ELRC-EXAMPLE.txt",
 )
-
 WINDOWS_TEXT_SUFFIXES = {".cmd", ".ps1"}
 BINARY_SUFFIXES = {".png"}
 
@@ -52,14 +53,15 @@ def parse_args() -> argparse.Namespace:
 def validate_version(version: str) -> None:
     expected = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if version != expected:
-        raise SystemExit(f"requested version {version!r} does not match VERSION {expected!r}")
+        raise SystemExit(
+            f"requested version {version!r} does not match VERSION {expected!r}"
+        )
 
 
 def release_bytes(source: Path) -> bytes:
     data = source.read_bytes()
     if source.suffix.lower() in BINARY_SUFFIXES:
         return data
-
     text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     newline = "\r\n" if source.suffix.lower() in WINDOWS_TEXT_SUFFIXES else "\n"
     return text.replace("\n", newline).encode("utf-8")
@@ -81,14 +83,15 @@ def copy_release_tree(target: Path, version: str) -> list[Path]:
 
 
 def write_deterministic_zip(folder: Path, archive: Path, files: list[Path]) -> None:
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
+    with zipfile.ZipFile(
+        archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as output:
         for source in sorted(
             files,
             key=lambda path: path.relative_to(folder.parent).as_posix(),
         ):
             relative = source.relative_to(folder.parent).as_posix()
             info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
-            # Pin Unix ZIP metadata so Windows and Linux builds are identical.
             info.create_system = 3
             executable = source.suffix == ".sh"
             info.external_attr = ((0o755 if executable else 0o644) & 0xFFFF) << 16
@@ -107,7 +110,6 @@ def sha256(path: Path) -> str:
 def main() -> int:
     args = parse_args()
     validate_version(args.version)
-
     folder = DIST / f"jellyfin-lyric-motion-v{args.version}"
     archive = DIST / f"jellyfin-lyric-motion-v{args.version}.zip"
     checksum = DIST / f"jellyfin-lyric-motion-v{args.version}.zip.sha256"
@@ -120,15 +122,14 @@ def main() -> int:
 
     files = copy_release_tree(folder, args.version)
     write_deterministic_zip(folder, archive, files)
+    digest = sha256(archive)
     checksum.write_text(
-        f"{sha256(archive)}  {archive.name}\n",
-        encoding="ascii",
-        newline="\n",
+        f"{digest}  {archive.name}\n", encoding="ascii", newline="\n"
     )
 
     print(f"Release folder: {folder}")
     print(f"Release ZIP:    {archive}")
-    print(f"SHA-256:       {sha256(archive)}")
+    print(f"SHA-256:       {digest}")
     print(f"Files:         {len(files)}")
     return 0
 

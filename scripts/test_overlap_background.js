@@ -67,7 +67,8 @@ function extractFunction(name) {
 }
 
 const context = {
-    BACKGROUND_VOCAL_SENTINEL: '\u2063\u2060',
+    BACKGROUND_VOCAL_TOKEN: '[ak:bg]',
+    LEGACY_BACKGROUND_VOCAL_SENTINEL: '\u2063\u2060',
     state: {
         lyrics: [],
         lineData: [],
@@ -94,6 +95,28 @@ const tagged = context.lyricTextProfile({
 assert.strictEqual(tagged.text, '(Brazil)');
 assert.strictEqual(tagged.positionOffset, 2);
 assert.strictEqual(tagged.isBackgroundVocal, true);
+assert.strictEqual(tagged.backgroundVocalRoleSource, 'legacy-marker');
+
+const asciiTagged = context.lyricTextProfile({
+    Text: '[ak:bg](Brazil)'
+});
+assert.strictEqual(asciiTagged.text, '(Brazil)');
+assert.strictEqual(asciiTagged.positionOffset, 7);
+assert.strictEqual(asciiTagged.backgroundVocalRoleSource, 'ascii-marker');
+
+const recovered = context.lyricTextProfile({ Text: '(Brazil)' });
+assert.strictEqual(recovered.positionOffset, 0);
+assert.strictEqual(
+    recovered.backgroundVocalRoleSource,
+    'parenthetical-fallback'
+);
+
+const recoveredFullwidth = context.lyricTextProfile({ Text: '（合唱）' });
+assert.strictEqual(recoveredFullwidth.positionOffset, 0);
+assert.strictEqual(
+    recoveredFullwidth.backgroundVocalRoleSource,
+    'parenthetical-fallback'
+);
 
 const untagged = context.lyricTextProfile({ Text: 'Lead' });
 assert.strictEqual(untagged.text, 'Lead');

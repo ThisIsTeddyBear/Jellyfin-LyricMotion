@@ -11,5 +11,5 @@ Overlapping lines retain independent final timestamps:
 [00:36.596]<00:36.596>One <00:36.848>voice, <00:37.471>one <00:37.775>moment<00:38.265>
 [00:37.284]<00:37.284>Answering <00:38.166>now<00:38.719>
 
-Do not type the invisible background-role marker manually. Convert TTML x-bg
-content with scripts/ttml_to_elrc.py so the marker and timings remain valid.
+Do not type the [ak:bg] background-role token manually. Convert TTML x-bg
+content with scripts/ttml_to_elrc.py so the token and timings remain valid.

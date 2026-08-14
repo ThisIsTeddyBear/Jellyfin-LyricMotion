@@ -2,15 +2,17 @@
 set -eu
 
 WEB_DIR=""
+KEEP_BACKUPS=0
 
 usage() {
-  echo "Usage: $0 [--webdir /path/to/jellyfin-web]"
+  echo "Usage: $0 [--webdir /path/to/jellyfin-web] [--keep-backups]"
   exit 2
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --webdir) [ "$#" -ge 2 ] || usage; WEB_DIR=$2; shift 2 ;;
+    --keep-backups) KEEP_BACKUPS=1; shift ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
@@ -52,7 +54,7 @@ fi
 
 python3 - "$INDEX" <<'PY'
 from pathlib import Path
-import re, sys
+import os, re, stat, sys, tempfile
 
 path = Path(sys.argv[1])
 content = path.read_text(encoding="utf-8")
@@ -70,13 +72,40 @@ content = re.sub(
     flags=re.I | re.S,
 )
 
-path.write_text(content, encoding="utf-8")
+mode = stat.S_IMODE(path.stat().st_mode)
+temporary = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", dir=path.parent,
+        prefix=f".{path.name}.", suffix=".tmp", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+    temporary = None
+finally:
+    if temporary is not None:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
 PY
 
 rm -f \
   "$WEB_DIR/jellyfin-lyric-motion.js" \
   "$WEB_DIR/jellyfin-lyric-motion.css" \
+  "$WEB_DIR/jellyfin-lyric-romanizer.js" \
+  "$WEB_DIR/jellyfin-lyric-romanization-sources.js" \
   "$WEB_DIR/apple-karaoke.js" \
   "$WEB_DIR/apple-karaoke.css"
+
+if [ "$KEEP_BACKUPS" -eq 0 ]; then
+  rm -f \
+    "$WEB_DIR/index.html.before-jellyfin-lyric-motion" \
+    "$WEB_DIR"/index.html.before-jellyfin-lyric-motion-*
+fi
 
 echo "Jellyfin LyricMotion removed. Hard-refresh Jellyfin Web."

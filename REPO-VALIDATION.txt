@@ -1,23 +1,36 @@
-Jellyfin LyricMotion v3.0.1 repository validation
+Jellyfin LyricMotion v3.1.0 repository validation
 
-JavaScript node --check: PASSED
-Overlap/background contract: 19 assertions PASSED
-TV overlap/activation contract: 20 assertions PASSED
-Connected-script contract: 106 assertions PASSED
-Release/version contract: 27 assertions PASSED
-TTML converter: 5 tests PASSED
-PowerShell installer parsing: PASSED
-POSIX installer parsing: PASSED
-Install -> reinstall -> uninstall simulation: PASSED
+Local final-source validation (Linux environment): PASSED
+
+JavaScript assertions: 13,643 PASSED
+  Stock TV bypass: 148
+  Offline LyricG2P: 326
+  Indic lyric-quality polish: 2,951
+  Offline isolation/stress: 2,026
+  Romanization robustness: 7,486
+  Romanization + timing: 36
+  Runtime races/interception: 59
+  Full-experience audit: 79
+  Overlap/background: 19
+  Multiscript rendering: 477
+  Full-audit optimization: 36
+
+TTML converter: 16 tests PASSED
+POSIX installer/uninstaller contract: 47 checks PASSED
+Packaged POSIX install -> uninstall smoke test: PASSED
 Deterministic package rebuild: PASSED
-Release package files: 24
-Feature screenshots: 3 at 1600x900
+Release package files: 29
 Patched Jellyfin index.html redistributed: NO
+Romanization network/provider dependency: NO
 Canonical public API: JellyfinLyricMotion
 Compatibility API alias: AppleKaraoke
 
-Local release asset:
-dist/local-testing/jellyfin-lyric-motion-v3.0.1.zip
+Final release asset:
+  dist/local-testing/jellyfin-lyric-motion-v3.1.0.zip
 
 SHA-256:
-BB7A55110DEC06C180C30652C653647CF17AC90F8FE2D548675921517968FD21
+  B6310F71E0F845703D4F53E4EF79EC150BB2D228B3A81562036E5FC38B832838
+
+Windows PowerShell 5.1 installer/uninstaller execution is gated in both
+.github/workflows/validate.yml and .github/workflows/release.yml. The release
+workflow will not publish v3.1.0 unless that Windows smoke test succeeds.

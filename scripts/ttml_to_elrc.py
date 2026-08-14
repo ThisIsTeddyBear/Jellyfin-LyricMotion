@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import re
+import os
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -31,12 +33,15 @@ NS = {"tt": TTML_NS}
 ROLE_ATTRIBUTE = f"{{{TTM_NS}}}role"
 SPACE_ATTRIBUTE = f"{{{XML_NS}}}space"
 BACKGROUND_ROLES = {"x-bg", "background", "bg"}
+AUXILIARY_ROLES = {"x-roman", "roman", "romanization", "x-translation", "translation"}
+MAX_TTML_BYTES = 64 * 1024 * 1024
 
-# ELRC has no standard per-line role field.  This two-codepoint prefix is
-# invisible in ordinary players, survives Jellyfin's LRC parser, and lets the
-# LyricMotion renderer distinguish a background-vocal line from a normal one.
-# It sits before the first enhanced cue, so cue text/timing remain untouched.
-BACKGROUND_SENTINEL = "\u2063\u2060"
+# ELRC has no standard per-line role field. Jellyfin strips Unicode format
+# controls on some server/web combinations, so use a deliberately visible,
+# ASCII-only transport token. LyricMotion removes it before painting and shifts
+# Jellyfin's cue positions back by exactly its length. This token sits before
+# the first enhanced cue, leaving every word timestamp untouched.
+BACKGROUND_SENTINEL = "[ak:bg]"
 
 WHITESPACE_RE = re.compile(r"\s+")
 OFFSET_TIME_RE = re.compile(
@@ -91,9 +96,47 @@ def parse_rate(value: str | None, default: Decimal) -> Decimal:
         rate = Decimal(value)
     except InvalidOperation as exc:
         raise ConversionError(f"Invalid TTML timing rate: {value!r}") from exc
-    if rate <= 0:
-        raise ConversionError(f"TTML timing rate must be positive: {value!r}")
+    if not rate.is_finite() or rate <= 0:
+        raise ConversionError(
+            f"TTML timing rate must be finite and positive: {value!r}"
+        )
     return rate
+
+
+def apply_frame_rate_multiplier(
+    frame_rate: Decimal,
+    value: str | None,
+) -> Decimal:
+    """Apply TTML's optional ``frameRateMultiplier="num den"`` safely."""
+
+    if not value:
+        return frame_rate
+
+    parts = value.split()
+    if len(parts) != 2:
+        raise ConversionError(
+            f"Invalid TTML frameRateMultiplier: {value!r}"
+        )
+
+    try:
+        numerator = Decimal(parts[0])
+        denominator = Decimal(parts[1])
+    except InvalidOperation as exc:
+        raise ConversionError(
+            f"Invalid TTML frameRateMultiplier: {value!r}"
+        ) from exc
+
+    if (
+        not numerator.is_finite()
+        or not denominator.is_finite()
+        or numerator <= 0
+        or denominator <= 0
+    ):
+        raise ConversionError(
+            f"TTML frameRateMultiplier must be finite and positive: {value!r}"
+        )
+
+    return frame_rate * numerator / denominator
 
 
 def decimal_milliseconds(seconds: Decimal) -> int:
@@ -115,9 +158,26 @@ def parse_ttml_time(
     if not value:
         return None
 
+    if (
+        not frame_rate.is_finite()
+        or not tick_rate.is_finite()
+        or frame_rate <= 0
+        or tick_rate <= 0
+    ):
+        raise ConversionError("TTML frame/tick rates must be finite and positive")
+
     offset_match = OFFSET_TIME_RE.fullmatch(value)
     if offset_match:
-        amount = Decimal(offset_match.group(1))
+        try:
+            amount = Decimal(offset_match.group(1))
+        except InvalidOperation as exc:
+            raise ConversionError(
+                f"Unsupported TTML time expression: {value!r}"
+            ) from exc
+        if not amount.is_finite() or amount < 0:
+            raise ConversionError(
+                f"TTML time must be finite and non-negative: {value!r}"
+            )
         unit = offset_match.group(2).lower()
         if unit == "h":
             seconds = amount * 3600
@@ -135,30 +195,37 @@ def parse_ttml_time(
 
     fields = value.split(":")
     try:
-        if len(fields) == 4:
-            hours = Decimal(fields[0])
-            minutes = Decimal(fields[1])
-            seconds = Decimal(fields[2])
-            frames = Decimal(fields[3])
-            total = hours * 3600 + minutes * 60 + seconds + frames / frame_rate
-        elif len(fields) == 3:
-            hours = Decimal(fields[0])
-            minutes = Decimal(fields[1])
-            seconds = Decimal(fields[2])
-            total = hours * 3600 + minutes * 60 + seconds
-        elif len(fields) == 2:
-            minutes = Decimal(fields[0])
-            seconds = Decimal(fields[1])
-            total = minutes * 60 + seconds
-        elif len(fields) == 1:
-            total = Decimal(fields[0])
-        else:
-            raise InvalidOperation
-    except InvalidOperation as exc:
+        numbers = [Decimal(field) for field in fields]
+    except (InvalidOperation, ValueError) as exc:
         raise ConversionError(f"Unsupported TTML time expression: {value!r}") from exc
 
-    if total < 0:
+    if not numbers or any(not number.is_finite() for number in numbers):
+        raise ConversionError(f"TTML time must be finite: {value!r}")
+    if any(number < 0 for number in numbers):
         raise ConversionError(f"Negative TTML time is not supported: {value!r}")
+
+    if len(numbers) == 4:
+        hours, minutes, seconds, frames = numbers
+        if minutes >= 60 or seconds >= 60 or frames >= frame_rate:
+            raise ConversionError(f"Malformed TTML clock time: {value!r}")
+        total = hours * 3600 + minutes * 60 + seconds + frames / frame_rate
+    elif len(numbers) == 3:
+        hours, minutes, seconds = numbers
+        if minutes >= 60 or seconds >= 60:
+            raise ConversionError(f"Malformed TTML clock time: {value!r}")
+        total = hours * 3600 + minutes * 60 + seconds
+    elif len(numbers) == 2:
+        minutes, seconds = numbers
+        if seconds >= 60:
+            raise ConversionError(f"Malformed TTML clock time: {value!r}")
+        total = minutes * 60 + seconds
+    elif len(numbers) == 1:
+        total = numbers[0]
+    else:
+        raise ConversionError(f"Unsupported TTML time expression: {value!r}")
+
+    if not total.is_finite():
+        raise ConversionError(f"TTML time must be finite: {value!r}")
     return decimal_milliseconds(total)
 
 
@@ -180,6 +247,13 @@ def element_role(element: ET.Element) -> str:
 def is_background(element: ET.Element) -> bool:
     roles = set(element_role(element).split())
     return bool(roles & BACKGROUND_ROLES)
+
+
+def is_auxiliary_text(element: ET.Element) -> bool:
+    """Return True for non-sung annotation tracks embedded in lyric TTML."""
+
+    roles = set(element_role(element).split())
+    return bool(roles & AUXILIARY_ROLES)
 
 
 def inherited_space_mode(element: ET.Element, parent_mode: str) -> str:
@@ -218,10 +292,17 @@ def timing_for(
 
     if begin is None:
         begin = inherited_begin
-    if end is None and duration is not None and begin is not None:
-        end = begin + duration
+
+    if duration is not None and begin is not None:
+        duration_end = begin + duration
+        if end is None or duration_end < end:
+            end = duration_end
+
     if end is None:
         end = inherited_end
+    elif inherited_end is not None:
+        end = min(end, inherited_end)
+
     return begin, end
 
 
@@ -251,7 +332,11 @@ def walk_text(
         yield TimedText(own_text, begin, end, timed=True)
 
     for child in element:
-        if not (exclude_background and is_background(child)):
+        # Translation/romanization annotations are not sung lyric text. They
+        # must never be flattened into the ELRC line. LyricMotion generates
+        # its PC/mobile romanized view independently at runtime.
+        excluded = is_auxiliary_text(child) or (exclude_background and is_background(child))
+        if not excluded:
             yield from walk_text(
                 child,
                 inherited_begin=begin,
@@ -399,6 +484,11 @@ def convert_tree(
         root.get("frameRate") or root.get(f"{{{TTML_NS}#parameter}}frameRate"),
         Decimal(30),
     )
+    frame_rate = apply_frame_rate_multiplier(
+        frame_rate,
+        root.get("frameRateMultiplier")
+        or root.get(f"{{{TTML_NS}#parameter}}frameRateMultiplier"),
+    )
     tick_rate = parse_rate(
         root.get("tickRate") or root.get(f"{{{TTML_NS}#parameter}}tickRate"),
         Decimal(1),
@@ -515,7 +605,34 @@ def convert_file(
         output_path = input_path.with_suffix(".elrc")
 
     try:
-        root = ET.parse(input_path).getroot()
+        same_path = input_path.resolve() == output_path.resolve()
+    except OSError:
+        same_path = input_path.absolute() == output_path.absolute()
+
+    if same_path:
+        raise ConversionError(
+            "Input and output paths must be different; refusing to overwrite the TTML source"
+        )
+
+    try:
+        size = input_path.stat().st_size
+        if size > MAX_TTML_BYTES:
+            raise ConversionError(
+                f"TTML input is too large ({size} bytes; limit {MAX_TTML_BYTES})"
+            )
+        payload = input_path.read_bytes()
+        if len(payload) > MAX_TTML_BYTES:
+            raise ConversionError(
+                f"TTML input is too large ({len(payload)} bytes; limit {MAX_TTML_BYTES})"
+            )
+        upper_payload = payload.upper()
+        if b"<!DOCTYPE" in upper_payload or b"<!ENTITY" in upper_payload:
+            raise ConversionError(
+                "TTML documents containing DTD/entity declarations are not supported"
+            )
+        root = ET.fromstring(payload)
+    except ConversionError:
+        raise
     except (ET.ParseError, OSError) as exc:
         raise ConversionError(f"Could not read TTML file {input_path}: {exc}") from exc
 
@@ -530,7 +647,37 @@ def convert_file(
         )
         + "\n"
     )
-    output_path.write_text(rendered, encoding="utf-8", newline="\n")
+    # Write beside the target and atomically replace it only after the whole
+    # document is flushed. A full disk, interrupted write, or encoding error
+    # therefore cannot leave an existing ELRC half-written.
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        temporary_path.replace(output_path)
+        temporary_path = None
+    except OSError as exc:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise ConversionError(
+            f"Could not write ELRC file {output_path}: {exc}"
+        ) from exc
+
     return output_path, result
 
 
@@ -555,7 +702,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "keep background vocals as separate lines but omit LyricMotion's "
-            "invisible role marker"
+            "ASCII role token"
         ),
     )
     return parser

@@ -47,11 +47,16 @@ if ($EnsureAdministrator -and -not (Test-IsAdministrator)) {
 
     exit $process.ExitCode
 }
-$Version = "3.0.1"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Here
+$VersionPath = Join-Path $Root "VERSION"
+if (-not (Test-Path $VersionPath)) { throw "Missing $VersionPath" }
+$Version = ([IO.File]::ReadAllText($VersionPath)).Trim()
+if ([string]::IsNullOrWhiteSpace($Version)) { throw "VERSION is empty" }
+if ($Version -notmatch '^[A-Za-z0-9._+\-]+$') { throw "VERSION contains unsafe characters" }
 $JsSource = Join-Path $Root "src\jellyfin-lyric-motion.js"
 $CssSource = Join-Path $Root "src\jellyfin-lyric-motion.css"
+$RomanizerSource = Join-Path $Root "src\jellyfin-lyric-romanizer.js"
 
 function Test-WebDir([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
@@ -92,6 +97,66 @@ Jellyfin also supports the JELLYFIN_WEB_DIR environment variable.
 "@
 }
 
+
+function Commit-AtomicReplacement([string]$Temporary, [string]$Destination) {
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        Move-Item -LiteralPath $Temporary -Destination $Destination
+        return
+    }
+
+    $directory = Split-Path -Parent $Destination
+    $leaf = Split-Path -Leaf $Destination
+    $replaceBackup = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.replace.bak')
+
+    try {
+        try {
+            # Windows PowerShell 5.1/.NET Framework can reject $null here with
+            # "The path is not of a legal form." Use a real transient backup.
+            [IO.File]::Replace($Temporary, $Destination, $replaceBackup, $true)
+        } catch [System.ArgumentException] {
+            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
+            Remove-Item -LiteralPath $Temporary -Force
+        } catch [System.IO.IOException] {
+            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
+            Remove-Item -LiteralPath $Temporary -Force
+        } catch [System.NotSupportedException] {
+            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
+            Remove-Item -LiteralPath $Temporary -Force
+        }
+    } finally {
+        Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Copy-AtomicFile([string]$Source, [string]$Destination) {
+    $directory = Split-Path -Parent $Destination
+    $leaf = Split-Path -Leaf $Destination
+    $temporary = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        Copy-Item -LiteralPath $Source -Destination $temporary -Force
+        Commit-AtomicReplacement $temporary $Destination
+    } finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Write-AtomicUtf8([string]$Path, [string]$Content) {
+    $directory = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $temporary = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    try {
+        [IO.File]::WriteAllText($temporary, $Content, $Utf8NoBom)
+        Commit-AtomicReplacement $temporary $Path
+    } finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Remove-LyricMotionTags([string]$Content) {
     foreach ($pattern in @(
         '(?is)<link\b[^>]*href=["''][^"'']*(?:jellyfin-lyric-motion|apple-karaoke)\.css(?:\?[^"'']*)?["''][^>]*>',
@@ -107,10 +172,24 @@ $IndexPath = Join-Path $WebDir "index.html"
 
 if (-not (Test-Path $JsSource)) { throw "Missing $JsSource" }
 if (-not (Test-Path $CssSource)) { throw "Missing $CssSource" }
+if (-not (Test-Path $RomanizerSource)) { throw "Missing $RomanizerSource" }
 
 Write-Host ""
 Write-Host "Jellyfin LyricMotion v$Version" -ForegroundColor Cyan
 Write-Host "Web directory: $WebDir"
+
+$content = Remove-LyricMotionTags ([IO.File]::ReadAllText($IndexPath))
+$runtime = [regex]::Match(
+    $content,
+    '(?is)<script\b[^>]*src=["''][^"'']*runtime\.bundle\.js(?:\?[^"'']*)?["''][^>]*>'
+)
+
+if (-not $runtime.Success) {
+    throw "runtime.bundle.js was not found. Jellyfin Web was not modified."
+}
+
+$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '"></script>'
+$content = $content.Insert($runtime.Index, $inject)
 
 $BackupName = "index.html.before-jellyfin-lyric-motion-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
 $BackupPath = Join-Path $WebDir $BackupName
@@ -121,21 +200,16 @@ while (Test-Path -LiteralPath $BackupPath) {
 }
 Copy-Item $IndexPath $BackupPath -Force
 
-$content = Remove-LyricMotionTags ([IO.File]::ReadAllText($IndexPath))
-$runtime = [regex]::Match($content, '(?is)<script\b[^>]*src=["'']runtime\.bundle\.js[^"'']*["''][^>]*>')
+# Existing installations already reference these filenames, so update every
+# overlay asset through a same-directory replacement. Browsers never observe a
+# half-copied JavaScript/CSS file during an in-place upgrade.
+Copy-AtomicFile $JsSource (Join-Path $WebDir "jellyfin-lyric-motion.js")
+Copy-AtomicFile $CssSource (Join-Path $WebDir "jellyfin-lyric-motion.css")
+Copy-AtomicFile $RomanizerSource (Join-Path $WebDir "jellyfin-lyric-romanizer.js")
 
-if (-not $runtime.Success) {
-    throw "runtime.bundle.js was not found. Backup: $BackupPath"
-}
-
-$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=3.0.1"><script defer="defer" src="jellyfin-lyric-motion.js?v=3.0.1"></script>'
-$content = $content.Insert($runtime.Index, $inject)
-
-$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($IndexPath, $content, $Utf8NoBom)
-
-Copy-Item $JsSource (Join-Path $WebDir "jellyfin-lyric-motion.js") -Force
-Copy-Item $CssSource (Join-Path $WebDir "jellyfin-lyric-motion.css") -Force
+# Commit the HTML injection last using a same-directory atomic replacement so
+# an interrupted write cannot leave Jellyfin's index.html half-written.
+Write-AtomicUtf8 $IndexPath $content
 Remove-Item (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
 
