@@ -1,27 +1,23 @@
-# Lyric timing offset
+# Lyric timing correction
 
-Desktop/mobile LyricMotion adds compact timing controls to the lyrics page:
+Starting with v3.1.1, LyricMotion exposes one compact timing chip instead of a permanent row of minus/plus/reset buttons:
 
 ```text
-−   +0.0s   +   ↺
+[ ⏱ +0.0s ]
 ```
 
-- `−` decreases delay by 0.5 s, making lyrics appear earlier.
-- `+` increases delay by 0.5 s, making lyrics appear later.
-- `↺` resets the current song to `+0.0s`.
-- The supported UI range is −15.0 s to +15.0 s.
+Opening the chip reveals `-0.1`, `+0.1`, `-0.5`, `+0.5`, one-tap `Sync lyric to now`, `Undo`, and `Reset`.
 
-The offset is **display-only**: it changes LyricMotion's lyric timeline and never seeks or alters the audio element. It applies to line activation and word/syllable progress from the same final timeline, so line state and swipe stay internally synchronized.
+Positive offset means lyrics appear later. Negative offset means lyrics appear earlier. Audio playback is never sought or altered.
 
-The value is stored per song in `appleKaraokeSongPreferencesV2` alongside that song's Romanization preference.
+The timing model is intentionally a single constant offset:
 
-Positive values mean "lyrics later". Internally the lyric timeline is `media timeline - offset`; therefore +0.5 s causes a lyric timestamp at 10.0 s to become active when media reaches 10.5 s.
-
-Console diagnostics:
-
-```javascript
-JellyfinLyricMotion.timing()
-JellyfinLyricMotion.setTimingOffset(0.5)
-JellyfinLyricMotion.adjustTimingOffset(-0.5)
-JellyfinLyricMotion.resetTimingOffset()
+```text
+source lyric time = media time - offset
 ```
+
+For word/syllable-synced lyrics, one-tap sync can use the exact selected cue start; for line-synced lyrics it uses the selected line start.
+
+Corrections are persisted against a fingerprint of the exact lyric timeline, including cue positions as well as cue timing. Replacing the lyrics for a song therefore does not automatically inherit a stale timing correction.
+
+For the complete interaction and diagnostics API, see [Smart Timing Assistant](TIMING-ASSISTANT.md).

@@ -1,24 +1,107 @@
 #!/usr/bin/env sh
 set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT"
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-cd "$ROOT_DIR"
+# Syntax / loadability.
+for file in \
+  src/jellyfin-lyric-motion.js \
+  src/jellyfin-lyric-romanizer.js \
+  scripts/benchmark-lyricg2p65.js \
+  scripts/benchmark-lyricg2p651.js \
+  scripts/evaluate-lyricg2p65.js \
+  scripts/calibrate-lyricg2p65-confidence.js \
+  tests/lyricg2p65.test.js \
+  tests/lyricg2p651-hybrid.test.js \
+  tests/runtime-smoke.test.js
+do
+  node --check "$file"
+done
 
-node --check src/jellyfin-lyric-motion.js
-node --check src/jellyfin-lyric-romanizer.js
-node scripts/test_stock_tv_bypass.js
-node scripts/test_romanization.js
-node scripts/test_indic_polish.js
-node scripts/test_offline_romanization.js
-node scripts/test_romanization_robustness.js
-node scripts/test_timing_controls.js
-node scripts/test_runtime_races.js
-node scripts/test_full_experience_audit.js
-node scripts/test_overlap_background.js
-node scripts/test_script_safety.js
-node scripts/test_audit_optimizations.js
-python3 scripts/test_ttml_to_elrc.py
-sh scripts/test_installers.sh
+python3 -m py_compile \
+  scripts/import-dakshina.py \
+  scripts/prepare-lyricg2p-dataset.py \
+  scripts/package_release.py \
+  scripts/ttml_to_elrc.py \
+  research/train_tiny_transformer.py
 
-echo "All LyricMotion local validation passed."
+sh -n scripts/install.sh
+sh -n scripts/uninstall.sh
+
+test "$(cat VERSION)" = "3.2.0"
+test "$(cat LYRICG2P_VERSION)" = "6.5.1"
+grep -q "const VERSION = '3.2.0'" src/jellyfin-lyric-motion.js
+grep -q "const LYRICG2P_VERSION = '6.5.1'" src/jellyfin-lyric-motion.js
+grep -q "COPY LYRICG2P_VERSION /tmp/jellyfin-lyricg2p-version" docker/Dockerfile
+grep -q 'g2p=${LYRICG2P_VERSION}' docker/Dockerfile
+grep -q "const VERSION = '6.5.1'" src/jellyfin-lyric-romanizer.js
+
+# Production/regression and hybrid/model/Unicode suites.
+node tests/lyricg2p65.test.js
+node tests/lyricg2p651-hybrid.test.js
+node tests/runtime-smoke.test.js
+python3 tests/ttml_converter_test.py
+python3 tests/research_pipeline_test.py
+python3 tests/release_static_test.py
+
+node scripts/evaluate-lyricg2p65.js \
+  research/lyricg2p65-regression-seed.tsv /tmp/lyricg2p651-regression-report.json >/dev/null
+node scripts/calibrate-lyricg2p65-confidence.js \
+  research/lyricg2p65-regression-seed.tsv /tmp/lyricg2p651-confidence-report.json >/dev/null
+node scripts/benchmark-lyricg2p651.js >/tmp/lyricg2p651-benchmark.json
+
+grep -q '"engine": "6.5.1"' /tmp/lyricg2p651-regression-report.json
+grep -q '"engine": "6.5.1"' /tmp/lyricg2p651-confidence-report.json
+grep -q '"engine": "6.5.1"' /tmp/lyricg2p651-benchmark.json
+
+# Synthetic Jellyfin Web install/uninstall, including engine-specific cache busting.
+TMP_WEB=$(mktemp -d)
+cleanup() { rm -rf "$TMP_WEB"; }
+trap cleanup EXIT INT TERM
+cat > "$TMP_WEB/index.html" <<'HTML'
+<!doctype html><html><head></head><body><script src="runtime.bundle.js"></script></body></html>
+HTML
+sh scripts/install.sh --webdir "$TMP_WEB" >/dev/null
+grep -q "jellyfin-lyric-motion.js?v=$(cat VERSION)&g2p=$(cat LYRICG2P_VERSION)" "$TMP_WEB/index.html"
+grep -q "jellyfin-lyric-motion.css?v=$(cat VERSION)" "$TMP_WEB/index.html"
+test -s "$TMP_WEB/jellyfin-lyric-motion.js"
+test -s "$TMP_WEB/jellyfin-lyric-motion.css"
+test -s "$TMP_WEB/jellyfin-lyric-romanizer.js"
+grep -q "const VERSION = '6.5.1'" "$TMP_WEB/jellyfin-lyric-romanizer.js"
+sh scripts/uninstall.sh --webdir "$TMP_WEB" >/dev/null
+! grep -q 'jellyfin-lyric-motion.js' "$TMP_WEB/index.html"
+
+# Deterministic release packaging and automatic checksum sidecar.
+python3 scripts/package_release.py --version "$(cat VERSION)" --output /tmp/lyricmotion-package-a.zip >/dev/null
+python3 scripts/package_release.py --version "$(cat VERSION)" --output /tmp/lyricmotion-package-b.zip >/dev/null
+cmp /tmp/lyricmotion-package-a.zip /tmp/lyricmotion-package-b.zip
+test -s /tmp/lyricmotion-package-a.zip.sha256
+python3 - <<'PY'
+import zipfile
+for path in ('/tmp/lyricmotion-package-a.zip', '/tmp/lyricmotion-package-b.zip'):
+    with zipfile.ZipFile(path) as archive:
+        bad = archive.testzip()
+        if bad is not None:
+            raise SystemExit(f'Corrupt release archive member: {bad}')
+        names = archive.namelist()
+        forbidden = (
+            '/.github/', '/.gitignore', '/GITHUB-RELEASE.md',
+            '/REPO-UPDATE-INSTRUCTIONS.md', '/REPO-BUNDLE-MANIFEST.txt',
+            '/docs/RELEASING.md',
+        )
+        leaked = [name for name in names if any(marker in name for marker in forbidden)]
+        if leaked:
+            raise SystemExit('Repository-only metadata leaked into release ZIP: ' + ', '.join(leaked))
+PY
+rm -f /tmp/lyricmotion-package-a.zip /tmp/lyricmotion-package-b.zip \
+      /tmp/lyricmotion-package-a.zip.sha256 /tmp/lyricmotion-package-b.zip.sha256
+
+# py_compile is only a syntax gate; remove its cache output before release hygiene checks.
+rm -rf scripts/__pycache__ research/__pycache__ tests/__pycache__
+
+# Release tree hygiene. Targeted sparse coefficients are source text, not external checkpoints.
+if find . -type f \( -name '*.onnx' -o -name '*.pt' -o -name '*.pth' -o -name '*.bin' -o -name '*.pyc' -o -name '*.pyo' \) | grep -q .; then
+  echo 'Unexpected compiled/model artifact in release tree' >&2
+  exit 1
+fi
+echo "Jellyfin LyricMotion $(cat VERSION) / LyricG2P $(cat LYRICG2P_VERSION): validation passed"

@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  *
- * Jellyfin LyricMotion v3.1.0 — offline LyricG2P, multilingual Classic Bloom, stock-TV bypass
+ * Jellyfin LyricMotion v3.2.0 — offline LyricG2P, multilingual Classic Bloom, stock-TV bypass
  *
  * Known-good v1 Jellyfin capture/timeline path.
  *
@@ -1169,15 +1169,15 @@
 .lyricPage .ak-romanization-icon {
     display: inline-grid;
     place-items: center;
-    min-width: 1.38rem;
-    height: 1.38rem;
-    padding: 0 0.18rem;
-    border-radius: 0.4rem;
+    width: 1.45rem;
+    height: 1.45rem;
+    border-radius: 0.46rem;
     background: rgba(255, 255, 255, 0.11);
-    font-size: 0.72rem;
-    font-weight: 800;
-    letter-spacing: -0.03em;
+    font-size: 0.84rem;
+    font-weight: 850;
+    line-height: 1;
 }
+
 
 .lyricPage .ak-romanization-label {
     white-space: nowrap;
@@ -1195,7 +1195,7 @@
 }
 
 /* -------------------------------------------------------------------------- */
-/* PC/mobile lyric tools: romanization + per-song timing offset               */
+/* PC/mobile lyric tools: Romanize + compact Timing Assistant                 */
 /* -------------------------------------------------------------------------- */
 
 .lyricPage .ak-lyrics-tools {
@@ -1205,115 +1205,45 @@
     z-index: 12;
 
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.58rem;
+    flex-flow: row wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
 
-    max-width: min(92vw, 24rem);
+    max-width: min(94vw, 25rem);
     pointer-events: auto;
 }
 
-.lyricPage .ak-lyrics-tools .ak-romanization-toggle {
+.lyricPage .ak-lyrics-tools .ak-romanization-toggle,
+.lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip {
     position: static;
     top: auto;
     right: auto;
     z-index: auto;
+    min-height: 2.5rem;
+    padding: 0.34rem 0.72rem;
+    gap: 0.42rem;
+    border-radius: 999px;
 }
 
-.lyricPage .ak-lyrics-tools .ak-lyrics-timing-controls {
+.lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.22rem;
-
-    min-height: 2.55rem;
-    padding: 0.31rem 0.38rem;
+    justify-content: center;
+    gap: 0.38rem;
 
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 999px;
 
-    background: rgba(16, 16, 20, 0.64);
-    color: rgba(255, 255, 255, 0.92);
+    background: rgba(16, 16, 20, 0.66);
+    color: rgba(255, 255, 255, 0.94);
     -webkit-backdrop-filter: blur(12px) saturate(1.15);
     backdrop-filter: blur(12px) saturate(1.15);
 
     box-shadow:
         0 8px 26px rgba(0, 0, 0, 0.20),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
 
-.lyricPage .ak-lyrics-tools .ak-lyrics-timing-btn {
-    display: inline-grid;
-    place-items: center;
-
-    width: 2rem;
-    height: 2rem;
-    min-width: 2rem;
-    min-height: 2rem;
-    padding: 0;
-
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: rgba(255, 255, 255, 0.91);
-
-    font: inherit;
-    line-height: 1;
-    cursor: pointer;
-    user-select: none;
-    -webkit-tap-highlight-color: transparent;
-
-    transition:
-        background-color 140ms ease,
-        color 140ms ease,
-        transform 140ms ease,
-        opacity 140ms ease;
-}
-
-.lyricPage .ak-lyrics-tools .ak-lyrics-timing-btn:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.10);
-    color: #fff;
-}
-
-.lyricPage .ak-lyrics-tools .ak-lyrics-timing-btn:active:not(:disabled) {
-    transform: scale(0.92);
-}
-
-.lyricPage .ak-lyrics-tools .ak-lyrics-timing-btn:focus-visible {
-    outline: 2px solid rgba(255, 255, 255, 0.88);
-    outline-offset: 2px;
-}
-
-.lyricPage .ak-lyrics-tools .ak-lyrics-timing-btn:disabled {
-    opacity: 0.32;
-    cursor: default;
-}
-
-.lyricPage .ak-lyrics-tools .ak-timing-glyph {
-    display: inline-block;
-    transform: translateY(-0.02em);
-    font-size: 1.14rem;
-    font-weight: 650;
-    line-height: 1;
-}
-
-.lyricPage .ak-lyrics-tools .ak-timing-reset-btn .ak-timing-glyph {
-    font-size: 0.94rem;
-    font-weight: 700;
-}
-
-.lyricPage .ak-lyrics-tools .lyrics-timing-display {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-
-    min-width: 3.55rem;
-    height: 2rem;
-    padding: 0 0.28rem;
-
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.075);
-
-    color: rgba(255, 255, 255, 0.92);
     font: inherit;
     font-size: 0.86rem;
     font-weight: 650;
@@ -1321,31 +1251,228 @@
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.01em;
     white-space: nowrap;
+
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+
+    transition:
+        background-color 140ms ease,
+        border-color 140ms ease,
+        transform 140ms ease;
+}
+
+.lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip:hover {
+    background: rgba(30, 30, 36, 0.78);
+    border-color: rgba(255, 255, 255, 0.24);
+}
+
+.lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip:active {
+    transform: scale(0.97);
+}
+
+.lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip[data-ak-timing-active="true"] {
+    background: rgba(255, 255, 255, 0.15);
+    border-color: rgba(255, 255, 255, 0.28);
+}
+
+.lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip:focus-visible,
+.lyricPage .ak-lyrics-tools .ak-timing-action:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.90);
+    outline-offset: 2px;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-chip-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 1.45rem;
+    height: 1.45rem;
+    border-radius: 0.46rem;
+    background: rgba(255, 255, 255, 0.11);
+    font-size: 0.9rem;
+    line-height: 1;
+    opacity: 0.96;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-chip-value {
+    min-width: 3.1rem;
+    text-align: center;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-popover {
+    flex: 1 0 100%;
+    width: min(21.5rem, calc(100vw - 1.5rem));
+    margin-left: auto;
+    padding: 0.8rem;
+
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 1rem;
+    background: rgba(12, 12, 16, 0.91);
+    color: rgba(255, 255, 255, 0.94);
+    -webkit-backdrop-filter: blur(18px) saturate(1.2);
+    backdrop-filter: blur(18px) saturate(1.2);
+
+    box-shadow:
+        0 16px 42px rgba(0, 0, 0, 0.34),
+        inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+    display: grid;
+    gap: 0.62rem;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-popover-heading {
+    font-size: 0.96rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-summary {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.8rem;
+    padding: 0.52rem 0.62rem;
+
+    border-radius: 0.72rem;
+    background: rgba(255, 255, 255, 0.065);
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-current-value {
+    font-size: 1.06rem;
+    font-variant-numeric: tabular-nums;
+}
+
+
+.lyricPage .ak-lyrics-tools .ak-timing-action-row {
+    display: flex;
+    gap: 0.42rem;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-action {
+    flex: 1 1 auto;
+    min-height: 2.15rem;
+    padding: 0.42rem 0.62rem;
+
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 0.68rem;
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(255, 255, 255, 0.92);
+
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 640;
+    line-height: 1.15;
+    font-variant-numeric: tabular-nums;
+
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+
+    transition:
+        background-color 130ms ease,
+        border-color 130ms ease,
+        opacity 130ms ease,
+        transform 130ms ease;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-action:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-action:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-action:disabled {
+    opacity: 0.34;
+    cursor: default;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-action-wide {
+    width: 100%;
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-action-primary {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.20);
+}
+
+.lyricPage .ak-lyrics-tools .ak-timing-sync-status {
+    min-height: 2.3rem;
+    padding: 0.52rem 0.58rem;
+
+    border-radius: 0.66rem;
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(255, 255, 255, 0.72);
+
+    font-size: 0.74rem;
+    line-height: 1.35;
+}
+
+.lyricPage.ak-timing-pick-mode .ak-enhanced-line,
+.lyricPage .ak-timing-pick-mode .ak-enhanced-line {
+    cursor: crosshair;
+}
+
+.lyricPage.ak-timing-pick-mode .ak-enhanced-line:hover,
+.lyricPage .ak-timing-pick-mode .ak-enhanced-line:hover {
+    outline: 1px solid rgba(255, 255, 255, 0.22);
+    outline-offset: 0.12em;
+    border-radius: 0.24em;
+}
+
+.lyricPage.ak-timing-pick-mode .ak-word:hover,
+.lyricPage .ak-timing-pick-mode .ak-word:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 0.18em;
 }
 
 @media (max-width: 760px) {
     .lyricPage .ak-lyrics-tools {
         top: max(4.5rem, calc(env(safe-area-inset-top, 0px) + 4.05rem));
         right: max(0.75rem, calc(env(safe-area-inset-right, 0px) + 0.65rem));
-        gap: 0.45rem;
+        gap: 0.42rem;
     }
 
-    .lyricPage .ak-lyrics-tools .ak-lyrics-timing-controls {
+    .lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip {
         min-height: 2.35rem;
-        padding: 0.25rem 0.3rem;
-    }
-
-    .lyricPage .ak-lyrics-tools .ak-lyrics-timing-btn {
-        width: 1.86rem;
-        height: 1.86rem;
-        min-width: 1.86rem;
-        min-height: 1.86rem;
-    }
-
-    .lyricPage .ak-lyrics-tools .lyrics-timing-display {
-        min-width: 3.35rem;
-        height: 1.86rem;
+        padding: 0.30rem 0.64rem;
         font-size: 0.80rem;
+    }
+
+    .lyricPage .ak-lyrics-tools .ak-timing-popover {
+        width: min(20.5rem, calc(100vw - 1rem));
+        padding: 0.68rem;
+        gap: 0.52rem;
+    }
+
+    .lyricPage .ak-lyrics-tools .ak-timing-action {
+        min-height: 2.05rem;
+        padding: 0.4rem 0.48rem;
+        font-size: 0.74rem;
     }
 }
 
+
+/* v3.2.0 compact two-tool strip: the standalone romanization rules above are
+ * retained for graceful fallback, while the shared host owns final geometry. */
+.lyricPage .ak-lyrics-tools .ak-romanization-toggle {
+    min-height: 2.5rem;
+    padding: 0.34rem 0.72rem;
+    gap: 0.42rem;
+    font-size: 0.86rem;
+    font-weight: 650;
+}
+
+@media (max-width: 760px) {
+    .lyricPage .ak-lyrics-tools {
+        gap: 0.4rem;
+    }
+
+    .lyricPage .ak-lyrics-tools .ak-romanization-toggle,
+    .lyricPage .ak-lyrics-tools .ak-lyrics-timing-chip {
+        min-height: 2.35rem;
+        padding: 0.30rem 0.62rem;
+        font-size: 0.80rem;
+    }
+}

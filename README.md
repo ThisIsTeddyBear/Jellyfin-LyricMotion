@@ -12,19 +12,27 @@ An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and 
 > [!NOTE]
 > **TV policy:** LyricMotion intentionally hard-bypasses TV-class clients. Detected TVs use Jellyfin's stock lyrics experience with no LyricMotion fetch/XHR interception, observers, media hooks, lyric DOM decoration, Romanizer loading, or timing controls. Desktop and mobile remain enhanced. See [TV Stock Bypass](docs/TV-STOCK-BYPASS.md).
 
-## What's new in 3.1.0
+## What's new in 3.2.0 / LyricG2P 6.5.1
 
-- **LyricG2P 5.1 offline Romanizer** — whole-line/whole-word conversion with dedicated lyric-aware handling for Malayalam, Tamil, Telugu, Kannada, Punjabi/Gurmukhi, Hindi/Devanagari-family languages, Bengali/Assamese, Gujarati and Odia, plus a conservative Urdu/Shahmukhi path and broad Unicode fallback.
-- **No cloud Romanization** — no Google, BiniLyrics, LyricsPlus, provider service, model download, or other third-party Romanization request. Native lyric text stays inside Jellyfin Web.
-- **Clean lyric UI** — only the **Romanize / Romanized** control and the **lyrics offset** control are exposed.
-- **Per-song timing correction** — adjust lyrics in 0.5-second steps without changing audio playback or source lyric files.
-- **Multilingual Classic Bloom parity** — shaping-safe Indic grapheme/akshara clusters receive the same bloom energy model as Latin when segmentation is safe; joining scripts keep a whole-shaped-run path to preserve glyph formation.
-- **Major Malayalam/Tamil/Telugu/Kannada/Punjabi quality pass** — contextual Malayalam stop voicing and short-u handling, Tamil contextual pronunciation/geminate cleanup, Telugu/Kannada nasal handling, and expanded Punjabi/Gurmukhi schwa/glide/nukta behavior.
-- **Full-repository robustness audit** — stricter Jellyfin lyric endpoint detection, GET-only capture, ABA/same-song race protection, active-line ordering fixes, lower hot-loop allocation, deferred geometry reads, stronger TTML validation, safer install/uninstall, and Docker reinjection hardening.
-- **Romanizer performance work** — the 60,513-entry ICU-derived fallback is packed/lazy, and source-to-Roman cue-boundary maps use a bounded cache so repeated karaoke remapping does not reromanize the same prefixes.
-- **Windows installer compatibility fix** — final 3.1.0 avoids the PowerShell 5.1 `File.Replace(..., $null, ...)` path error while retaining a same-directory atomic replacement strategy.
+This repository now tracks the **optimized final LyricG2P 6.5.1 implementation** on the Jellyfin LyricMotion 3.2.0 application baseline.
 
-See [Release Notes 3.1.0](docs/RELEASE-NOTES-3.1.0.md), [Romanization](docs/ROMANIZATION.md), and the [3.1.0 full audit](docs/FULL-AUDIT-3.1.0.md).
+- **Best-of-both hybrid Romanization**: deterministic lyric-specific phonology, curated lexical knowledge, production morphology, stronger shared-Devanagari phrase context, targeted Hindi/Punjabi learned schwa advice, richer Malayalam phonetic IR, and category-aware candidate selection.
+- **Playback fast path**: normal `romanize()` no longer pays for full diagnostic edit-alignment provenance unless guarded morphology actually needs it. In the controlled fresh-process Node benchmark, mixed normal Romanization improved by **74.3%**, Punjabi by **80.1%**, and Devanagari by **85.6%** versus the frozen pre-optimization 6.5.1 implementation.
+- **Karaoke mapping hardening**: NFC/NFD coordinate maps, real-script anchor checks, ZWJ/ZWNJ-chain handling, monotonic generic fallbacks, and span-clamped provenance protect source-to-Roman cue mapping even on hostile provider text.
+- **Smarter candidate authority**: curated lexicon and protected morphology stay authoritative; strong same-language learned/provider candidates can replace weak or shared-script-ambiguous local outputs without letting raw model confidence override known pronunciations.
+- **Malayalam improvements**: correct legacy chillu handling is combined with separate display and phonetic interpretations for contextual realizations.
+- **Shared-script language context**: Hindi/Marathi/Bhojpuri/Nepali phrase evidence is stronger while isolated genuinely ambiguous Devanagari tokens can remain unresolved instead of being forced to Hindi.
+- **Targeted learned components only**: compact Hindi/Punjabi schwa advisors are fully local and lazy. No full neural native-to-Roman checkpoint is bundled.
+- **Whole-project hardening**: strict Romanizer-version compatibility, metadata-aware candidate deduplication, bounded pathological edit-distance work, staged installer assets, invalid nested-TTML timing rejection, dataset-pipeline validation, deterministic packaging, checksums, browser-runtime smoke tests, and expanded CI.
+- **UI remains compact**: Romanization and the single lyric-timing chip remain the normal lyric controls; TV-class clients still hard-bypass to stock Jellyfin lyrics.
+
+### Validation snapshot
+
+The final optimized tree passed **32 reviewed Romanization regressions**, **500 base Unicode fuzz cases**, **3,000 focused hybrid/model/provenance fuzz cases**, a separate **10,000-case adversarial Unicode/provenance run**, and a **5,000-string frozen-vs-optimized differential** with identical normal output, detailed text, and tested source boundaries. The held-out 2,500-word Dakshina Tamil benchmark produced **zero output differences** from frozen 6.5.1.
+
+The benchmark numbers are development-machine measurements, not browser/TV latency guarantees. See the detailed reports rather than treating a single throughput number as a language-quality score.
+
+Read: [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), [Song Style](docs/LYRICG2P-6.5.1-STYLE.md), [Three-Way Benchmark](docs/LYRICG2P-6.5.1-THREE-WAY-BENCHMARK.md), [Optimization & Hardening](docs/OPTIMIZATION-HARDENING-3.2.0-LYRICG2P-6.5.1.md), and [Release Notes](docs/RELEASE-NOTES-3.2.0-LYRICG2P-6.5.1.md).
 
 ## Feature gallery
 
@@ -53,7 +61,7 @@ LyricMotion does not download lyrics. It enhances lyric data already available t
 
 ## Install
 
-Download `jellyfin-lyric-motion-v3.1.0.zip` from GitHub Releases, extract it, then run the installer from the extracted folder.
+Download `jellyfin-lyric-motion-v3.2.0.zip` from GitHub Releases, extract it, then run the installer from the extracted folder.
 
 ### Windows
 
@@ -131,17 +139,17 @@ First-class lyric-aware paths cover:
 
 The broad ICU-derived fallback remains coverage for unsupported scripts; it is not used as the primary Indian-language pronunciation engine. See [Romanization architecture](docs/ROMANIZATION.md).
 
-## Per-song lyrics offset
+## Smart lyric timing assistant
 
-The lyrics page exposes `−`, the current offset, `+`, and reset. Each step is 0.5 seconds.
+The normal toolbar contains just the two compact controls: `A Romanize` and `⏱ +0.0s`. The timing chip opens a small popover only when needed.
 
-- positive offset = lyrics appear later
-- negative offset = lyrics appear earlier
-- audio playback and seek time are unchanged
-- the value is stored per song
-- line selection and ELRC word progress use the same adjusted clock
+- **Fine correction**: `-0.1` / `+0.1`
+- **Coarse correction**: `-0.5` / `+0.5`
+- **Sync lyric to now**: tap a word/line exactly when it begins and LyricMotion calculates the constant offset automatically
+- **Undo / Reset**: immediately revert the previous timing edit or return to source timing
+- **Timeline fingerprinting**: stored correction only restores when the exact lyric timeline matches, including cue boundaries and timing
 
-See [Timing Offset](docs/TIMING-OFFSET.md).
+Positive offset delays the lyrics; negative offset makes them appear earlier. Playback itself is never changed. Three-point calibration and drift correction were intentionally removed from the final 3.1.1 design to keep the timing system simple and predictable. See [Smart Timing Assistant](docs/TIMING-ASSISTANT.md).
 
 ## Multilingual rendering
 
@@ -176,6 +184,9 @@ JellyfinLyricMotion.version
 JellyfinLyricMotion.diagnostics()
 JellyfinLyricMotion.performance()
 JellyfinLyricMotion.atmosphere()
+JellyfinLyricMotion.romanization()
+JellyfinLyricMotion.timing()
+JellyfinLyricMotion.explainRomanization('ഇടി')
 ```
 
 Glow themes:
@@ -253,7 +264,7 @@ The uninstaller surgically removes LyricMotion loader tags/assets and normally d
 
 ## Compatibility and validation
 
-The 3.1.0 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients are validated as a hard stock-Jellyfin bypass.
+The 3.2.0 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients are validated as a hard stock-Jellyfin bypass.
 
 The bundled regression suite covers Romanization, Indic language quality, source-to-Roman cue mapping, timing controls, request races/interception, overlapping/background vocals, script safety, multilingual glow, TTML parsing, and installer/uninstaller behavior.
 
@@ -263,8 +274,10 @@ Real behavior can still vary by Jellyfin build, browser/WebView, available fonts
 
 ```text
 src/                 browser runtime, offline Romanizer, CSS
-scripts/             installers, converter, release packager, regression tests
-docs/                architecture, release notes, audit and feature docs
+scripts/             installers, converter, dataset/evaluation tools, release packager
+tests/               G2P, runtime, TTML, research-pipeline and static safety gates
+research/            regression seeds, benchmark outputs and model experiments
+docs/                architecture, benchmarks, release notes, audits and feature docs
 examples/            ELRC examples
 docker/              derived Jellyfin image
 .github/workflows/   validation and tag-driven release automation
@@ -283,8 +296,13 @@ Or run individual contracts; see [Contributing](CONTRIBUTING.md).
 Build the deterministic release package:
 
 ```bash
-python scripts/package_release.py --version 3.1.0
+mkdir -p dist
+python3 scripts/package_release.py \
+  --version "$(cat VERSION)" \
+  --output "dist/jellyfin-lyric-motion-v$(cat VERSION).zip"
 ```
+
+For the complete tagging and GitHub Release procedure, see [Releasing](docs/RELEASING.md).
 
 ## Privacy
 

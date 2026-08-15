@@ -1,0 +1,21 @@
+{
+  "engine": "6.5.1",
+  "confidenceSemantics": "evidence-score-not-probability",
+  "generatedAt": "2026-08-15T09:54:37.769Z",
+  "corpus": "lyricg2p65-regression-seed.tsv",
+  "rows": 28,
+  "note": "LyricG2P 6.5.1 confidence is an evidence score, not a probability. This report measures calibration error without relabeling it as probabilistic confidence.",
+  "expectedCalibrationError": {
+    "exact": 0.038,
+    "styleNormalized": 0.038
+  },
+  "buckets": [
+    {
+      "range": "0.9-1.0",
+      "count": 28,
+      "meanEvidenceScore": 0.962,
+      "exactAccuracy": 1,
+      "styleNormalizedAccuracy": 1
+    }
+  ]
+}

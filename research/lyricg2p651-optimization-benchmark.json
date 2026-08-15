@@ -1,0 +1,147 @@
+{
+  "engine": "6.5.1",
+  "node": "v22.16.0",
+  "method": "5 fresh Node processes per build; medians reported",
+  "results": {
+    "loadMs": {
+      "label": "Romanizer load",
+      "frozen651MedianMs": 6.135032,
+      "optimized651MedianMs": 6.157626,
+      "improvementPercent": -0.368,
+      "frozenRunsMs": [
+        7.706396,
+        6.108663,
+        6.298175,
+        5.801928,
+        6.135032
+      ],
+      "optimizedRunsMs": [
+        6.157626,
+        5.946933,
+        6.574715,
+        6.028374,
+        6.46974
+      ]
+    },
+    "mixedHot": {
+      "label": "Mixed normal romanize()",
+      "frozen651MedianMs": 0.15866871,
+      "optimized651MedianMs": 0.04080277,
+      "improvementPercent": 74.284,
+      "frozenRunsMs": [
+        0.165605518,
+        0.15866871,
+        0.156022272,
+        0.165756938,
+        0.15763556
+      ],
+      "optimizedRunsMs": [
+        0.045066767,
+        0.037974434,
+        0.04210749,
+        0.038068291,
+        0.04080277
+      ]
+    },
+    "paHot": {
+      "label": "Punjabi normal romanize()",
+      "frozen651MedianMs": 0.068845562,
+      "optimized651MedianMs": 0.013717279,
+      "improvementPercent": 80.075,
+      "frozenRunsMs": [
+        0.07051763,
+        0.068845562,
+        0.068273765,
+        0.066704013,
+        0.06999059
+      ],
+      "optimizedRunsMs": [
+        0.014791986,
+        0.013709886,
+        0.014316788,
+        0.013717279,
+        0.013559638
+      ]
+    },
+    "hiHot": {
+      "label": "Devanagari normal romanize()",
+      "frozen651MedianMs": 0.104502638,
+      "optimized651MedianMs": 0.015068607,
+      "improvementPercent": 85.581,
+      "frozenRunsMs": [
+        0.105533062,
+        0.103935904,
+        0.107397071,
+        0.101205396,
+        0.104502638
+      ],
+      "optimizedRunsMs": [
+        0.014966765,
+        0.015108956,
+        0.016549103,
+        0.015068607,
+        0.014953488
+      ]
+    },
+    "mixedDetailed": {
+      "label": "Mixed romanizeDetailed()",
+      "frozen651MedianMs": 0.636439025,
+      "optimized651MedianMs": 0.458591198,
+      "improvementPercent": 27.944,
+      "frozenRunsMs": [
+        0.614976347,
+        0.612806207,
+        0.640798017,
+        0.658816212,
+        0.636439025
+      ],
+      "optimizedRunsMs": [
+        0.448444028,
+        0.459227243,
+        0.454458395,
+        0.477201108,
+        0.458591198
+      ]
+    },
+    "paDetailed": {
+      "label": "Punjabi romanizeDetailed()",
+      "frozen651MedianMs": 0.28707169,
+      "optimized651MedianMs": 0.193536078,
+      "improvementPercent": 32.583,
+      "frozenRunsMs": [
+        0.282007402,
+        0.28707169,
+        0.312647537,
+        0.28910758,
+        0.282353848
+      ],
+      "optimizedRunsMs": [
+        0.223075068,
+        0.193103752,
+        0.193536078,
+        0.191542048,
+        0.226684538
+      ]
+    },
+    "hybrid": {
+      "label": "Hybrid rankCandidates()",
+      "frozen651MedianMs": 0.697415843,
+      "optimized651MedianMs": 0.551466748,
+      "improvementPercent": 20.927,
+      "frozenRunsMs": [
+        0.694897937,
+        0.695693218,
+        0.727088417,
+        0.742431457,
+        0.697415843
+      ],
+      "optimizedRunsMs": [
+        0.564132393,
+        0.551466748,
+        0.54766425,
+        0.537325827,
+        0.577390737
+      ]
+    }
+  }
+}

@@ -52,8 +52,13 @@ $Root = Split-Path -Parent $Here
 $VersionPath = Join-Path $Root "VERSION"
 if (-not (Test-Path $VersionPath)) { throw "Missing $VersionPath" }
 $Version = ([IO.File]::ReadAllText($VersionPath)).Trim()
+$LyricG2PVersionPath = Join-Path $Root "LYRICG2P_VERSION"
+if (-not (Test-Path $LyricG2PVersionPath)) { throw "Missing $LyricG2PVersionPath" }
+$LyricG2PVersion = ([IO.File]::ReadAllText($LyricG2PVersionPath)).Trim()
 if ([string]::IsNullOrWhiteSpace($Version)) { throw "VERSION is empty" }
 if ($Version -notmatch '^[A-Za-z0-9._+\-]+$') { throw "VERSION contains unsafe characters" }
+if ([string]::IsNullOrWhiteSpace($LyricG2PVersion)) { throw "LYRICG2P_VERSION is empty" }
+if ($LyricG2PVersion -notmatch '^[A-Za-z0-9._+\-]+$') { throw "LYRICG2P_VERSION contains unsafe characters" }
 $JsSource = Join-Path $Root "src\jellyfin-lyric-motion.js"
 $CssSource = Join-Path $Root "src\jellyfin-lyric-motion.css"
 $RomanizerSource = Join-Path $Root "src\jellyfin-lyric-romanizer.js"
@@ -128,17 +133,16 @@ function Commit-AtomicReplacement([string]$Temporary, [string]$Destination) {
     }
 }
 
-function Copy-AtomicFile([string]$Source, [string]$Destination) {
+function Stage-AtomicFile([string]$Source, [string]$Destination) {
     $directory = Split-Path -Parent $Destination
     $leaf = Split-Path -Leaf $Destination
     $temporary = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         Copy-Item -LiteralPath $Source -Destination $temporary -Force
-        Commit-AtomicReplacement $temporary $Destination
-    } finally {
-        if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-        }
+        return $temporary
+    } catch {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        throw
     }
 }
 
@@ -175,7 +179,7 @@ if (-not (Test-Path $CssSource)) { throw "Missing $CssSource" }
 if (-not (Test-Path $RomanizerSource)) { throw "Missing $RomanizerSource" }
 
 Write-Host ""
-Write-Host "Jellyfin LyricMotion v$Version" -ForegroundColor Cyan
+Write-Host "Jellyfin LyricMotion v$Version / LyricG2P $LyricG2PVersion" -ForegroundColor Cyan
 Write-Host "Web directory: $WebDir"
 
 $content = Remove-LyricMotionTags ([IO.File]::ReadAllText($IndexPath))
@@ -188,7 +192,7 @@ if (-not $runtime.Success) {
     throw "runtime.bundle.js was not found. Jellyfin Web was not modified."
 }
 
-$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '"></script>'
+$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '&g2p=' + $LyricG2PVersion + '"></script>'
 $content = $content.Insert($runtime.Index, $inject)
 
 $BackupName = "index.html.before-jellyfin-lyric-motion-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
@@ -200,12 +204,33 @@ while (Test-Path -LiteralPath $BackupPath) {
 }
 Copy-Item $IndexPath $BackupPath -Force
 
-# Existing installations already reference these filenames, so update every
-# overlay asset through a same-directory replacement. Browsers never observe a
-# half-copied JavaScript/CSS file during an in-place upgrade.
-Copy-AtomicFile $JsSource (Join-Path $WebDir "jellyfin-lyric-motion.js")
-Copy-AtomicFile $CssSource (Join-Path $WebDir "jellyfin-lyric-motion.css")
-Copy-AtomicFile $RomanizerSource (Join-Path $WebDir "jellyfin-lyric-romanizer.js")
+# Stage all three assets before replacing any live file. A copy/disk failure
+# therefore leaves an existing installation untouched. Each final commit is a
+# same-directory atomic replacement.
+$JsDestination = Join-Path $WebDir "jellyfin-lyric-motion.js"
+$CssDestination = Join-Path $WebDir "jellyfin-lyric-motion.css"
+$RomanizerDestination = Join-Path $WebDir "jellyfin-lyric-romanizer.js"
+$JsTemporary = $null
+$CssTemporary = $null
+$RomanizerTemporary = $null
+try {
+    $JsTemporary = Stage-AtomicFile $JsSource $JsDestination
+    $CssTemporary = Stage-AtomicFile $CssSource $CssDestination
+    $RomanizerTemporary = Stage-AtomicFile $RomanizerSource $RomanizerDestination
+
+    Commit-AtomicReplacement $JsTemporary $JsDestination
+    $JsTemporary = $null
+    Commit-AtomicReplacement $CssTemporary $CssDestination
+    $CssTemporary = $null
+    Commit-AtomicReplacement $RomanizerTemporary $RomanizerDestination
+    $RomanizerTemporary = $null
+} finally {
+    foreach ($temporary in @($JsTemporary, $CssTemporary, $RomanizerTemporary)) {
+        if ($temporary -and (Test-Path -LiteralPath $temporary)) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 # Commit the HTML injection last using a same-directory atomic replacement so
 # an interrupted write cannot leave Jellyfin's index.html half-written.

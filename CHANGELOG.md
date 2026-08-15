@@ -2,6 +2,96 @@
 
 All notable public changes are documented here. The project follows Semantic Versioning.
 
+## [3.2.0] - 2026-08-15
+
+### Final optimization and hardening
+
+#### Added
+- Dedicated fast production Romanization path that avoids detailed provenance/edit alignment during normal playback unless guarded morphology actually requires it.
+- Browser-runtime smoke coverage for stale Romanizer rejection, duplicate-load protection, normal desktop startup and stock-TV bypass.
+- TTML converter tests for frame/tick/offset timing, nested timing, background vocals, auxiliary Romanization exclusion, DTD/entity rejection and atomic output preservation.
+- Research-pipeline tests for leakage-connected dataset splitting, input validation and Dakshina normalization/attestation aggregation.
+- Deterministic double-package verification, checksum generation and static JS/CSS safety gates.
+
+#### Fixed
+- Duplicate candidate spellings discarding stronger later model/provider metadata.
+- Invalid/non-finite/boolean candidate confidence metadata being coerced into misleading numeric evidence.
+- Pathological single-token inputs being able to force unbounded quadratic edit-distance memory.
+- Stale in-memory LyricG2P 6.5.0 globals being accepted by a 3.2.0 runtime that requires LyricG2P 6.5.1.
+- Nested TTML intervals resolving to an end before their begin.
+- Installer live assets being replaced before the complete new overlay asset set had been staged successfully.
+- Dataset preparation accepting invalid dev/test fractions or unusable rows without required language/native/Roman fields.
+
+#### Performance
+- Replaced boxed 2D provenance alignment matrices with flat typed storage while preserving tie-breaking and cue boundaries.
+- Replaced candidate Levenshtein full matrices with linear-memory typed rows.
+- Cached production morphology suffix tables and avoided diagnostic suffix construction on the hot path.
+- In controlled five-process Node measurements, mixed normal `romanize()` improved from 0.1587 ms/op to 0.0408 ms/op, Punjabi from 0.0688 to 0.0137, and Devanagari from 0.1045 to 0.0151. Detailed and candidate-ranking paths also improved.
+
+### LyricG2P 6.5.1 merge
+
+#### Added
+- Two compact sparse Hindi/Punjabi schwa classifiers as lazy diagnostic/candidate advisors, with model provenance metadata and no network runtime.
+- Malayalam display-vs-phonetic IR for contextual realizations without forcing phonetic spelling into the player.
+- Stronger phrase-level Hindi/Marathi/Bhojpuri/Nepali shared-script context while preserving ambiguity on weak isolated tokens.
+- Category-aware candidate ranking that protects curated/morphology-assisted local knowledge and gives learned/provider alternatives more authority only when local evidence is weak.
+- G2P-specific version file and cache-busting identity while the Jellyfin LyricMotion application remains 3.2.0.
+- Focused 6.5.1 hybrid/ranker/model/provenance tests plus an expanded deterministic Unicode fuzz gate.
+
+#### Fixed
+- Punjabi learned-weight cache assignment from the alternate implementation.
+- Metadata-bearing candidate objects being stringified to `[object Object]` in the alternate ranking path.
+- Cross-script ZWJ/ZWNJ ranges being claimed by the wrong script-specific cue mapper.
+- Consecutive joiner chains switching cue-mapping strategies and causing a backward boundary.
+- Context-sensitive generic prefix/suffix mapping producing non-monotonic cue positions on malformed text.
+- NFC-normalized Romanization losing a safe mapping back to original UTF-16 cue coordinates.
+- Malformed overlapping token provenance escaping its owning displayed span.
+- Overlapping malformed token spans moving detailed word start/end boundaries away from real output endpoints.
+
+#### Changed
+- Learned schwa inference is now off the normal `romanize()` playback path and available through detailed diagnostics/candidate research, preserving near-deterministic hot-path performance.
+- Candidate ranker is `hybrid-category-aware-style-context-confidence-v3`.
+- Romanizer version is `6.5.1`; app version remains `3.2.0`.
+
+### Original 3.2.0 / LyricG2P 6.5 foundation
+
+- Named ASCII song-style Romanization contract.
+- Shared-script language evidence, structured phonological IR, production known-stem morphology and transform-carried provenance.
+- Malayalam legacy chillu correction.
+- Conservative n-best style variants, origin/risk evidence and privacy-safe case export.
+- Dakshina import, leakage-resistant splitting, exact/CER/top-3/style evaluation, calibration and runtime benchmarking tools.
+- Research-only tiny character Transformer harness; no full transliteration checkpoint bundled.
+
+## [3.1.1] - 2026-08-15
+
+### Added
+
+- **LyricG2P 6.0** mixed-script/code-switch segmentation with structured span context and source/output provenance.
+- Phoneme-like diagnostic units, conservative morphology evidence, deterministic confidence, weak-span reporting, candidate ranking and local `explain()` diagnostics.
+- Compact timing assistant with 0.1 s fine adjustment, 0.5 s coarse adjustment, one-tap word/line synchronization, session undo and reset.
+- Exact lyric-timeline fingerprinting for timing persistence, including cue character end positions.
+- Research-only corpus tooling around the maintainer-supplied smart lyrics fetcher, including native/Roman pair extraction, deterministic dataset splitting and exact/CER evaluation.
+
+### Changed
+
+- The normal lyrics toolbar is now a compact two-control row: an `A` Romanization control and a `⏱` timing control.
+- Timing correction is deliberately constant-offset only; the development-only three-point calibration/drift feature was removed with its runtime, state, persistence, CSS, API and test surface.
+- Timing corrections without an exact lyric fingerprint are ignored rather than applied to a potentially different lyric timeline.
+- Romanization diagnostics explicitly identify code switching, path confidence and lower-confidence fallback spans without changing production Romanization output.
+- Learned-model inclusion remains benchmark-gated. v3.1.1 does not ship unvalidated neural weights or add a network/model-download dependency.
+
+### Fixed
+
+- Negative tenth-second timing values now round symmetrically with positive values.
+- Timing popover `aria-expanded` state is refreshed after the popover closes.
+- Timeline fingerprints now include cue `EndPosition`, reducing false matches between structurally different word/syllable timelines.
+- Romanization and timing buttons now expose clearer state-aware accessible labels and consistent active styling.
+
+### Compatibility
+
+- All v3.1.0 first-class language rules, Classic Bloom behavior, stock-TV hard bypass, request-race fixes, lazy fallback/boundary caches and installer hardening remain active.
+- Existing Romanization preferences continue to restore. Legacy timing data without a timeline fingerprint falls back safely to source timing.
+
 ## [3.1.0] - 2026-08-15
 
 ### Added
