@@ -1,8 +1,30 @@
-*.zip
-.DS_Store
-Thumbs.db
-node_modules/
+# Release artifacts
 dist/
+*.zip
+*.zip.sha256
+
+# Python
 __pycache__/
 *.py[cod]
-.qa-*
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Node / tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary / local benchmark output
+*.tmp
+*.log

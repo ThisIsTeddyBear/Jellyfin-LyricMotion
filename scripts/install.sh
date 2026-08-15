@@ -6,9 +6,16 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 VERSION_FILE="$ROOT_DIR/VERSION"
 [ -f "$VERSION_FILE" ] || { echo "Missing $VERSION_FILE"; exit 1; }
 VERSION=$(tr -d '\r\n' < "$VERSION_FILE")
+LYRICG2P_VERSION_FILE="$ROOT_DIR/LYRICG2P_VERSION"
+[ -f "$LYRICG2P_VERSION_FILE" ] || { echo "Missing $LYRICG2P_VERSION_FILE"; exit 1; }
+LYRICG2P_VERSION=$(tr -d '\r\n' < "$LYRICG2P_VERSION_FILE")
 [ -n "$VERSION" ] || { echo "VERSION is empty"; exit 1; }
 case "$VERSION" in
   *[!A-Za-z0-9._+-]*) echo "VERSION contains unsafe characters"; exit 1 ;;
+esac
+[ -n "$LYRICG2P_VERSION" ] || { echo "LYRICG2P_VERSION is empty"; exit 1; }
+case "$LYRICG2P_VERSION" in
+  *[!A-Za-z0-9._+-]*) echo "LYRICG2P_VERSION contains unsafe characters"; exit 1 ;;
 esac
 JS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.js"
 CSS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.css"
@@ -85,31 +92,51 @@ fi
 
 cp "$INDEX" "$BACKUP"
 
-atomic_copy() {
+stage_copy() {
   source_path=$1
   destination_path=$2
   destination_name=$(basename -- "$destination_path")
   temporary_path=$(mktemp "$WEB_DIR/.${destination_name}.XXXXXX.tmp")
-  if cp "$source_path" "$temporary_path" && mv -f "$temporary_path" "$destination_path"; then
+  if cp "$source_path" "$temporary_path"; then
+    printf '%s\n' "$temporary_path"
     return 0
   fi
   rm -f "$temporary_path"
   return 1
 }
 
-# Existing installations already reference these filenames, so update each
-# overlay asset with a same-directory rename. A browser can see either the old
-# complete file or the new complete file, never a partially copied asset.
-atomic_copy "$JS_SOURCE" "$WEB_DIR/jellyfin-lyric-motion.js"
-atomic_copy "$CSS_SOURCE" "$WEB_DIR/jellyfin-lyric-motion.css"
-atomic_copy "$ROMANIZER_SOURCE" "$WEB_DIR/jellyfin-lyric-romanizer.js"
+# Stage the complete asset set before replacing any live file. This makes
+# ordinary copy/disk errors fail before an existing installation is touched.
+JS_TEMP=''
+CSS_TEMP=''
+ROMANIZER_TEMP=''
+cleanup_staged_assets() {
+  [ -z "$JS_TEMP" ] || rm -f "$JS_TEMP"
+  [ -z "$CSS_TEMP" ] || rm -f "$CSS_TEMP"
+  [ -z "$ROMANIZER_TEMP" ] || rm -f "$ROMANIZER_TEMP"
+}
+trap cleanup_staged_assets EXIT HUP INT TERM
+JS_TEMP=$(stage_copy "$JS_SOURCE" "$WEB_DIR/jellyfin-lyric-motion.js")
+CSS_TEMP=$(stage_copy "$CSS_SOURCE" "$WEB_DIR/jellyfin-lyric-motion.css")
+ROMANIZER_TEMP=$(stage_copy "$ROMANIZER_SOURCE" "$WEB_DIR/jellyfin-lyric-romanizer.js")
 
-python3 - "$INDEX" "$VERSION" <<'PY'
+# Same-directory rename means the browser observes a complete old or complete
+# new asset, never a partially copied JavaScript/CSS file.
+mv -f "$JS_TEMP" "$WEB_DIR/jellyfin-lyric-motion.js"
+JS_TEMP=''
+mv -f "$CSS_TEMP" "$WEB_DIR/jellyfin-lyric-motion.css"
+CSS_TEMP=''
+mv -f "$ROMANIZER_TEMP" "$WEB_DIR/jellyfin-lyric-romanizer.js"
+ROMANIZER_TEMP=''
+trap - EXIT HUP INT TERM
+
+python3 - "$INDEX" "$VERSION" "$LYRICG2P_VERSION" <<'PY'
 from pathlib import Path
 import os, re, stat, sys, tempfile
 
 path = Path(sys.argv[1])
 version = sys.argv[2]
+lyricg2p_version = sys.argv[3]
 content = path.read_text(encoding="utf-8")
 
 content = re.sub(
@@ -135,7 +162,7 @@ if not match:
 
 inject = (
     f'<link rel="stylesheet" href="jellyfin-lyric-motion.css?v={version}">'
-    f'<script defer="defer" src="jellyfin-lyric-motion.js?v={version}"></script>'
+    f'<script defer="defer" src="jellyfin-lyric-motion.js?v={version}&g2p={lyricg2p_version}"></script>'
 )
 content = content[:match.start()] + inject + content[match.start():]
 
@@ -164,7 +191,7 @@ PY
 rm -f "$WEB_DIR/apple-karaoke.js" "$WEB_DIR/apple-karaoke.css"
 
 echo
-echo "Jellyfin LyricMotion v$VERSION installed."
+echo "Jellyfin LyricMotion v$VERSION / LyricG2P $LYRICG2P_VERSION installed."
 echo "Web directory: $WEB_DIR"
 echo "Backup: $BACKUP"
 echo "Hard-refresh Jellyfin Web or use a private browser window."

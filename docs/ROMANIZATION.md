@@ -1,7 +1,7 @@
 # Offline LyricG2P Romanization
 
-Release: `3.1.0`
-Romanizer: `5.1.0`
+Release: `3.2.0`
+Romanizer: `6.5.1`
 
 ## Goal
 
@@ -33,11 +33,21 @@ The design was informed by publicly documented Indian-language transliteration w
 - **Dakshina** is particularly relevant to the product goal because it contains attested Romanization lexicons and full-sentence native/Latin parallel data for major South Asian languages.
 - Published Hindi/Punjabi G2P work identifies schwa deletion as a central pronunciation problem that naive Devanagari transliterators get wrong.
 
-No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P 5 is an original deterministic implementation designed for a browser/Jellyfin deployment with no ML runtime, no model download and predictable memory/latency.
+No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P 6 keeps deterministic production output and adds a local corpus/evaluation pipeline, mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. A learned model is eligible only after it demonstrates held-out improvement and acceptable browser cost. See `LYRICG2P-6.md` and `ROMANIZATION-RESEARCH.md`.
 
-## tv.14 implementation optimization
+## v3.2.0 / LyricG2P 6.5.1 implementation
 
-LyricG2P 5.1 preserves the final pre-release language output rules but changes how broad fallback and cue alignment are stored/executed. The 60,513-entry ICU-derived fallback is packaged as compact tab/newline data and converted to a lookup object only when a script outside the dedicated handlers actually needs it. Common emoji/variation-selector ranges known not to have fallback entries bypass that materialization entirely.
+LyricG2P 6.5 makes several pieces that were diagnostic scaffolding in 6.0 materially useful to production: conservative shared-script language evidence, structured phonological tokens, known-stem morphology, transform-carried provenance, n-best style variants and a richer candidate ranker. It also fixes legacy Malayalam chillu sequences whose joiners were previously discarded before final-short-u handling.
+
+The public confidence field remains an engineering evidence score, not a calibrated probability. The release includes calibration tooling so future independent corpora can fit those scores from observations rather than by renaming constants.
+
+No learned model is bundled. `research/train_tiny_transformer.py` and the dataset/evaluation scripts exist to make model experiments reproducible and benchmark-gated. See [LyricG2P 6.5](LYRICG2P-6.5.md) and [Romanization Research](ROMANIZATION-RESEARCH.md).
+
+### Historical 6.0 foundation
+
+## v3.1.1 / LyricG2P 6 implementation
+
+LyricG2P 6.0 preserves the final pre-release language output rules but changes how broad fallback and cue alignment are stored/executed. The 60,513-entry ICU-derived fallback is packaged as compact tab/newline data and converted to a lookup object only when a script outside the dedicated handlers actually needs it. Common emoji/variation-selector ranges known not to have fallback entries bypass that materialization entirely.
 
 Source-to-Roman boundary mapping now keeps a bounded 256-line cache containing the complete Romanized result, prefix lengths and detailed word maps. This is especially important for ELRC, where many cue boundaries in one line otherwise caused the same prefixes/suffixes to be repeatedly Romanized. The cache is bounded independently of the main 1,800-entry display Romanization cache.
 
@@ -49,7 +59,9 @@ The boundary mapper also detects when NFC normalization changes UTF-16 length. L
 native Jellyfin lyric line
         |
         v
-script/language-family detection
+mixed-script span segmentation
+        |
+        +--> preserve Latin/code-switched spans
         |
         +--> first-class Indian LyricG2P engine
         |      - whole-word parsing
@@ -58,6 +70,8 @@ script/language-family detection
         |      - contextual nasal handling
         |      - language-specific pronunciation rules
         |      - compact high-confidence lyric lexicon
+        |      - structured context/confidence diagnostics
+        |      - phoneme-like source provenance
         |
         +--> dedicated non-Indic handlers where available
         |      - Japanese kana
@@ -82,7 +96,7 @@ existing Jellyfin ELRC cue timestamps, unchanged
 
 The Malayalam path understands independent vowels, vowel signs, chillus, conjuncts, doubled consonants, nasal marks and common pronunciation conventions. The engine contains a compact exception/pronunciation lexicon for high-confidence song words while unseen words still use the general parser.
 
-The exact KALYANI regressions that motivated the previous pass remain locked into tests. LyricG2P 5 additionally fixes a systematic Malayalam song-orthography failure: singleton medial `ട` now becomes `d` in the high-confidence vocalic environment where listeners expect it, while word-initial and geminated `ട` remain `t/tt`. Word-final chandrakkala also receives a conservative short-u pass for native endings, without blindly appending `u` to every modern loanword.
+The exact KALYANI regressions that motivated the previous pass remain locked into tests. LyricG2P 6 additionally fixes a systematic Malayalam song-orthography failure: singleton medial `ട` now becomes `d` in the high-confidence vocalic environment where listeners expect it, while word-initial and geminated `ട` remain `t/tt`. Word-final chandrakkala also receives a conservative short-u pass for native endings, without blindly appending `u` to every modern loanword.
 
 New permanent regressions include:
 

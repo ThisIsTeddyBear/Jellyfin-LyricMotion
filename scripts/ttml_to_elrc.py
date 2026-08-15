@@ -303,6 +303,11 @@ def timing_for(
     elif inherited_end is not None:
         end = min(end, inherited_end)
 
+    if begin is not None and end is not None and end < begin:
+        raise ConversionError(
+            f"TTML element ends before it starts ({elrc_time(begin)} > {elrc_time(end)})"
+        )
+
     return begin, end
 
 

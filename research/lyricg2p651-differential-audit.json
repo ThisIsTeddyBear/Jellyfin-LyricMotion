@@ -1,0 +1,32 @@
+{
+  "keyCount": 1498,
+  "mergedVsBaseChangeCount": 0,
+  "mergedVsAlternateChangeCount": 4,
+  "mergedVsBaseChanges": [],
+  "mergedVsAlternateExamples": [
+    {
+      "input": "ई",
+      "alternate": "i",
+      "merged": "ee",
+      "base": "ee"
+    },
+    {
+      "input": "ऊ",
+      "alternate": "u",
+      "merged": "oo",
+      "base": "oo"
+    },
+    {
+      "input": "ਈ",
+      "alternate": "i",
+      "merged": "ee",
+      "base": "ee"
+    },
+    {
+      "input": "ਊ",
+      "alternate": "u",
+      "merged": "oo",
+      "base": "oo"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+language	native	references	source
+ml	പേടി	pedi	project-regression
+ml	ഇടി	idi	project-regression
+ml	വാടി	vaadi	project-regression
+ml	കാറ്റിൻ	kaattin||kaatin	project-regression
+ml	എന്ത്	enthu	project-regression
+ml	ഇത്	ithu	project-regression
+ml	അത്	athu	project-regression
+ml	ന്‍	n	unicode-legacy-chillu-regression
+ml	ണ്‍	n	unicode-legacy-chillu-regression
+ta	காதல்	kaadhal	project-regression
+ta	நீதான்	needhaan	project-regression
+ta	தமிழ்	tamil	project-lexicon-style
+te	తెలుగు	telugu	project-regression
+te	సంవత్సరం	samvatsaram	project-regression
+te	సంసారం	samsaaram	project-regression
+kn	ಕನ್ನಡ	kannada	project-regression
+kn	ಪ್ರೀತಿಗಳು	preetigalu	morphology-regression
+pa	ਪੰਜਾਬੀ	panjabi	project-regression
+pa	ਪਿਆਰਾਂ	pyaaran	morphology-regression
+pa	ਦਿਲਾਂ	dilan	morphology-regression
+pa	ਕੁੜੀਆਂ	kudiyan	morphology-regression
+hi	प्यार	pyaar	project-regression
+hi	दिल	dil	project-regression
+mr	माझं प्रेम आहे	majha prem aahe	shared-script-context-regression
+hi	दिल में प्रेम है	dil mein prem hai	shared-script-context-regression
+ne	मेरो मन छ	mero man chh	shared-script-context-regression
+mixed	നീ എന്റെ baby ആണ്	nee ente baby aanu	code-switch-regression
+mixed	என் love நீதான்	en love needhaan	code-switch-regression

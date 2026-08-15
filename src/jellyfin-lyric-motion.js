@@ -8,7 +8,8 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.1.0';
+    const VERSION = '3.2.0';
+    const LYRICG2P_VERSION = '6.5.1';
 
     /*
      * A duplicated script tag used to create a second DOM observer, route-hook
@@ -218,12 +219,15 @@
     const LEGACY_ROMANIZATION_STORAGE_KEY = 'appleKaraokeRomanizationMode';
     const SONG_PREFERENCES_STORAGE_KEY = 'appleKaraokeSongPreferencesV2';
     const ROMANIZER_ASSET = 'jellyfin-lyric-romanizer.js';
+    const ROMANIZER_ASSET_VERSION = LYRICG2P_VERSION;
     const ROMANIZER_LOAD_TIMEOUT_MS = 8000;
     const ROMANIZATION_CACHE_MAX_ENTRIES = 1800;
 
-    // Per-song display synchronization. Positive values delay the lyrics;
-    // negative values make lyrics appear earlier. UI controls move in 0.5 s
-    // steps while the public API accepts 0.1 s precision for diagnostics/tests.
+    // Per-timeline display synchronization. Positive values delay the lyrics;
+    // negative values make lyrics appear earlier. The permanent UI is one
+    // compact timing chip; its popover keeps fine/coarse nudging, one-tap
+    // word/line synchronization, undo and reset out of the main lyric view.
+    const TIMING_OFFSET_FINE_STEP_SECONDS = 0.1;
     const TIMING_OFFSET_STEP_SECONDS = 0.5;
     const TIMING_OFFSET_MIN_SECONDS = -15;
     const TIMING_OFFSET_MAX_SECONDS = 15;
@@ -416,8 +420,12 @@
         songPreferences: Object.create(null),
         lyricToolsHost: null,
         timingControls: null,
+        timingPopover: null,
         timingOffsetSeconds: 0,
         timingOffsetChangeCount: 0,
+        timingPickActive: false,
+        timingUndo: null,
+        timingPickListenerInstalled: false,
 
         // Adaptive Album Atmosphere state.
         atmosphereMode: 'balanced',
@@ -664,8 +672,7 @@
         return tokens;
     }
 
-    function isFallbackMarkCodePoint(codePoint) {
-        const ranges = [
+    const FALLBACK_MARK_RANGES = Object.freeze([
             [0x0300, 0x036f],
             [0x0591, 0x05c7],
             [0x0610, 0x061a],
@@ -688,9 +695,10 @@
             [0x102b, 0x103e], [0x1056, 0x1059], [0x105e, 0x1060], [0x1062, 0x1064], [0x1067, 0x106d], [0x1071, 0x1074], [0x1082, 0x108d], [0x108f, 0x108f], [0x109a, 0x109d],
             [0x17b4, 0x17d3], [0x17dd, 0x17dd],
             [0x1ab0, 0x1aff], [0x1dc0, 0x1dff], [0x20d0, 0x20ff], [0xfe20, 0xfe2f]
-        ];
+        ]);
 
-        return codePointInRanges(codePoint, ranges);
+    function isFallbackMarkCodePoint(codePoint) {
+        return codePointInRanges(codePoint, FALLBACK_MARK_RANGES);
     }
 
     function isMarkToken(token) {
@@ -765,9 +773,9 @@
         const left = hangulGraphemeType(leftCodePoint);
         const right = hangulGraphemeType(rightCodePoint);
 
-        return (left === 'L' && ['L', 'V', 'LV', 'LVT'].includes(right))
-            || (['LV', 'V'].includes(left) && ['V', 'T'].includes(right))
-            || (['LVT', 'T'].includes(left) && right === 'T');
+        return (left === 'L' && (right === 'L' || right === 'V' || right === 'LV' || right === 'LVT'))
+            || ((left === 'LV' || left === 'V') && (right === 'V' || right === 'T'))
+            || ((left === 'LVT' || left === 'T') && right === 'T');
     }
 
     function regionalIndicatorBoundaryJoins(tokens, rightIndex) {
@@ -789,8 +797,7 @@
         return precedingRunLength % 2 === 1;
     }
 
-    function isIndicVirama(codePoint) {
-        return [
+    const INDIC_VIRAMA_CODEPOINTS = new Set([
             0x094d,
             0x09cd,
             0x0a4d,
@@ -838,7 +845,10 @@
             0x11d45,
             0x11d97,
             0x11f42
-        ].includes(codePoint);
+        ]);
+
+    function isIndicVirama(codePoint) {
+        return INDIC_VIRAMA_CODEPOINTS.has(codePoint);
     }
 
     function boundarySplitsShaping(tokens, boundary) {
@@ -1341,6 +1351,7 @@
                 );
 
             return {
+                lineIndex,
                 wordIndex,
                 text: range.text,
                 startPos: range.start,
@@ -2031,6 +2042,8 @@
         const span = document.createElement('span');
 
         span.className = 'ak-word ak-word-zero';
+        span.dataset.akTimingLineIndex = String(word.lineIndex);
+        span.dataset.akTimingWordIndex = String(word.wordIndex);
 
         span.classList.add(
             `ak-script-${word.scriptProfile}`
@@ -2648,6 +2661,8 @@
         state.romanizationLineCount = 0;
         state.songPreferenceKey = '';
         state.timingOffsetSeconds = 0;
+        state.timingPickActive = false;
+        state.timingUndo = null;
         if (typeof removeRomanizationToggle === 'function') {
             removeRomanizationToggle();
         }
@@ -3177,10 +3192,13 @@
     }
 
     function clampTimingOffsetSeconds(value) {
-        const numeric = Math.round(finiteNumber(value, 0) * 10) / 10;
+        const numeric = finiteNumber(value, 0);
+        const magnitude =
+            Math.round((Math.abs(numeric) + Number.EPSILON) * 10) / 10;
+        const rounded = numeric < 0 ? -magnitude : magnitude;
         return Math.max(
             TIMING_OFFSET_MIN_SECONDS,
-            Math.min(TIMING_OFFSET_MAX_SECONDS, numeric)
+            Math.min(TIMING_OFFSET_MAX_SECONDS, rounded)
         );
     }
 
@@ -3201,6 +3219,8 @@
                                 : 'native',
                         timingOffsetSeconds:
                             clampTimingOffsetSeconds(entry.timingOffsetSeconds),
+                        timingFingerprint:
+                            String(entry.timingFingerprint || ''),
                         updatedAt: finiteNumber(entry.updatedAt, 0)
                     };
                 });
@@ -3243,6 +3263,38 @@
         return `lyrics:${stableHash(signature).toString(16)}:${lyrics.length}:${firstStart}:${lastStart}`;
     }
 
+
+    function timingTimelineFingerprint(lyrics = state.lyrics) {
+        if (!lyrics || !lyrics.length) return '';
+        const parts = [];
+
+        lyrics.forEach((lyric, lineIndex) => {
+            const profile = lyricTextProfile(lyric);
+            const start = finiteNumber(
+                lyricValue(lyric, 'Start', 'start'),
+                0
+            );
+            const end = finiteNumber(
+                lyricValue(lyric, 'End', 'end'),
+                0
+            );
+            const rawCues = lyricValue(lyric, 'Cues', 'cues');
+            const cues = Array.isArray(rawCues) ? rawCues : [];
+            const cueSignature = cues.map(cue => [
+                finiteNumber(cueValue(cue, 'Position', 'position'), -1),
+                finiteNumber(cueValue(cue, 'EndPosition', 'endPosition'), -1),
+                finiteNumber(cueValue(cue, 'Start', 'start'), -1),
+                finiteNumber(cueValue(cue, 'End', 'end'), -1)
+            ].join(':')).join(',');
+
+            parts.push(
+                `${lineIndex}:${start}:${end}:${profile.rawText}:${cueSignature}`
+            );
+        });
+
+        return `timeline:${stableHash(parts.join('|')).toString(16)}:${lyrics.length}`;
+    }
+
     function pruneSongPreferences() {
         const keys = Object.keys(state.songPreferences || {});
         if (keys.length <= SONG_PREFERENCES_MAX_ENTRIES) return;
@@ -3276,10 +3328,26 @@
             entry && entry.romanization === 'romanized'
                 ? 'romanized'
                 : 'native';
-        state.timingOffsetSeconds =
+        const currentTimingFingerprint =
+            timingTimelineFingerprint(lyrics);
+        const storedOffset =
             entry
                 ? clampTimingOffsetSeconds(entry.timingOffsetSeconds)
                 : 0;
+        const timingMatches =
+            !!entry
+            && !!entry.timingFingerprint
+            && entry.timingFingerprint === currentTimingFingerprint;
+
+        /*
+         * Never carry an unfingerprinted legacy timing correction onto a
+         * replacement lyric timeline. Romanization preference remains safe to
+         * restore independently, while timing defaults to the source file.
+         */
+        state.timingOffsetSeconds =
+            timingMatches ? storedOffset : 0;
+        state.timingPickActive = false;
+        state.timingUndo = null;
         updateRomanizationToggleUi();
         updateTimingControlsUi();
     }
@@ -3303,6 +3371,8 @@
                         : 'native',
                 timingOffsetSeconds:
                     clampTimingOffsetSeconds(state.timingOffsetSeconds),
+                timingFingerprint:
+                    timingTimelineFingerprint(),
                 updatedAt: Date.now()
             };
         }
@@ -3343,15 +3413,16 @@
         if (source) {
             const clean = source.split('#', 1)[0].split('?', 1)[0];
             return clean.replace(/jellyfin-lyric-motion\.js$/i, ROMANIZER_ASSET)
-                + `?v=${encodeURIComponent(VERSION)}`;
+                + `?v=${encodeURIComponent(ROMANIZER_ASSET_VERSION)}`;
         }
 
-        return `${ROMANIZER_ASSET}?v=${encodeURIComponent(VERSION)}`;
+        return `${ROMANIZER_ASSET}?v=${encodeURIComponent(ROMANIZER_ASSET_VERSION)}`;
     }
 
     function getRomanizer() {
         const candidate = window.JellyfinLyricRomanizer;
         return candidate
+            && String(candidate.version || '') === LYRICG2P_VERSION
             && typeof candidate.romanize === 'function'
             && typeof candidate.canRomanize === 'function'
             ? candidate
@@ -3630,26 +3701,62 @@
         return `${sign}${Math.abs(value).toFixed(1)}s`;
     }
 
+    function rememberTimingUndo() {
+        state.timingUndo = state.timingOffsetSeconds;
+    }
+
     function updateTimingControlsUi() {
         const controls = state.timingControls;
-        if (!controls) return;
-        const display = controls.querySelector('#lyrics-timing-display');
-        const minus = controls.querySelector('#lyrics-timing-minus-btn');
-        const plus = controls.querySelector('#lyrics-timing-plus-btn');
-        const reset = controls.querySelector('#lyrics-timing-reset-btn');
-        const value = clampTimingOffsetSeconds(state.timingOffsetSeconds);
-
-        if (display) {
-            display.textContent = formatTimingOffset(value);
-            display.setAttribute(
+        if (controls) {
+            const valueNode =
+                controls.querySelector('.ak-timing-chip-value');
+            const value =
+                clampTimingOffsetSeconds(state.timingOffsetSeconds);
+            if (valueNode) {
+                valueNode.textContent = formatTimingOffset(value);
+            }
+            controls.dataset.akTimingOffset = value.toFixed(1);
+            controls.dataset.akTimingActive =
+                Math.abs(value) >= 0.0001 ? 'true' : 'false';
+            controls.setAttribute(
                 'aria-label',
-                `Lyric timing offset ${formatTimingOffset(value)}`
+                `Lyrics timing ${formatTimingOffset(value)}`
             );
+            controls.setAttribute(
+                'aria-expanded',
+                state.timingPopover && state.timingPopover.isConnected
+                    ? 'true'
+                    : 'false'
+            );
+            controls.title =
+                `Lyrics timing ${formatTimingOffset(value)}`;
         }
-        if (minus) minus.disabled = value <= TIMING_OFFSET_MIN_SECONDS + 0.001;
-        if (plus) plus.disabled = value >= TIMING_OFFSET_MAX_SECONDS - 0.001;
-        if (reset) reset.disabled = Math.abs(value) < 0.0001;
-        controls.dataset.akTimingOffset = value.toFixed(1);
+
+        const popover = state.timingPopover;
+        if (!popover) return;
+
+        const current =
+            popover.querySelector('.ak-timing-current-value');
+        const status =
+            popover.querySelector('.ak-timing-sync-status');
+        const undo =
+            popover.querySelector('[data-ak-timing-action="undo"]');
+        const reset =
+            popover.querySelector('[data-ak-timing-action="reset"]');
+
+        if (current) current.textContent = formatTimingOffset();
+
+        if (status) {
+            status.textContent = state.timingPickActive
+                ? 'Tap the lyric or timed word exactly when it starts.'
+                : 'Use Sync for an exact word/line anchor, or nudge by 0.1s / 0.5s.';
+        }
+
+        if (undo) undo.disabled = state.timingUndo === null;
+        if (reset) {
+            reset.disabled =
+                Math.abs(state.timingOffsetSeconds) < 0.0001;
+        }
     }
 
     function invalidateTimingPaintState() {
@@ -3669,9 +3776,16 @@
         wakeAnimationLoop();
     }
 
-    function setTimingOffsetSeconds(value, persist = true) {
+    function setTimingOffsetSeconds(
+        value,
+        persist = true,
+        rememberUndo = true
+    ) {
         const normalized = clampTimingOffsetSeconds(value);
-        if (Math.abs(normalized - state.timingOffsetSeconds) < 0.0001) {
+        const changed =
+            Math.abs(normalized - state.timingOffsetSeconds) >= 0.0001;
+
+        if (!changed) {
             updateTimingControlsUi();
             return {
                 seconds: state.timingOffsetSeconds,
@@ -3680,11 +3794,16 @@
             };
         }
 
+        if (rememberUndo) rememberTimingUndo();
+
         state.timingOffsetSeconds = normalized;
         state.timingOffsetChangeCount += 1;
+
         if (persist) persistCurrentSongPreference();
+
         invalidateTimingPaintState();
         updateTimingControlsUi();
+
         return {
             seconds: state.timingOffsetSeconds,
             display: formatTimingOffset(),
@@ -3695,32 +3814,359 @@
     function adjustTimingOffsetSeconds(delta) {
         return setTimingOffsetSeconds(
             state.timingOffsetSeconds + finiteNumber(delta, 0),
+            true,
             true
         );
     }
 
+    function resetTimingOffsetValue() {
+        return setTimingOffsetSeconds(0, true, true);
+    }
+
+    function undoTimingOffset() {
+        if (state.timingUndo === null) return null;
+        const previous = clampTimingOffsetSeconds(state.timingUndo);
+        const current = state.timingOffsetSeconds;
+        state.timingUndo = null;
+        const result = setTimingOffsetSeconds(
+            previous,
+            true,
+            false
+        );
+        state.timingUndo = current;
+        updateTimingControlsUi();
+        return result;
+    }
+
+    function timingSourceTicksForTarget(target) {
+        if (!target || !target.closest) return null;
+
+        const wordElement = target.closest('.ak-word');
+        const lineElement = target.closest('.ak-enhanced-line');
+
+        const lineIndex = Number(
+            (
+                wordElement
+                && wordElement.dataset.akTimingLineIndex
+            )
+            || (
+                lineElement
+                && lineElement.dataset.akTimingLineIndex
+            )
+        );
+
+        if (
+            !Number.isInteger(lineIndex)
+            || lineIndex < 0
+            || lineIndex >= state.lineData.length
+        ) {
+            return null;
+        }
+
+        const line = state.lineData[lineIndex];
+
+        if (wordElement) {
+            const wordIndex =
+                Number(wordElement.dataset.akTimingWordIndex);
+            const word =
+                Number.isInteger(wordIndex)
+                    && line.words
+                    ? line.words[wordIndex]
+                    : null;
+
+            if (word && Number.isFinite(word.start)) {
+                return {
+                    ticks: word.start,
+                    lineIndex,
+                    wordIndex,
+                    granularity: 'word',
+                    text: word.text
+                };
+            }
+        }
+
+        if (Number.isFinite(line.startTicks)) {
+            return {
+                ticks: line.startTicks,
+                lineIndex,
+                wordIndex: -1,
+                granularity: 'line',
+                text: line.text
+            };
+        }
+
+        return null;
+    }
+
+    function currentUnadjustedTimelineTicks() {
+        const media = getLocalMediaElement(true);
+        if (!media) return null;
+
+        const adjustedTicks =
+            chooseTimelineTicks(
+                media,
+                performance.now()
+            );
+
+        return removeUserTimingOffsetTicks(adjustedTicks);
+    }
+
+    function stopTimingSyncMode() {
+        state.timingPickActive = false;
+
+        if (
+            state.timingPickListenerInstalled
+            && typeof document !== 'undefined'
+        ) {
+            document.removeEventListener(
+                'click',
+                handleTimingPickClick,
+                true
+            );
+            state.timingPickListenerInstalled = false;
+        }
+
+        const page = getCurrentLyricPage();
+        if (page) page.classList.remove('ak-timing-pick-mode');
+
+        updateTimingControlsUi();
+    }
+
+    function captureTimingSync(target) {
+        const source = timingSourceTicksForTarget(target);
+        const actualTicks = currentUnadjustedTimelineTicks();
+
+        if (!source || !Number.isFinite(actualTicks)) {
+            return null;
+        }
+
+        const sourceSeconds = source.ticks / TICKS_PER_SECOND;
+        const actualSeconds = actualTicks / TICKS_PER_SECOND;
+        const offsetSeconds = actualSeconds - sourceSeconds;
+
+        const result = setTimingOffsetSeconds(
+            offsetSeconds,
+            true,
+            true
+        );
+
+        stopTimingSyncMode();
+
+        return {
+            sourceSeconds,
+            actualSeconds,
+            offsetSeconds: result.seconds,
+            lineIndex: source.lineIndex,
+            wordIndex: source.wordIndex,
+            granularity: source.granularity,
+            text: source.text
+        };
+    }
+
+    function handleTimingPickClick(event) {
+        if (!state.timingPickActive) return;
+
+        const target = event && event.target;
+        if (!target || !target.closest) return;
+
+        const lyricTarget =
+            target.closest(
+                '.ak-word, .ak-enhanced-line'
+            );
+
+        if (!lyricTarget) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        captureTimingSync(lyricTarget);
+    }
+
+    function beginTimingSyncMode() {
+        state.timingPickActive = true;
+
+        if (
+            !state.timingPickListenerInstalled
+            && typeof document !== 'undefined'
+        ) {
+            document.addEventListener(
+                'click',
+                handleTimingPickClick,
+                true
+            );
+            state.timingPickListenerInstalled = true;
+        }
+
+        const page = getCurrentLyricPage();
+        if (page) page.classList.add('ak-timing-pick-mode');
+
+        updateTimingControlsUi();
+
+        return { active: true };
+    }
+
+    function removeTimingPopover() {
+        stopTimingSyncMode();
+
+        const popover = state.timingPopover;
+        if (popover && popover.parentNode) {
+            popover.parentNode.removeChild(popover);
+        }
+        state.timingPopover = null;
+        updateTimingControlsUi();
+    }
+
+    function createTimingActionButton(
+        label,
+        action,
+        className = ''
+    ) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className =
+            `ak-timing-action ${className}`.trim();
+        button.dataset.akTimingAction = action;
+        button.textContent = label;
+        return button;
+    }
+
+    function ensureTimingPopover() {
+        if (state.timingPopover && state.timingPopover.isConnected) {
+            return state.timingPopover;
+        }
+
+        const host = ensureLyricsToolsHost();
+        if (!host) return null;
+
+        const popover = document.createElement('div');
+        popover.id = 'ak-lyrics-timing-popover';
+        popover.className = 'ak-timing-popover';
+        popover.dataset.akOwned = '1';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', 'Lyrics timing assistant');
+
+        const heading = document.createElement('div');
+        heading.className = 'ak-timing-popover-heading';
+        heading.textContent = 'Lyrics timing';
+
+        const summary = document.createElement('div');
+        summary.className = 'ak-timing-summary';
+
+        const current = document.createElement('strong');
+        current.className = 'ak-timing-current-value';
+        summary.appendChild(current);
+
+        const fineRow = document.createElement('div');
+        fineRow.className = 'ak-timing-action-row';
+        fineRow.appendChild(
+            createTimingActionButton('−0.1', 'minus-fine')
+        );
+        fineRow.appendChild(
+            createTimingActionButton('+0.1', 'plus-fine')
+        );
+        fineRow.appendChild(
+            createTimingActionButton('−0.5', 'minus-coarse')
+        );
+        fineRow.appendChild(
+            createTimingActionButton('+0.5', 'plus-coarse')
+        );
+
+        const sync = createTimingActionButton(
+            'Sync lyric to now',
+            'sync-one',
+            'ak-timing-action-wide ak-timing-action-primary'
+        );
+
+        const status = document.createElement('div');
+        status.className = 'ak-timing-sync-status';
+        status.setAttribute('aria-live', 'polite');
+
+        const footer = document.createElement('div');
+        footer.className = 'ak-timing-action-row';
+        footer.appendChild(createTimingActionButton('Undo', 'undo'));
+        footer.appendChild(createTimingActionButton('Reset', 'reset'));
+        footer.appendChild(createTimingActionButton('Close', 'close'));
+
+        popover.appendChild(heading);
+        popover.appendChild(summary);
+        popover.appendChild(fineRow);
+        popover.appendChild(sync);
+        popover.appendChild(status);
+        popover.appendChild(footer);
+
+        popover.addEventListener('click', event => {
+            const button =
+                event.target
+                && event.target.closest
+                    ? event.target.closest(
+                        '[data-ak-timing-action]'
+                    )
+                    : null;
+
+            if (!button) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            const action = button.dataset.akTimingAction;
+
+            if (action === 'minus-fine') {
+                adjustTimingOffsetSeconds(
+                    -TIMING_OFFSET_FINE_STEP_SECONDS
+                );
+            } else if (action === 'plus-fine') {
+                adjustTimingOffsetSeconds(
+                    TIMING_OFFSET_FINE_STEP_SECONDS
+                );
+            } else if (action === 'minus-coarse') {
+                adjustTimingOffsetSeconds(
+                    -TIMING_OFFSET_STEP_SECONDS
+                );
+            } else if (action === 'plus-coarse') {
+                adjustTimingOffsetSeconds(
+                    TIMING_OFFSET_STEP_SECONDS
+                );
+            } else if (action === 'sync-one') {
+                beginTimingSyncMode();
+            } else if (action === 'undo') {
+                undoTimingOffset();
+            } else if (action === 'reset') {
+                resetTimingOffsetValue();
+            } else if (action === 'close') {
+                removeTimingPopover();
+            }
+
+            updateTimingControlsUi();
+        });
+
+        host.appendChild(popover);
+        state.timingPopover = popover;
+        updateTimingControlsUi();
+
+        return popover;
+    }
+
+    function toggleTimingPopover() {
+        if (
+            state.timingPopover
+            && state.timingPopover.isConnected
+        ) {
+            removeTimingPopover();
+            return null;
+        }
+
+        return ensureTimingPopover();
+    }
+
     function removeTimingControls() {
+        removeTimingPopover();
+
         const controls = state.timingControls;
         if (controls && controls.parentNode) {
             controls.parentNode.removeChild(controls);
         }
         state.timingControls = null;
         removeLyricsToolsHostIfEmpty();
-    }
-
-    function createTimingButton(id, title, symbol, label) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.id = id;
-        button.className = 'btn-icon ak-lyrics-timing-btn';
-        button.title = title;
-        button.setAttribute('aria-label', label);
-        const glyph = document.createElement('span');
-        glyph.className = 'ak-timing-glyph';
-        glyph.setAttribute('aria-hidden', 'true');
-        glyph.textContent = symbol;
-        button.appendChild(glyph);
-        return button;
     }
 
     function ensureTimingControls() {
@@ -3733,59 +4179,36 @@
         if (!host) return null;
 
         let controls = state.timingControls;
+
         if (!controls || !controls.isConnected) {
-            controls = document.createElement('div');
-            controls.className = 'lyrics-timing-controls ak-lyrics-timing-controls';
+            controls = document.createElement('button');
+            controls.type = 'button';
+            controls.id = 'lyrics-timing-display';
+            controls.className =
+                'ak-lyrics-timing-chip';
             controls.dataset.akOwned = '1';
-            controls.setAttribute('role', 'group');
-            controls.setAttribute('aria-label', 'Lyrics timing offset');
+            controls.setAttribute('aria-haspopup', 'dialog');
+            controls.setAttribute('aria-controls', 'ak-lyrics-timing-popover');
+            controls.setAttribute('aria-expanded', 'false');
 
-            const minus = createTimingButton(
-                'lyrics-timing-minus-btn',
-                'Decrease delay (lyrics earlier) -0.5s',
-                '−',
-                'Lyrics earlier by 0.5 seconds'
-            );
-            const display = document.createElement('span');
-            display.id = 'lyrics-timing-display';
-            display.className = 'lyrics-timing-display';
-            display.title = 'Current timing offset';
-            display.setAttribute('aria-live', 'polite');
+            const icon = document.createElement('span');
+            icon.className = 'ak-timing-chip-icon';
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = '⏱';
 
-            const plus = createTimingButton(
-                'lyrics-timing-plus-btn',
-                'Increase delay (lyrics later) +0.5s',
-                '+',
-                'Lyrics later by 0.5 seconds'
-            );
-            const reset = createTimingButton(
-                'lyrics-timing-reset-btn',
-                'Reset timing offset',
-                '↺',
-                'Reset lyrics timing offset'
-            );
-            reset.classList.add('ak-timing-reset-btn');
+            const value = document.createElement('span');
+            value.className = 'ak-timing-chip-value';
+            value.setAttribute('aria-live', 'polite');
 
-            minus.addEventListener('click', event => {
+            controls.appendChild(icon);
+            controls.appendChild(value);
+
+            controls.addEventListener('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                adjustTimingOffsetSeconds(-TIMING_OFFSET_STEP_SECONDS);
-            });
-            plus.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                adjustTimingOffsetSeconds(TIMING_OFFSET_STEP_SECONDS);
-            });
-            reset.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                setTimingOffsetSeconds(0, true);
+                toggleTimingPopover();
             });
 
-            controls.appendChild(minus);
-            controls.appendChild(display);
-            controls.appendChild(plus);
-            controls.appendChild(reset);
             host.appendChild(controls);
             state.timingControls = controls;
         } else if (controls.parentNode !== host) {
@@ -3810,6 +4233,10 @@
         if (!button) return;
         const active = state.romanizationMode === 'romanized';
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        button.setAttribute(
+            'aria-label',
+            active ? 'Show native lyrics' : 'Show romanized lyrics'
+        );
         button.dataset.akRomanizationMode = active ? 'romanized' : 'native';
         button.title = active
             ? 'Show native lyrics'
@@ -3838,7 +4265,7 @@
             const icon = document.createElement('span');
             icon.className = 'ak-romanization-icon';
             icon.setAttribute('aria-hidden', 'true');
-            icon.textContent = 'Aa';
+            icon.textContent = 'A';
 
             const label = document.createElement('span');
             label.className = 'ak-romanization-label';
@@ -4096,6 +4523,7 @@
         lineElement.style.removeProperty('visibility');
         lineElement.removeAttribute('aria-hidden');
         lineElement.classList.add('ak-enhanced-line');
+        lineElement.dataset.akTimingLineIndex = String(lineIndex);
         lineElement.classList.toggle('ak-word-synced', cues.length > 0);
         lineElement.classList.toggle('ak-line-synced', cues.length === 0);
         lineElement.classList.toggle(
@@ -7008,12 +7436,21 @@
     }
 
     function applyUserTimingOffsetTicks(ticks) {
-        /* Positive UI offset means "lyrics later", so the lyric timeline
-         * intentionally runs behind media by that amount. */
-        return ticks - (
-            clampTimingOffsetSeconds(state.timingOffsetSeconds)
-            * TICKS_PER_SECOND
-        );
+        const mediaSeconds =
+            finiteNumber(ticks, 0) / TICKS_PER_SECOND;
+        const sourceSeconds =
+            mediaSeconds
+            - clampTimingOffsetSeconds(state.timingOffsetSeconds);
+        return sourceSeconds * TICKS_PER_SECOND;
+    }
+
+    function removeUserTimingOffsetTicks(ticks) {
+        const sourceSeconds =
+            finiteNumber(ticks, 0) / TICKS_PER_SECOND;
+        const mediaSeconds =
+            sourceSeconds
+            + clampTimingOffsetSeconds(state.timingOffsetSeconds);
+        return mediaSeconds * TICKS_PER_SECOND;
     }
 
     function chooseTimelineTicks(
@@ -9303,6 +9740,7 @@
 
     const publicApi = Object.freeze({
         version: VERSION,
+        lyricG2PVersion: LYRICG2P_VERSION,
         redecorate: queueDecoration,
         accents() {
             return PREMIUM_ACCENTS.map(accent => ({
@@ -9320,6 +9758,7 @@
         romanization() {
             const romanizer = getRomanizer();
             return {
+                requiredRomanizerVersion: LYRICG2P_VERSION,
                 mode: state.romanizationMode,
                 available: state.romanizationAvailable,
                 candidate: state.romanizationCandidate,
@@ -9335,22 +9774,110 @@
                 supportedLanguageFamilies: romanizer && romanizer.supportedLanguageFamilies
                     ? romanizer.supportedLanguageFamilies.slice()
                     : [],
+                detailedDiagnostics:
+                    !!(romanizer && typeof romanizer.romanizeDetailed === 'function'),
+                contextSegmentation:
+                    !!(romanizer && typeof romanizer.segmentText === 'function'),
+                candidateRanker:
+                    romanizer && romanizer.candidateRanker
+                        ? romanizer.candidateRanker
+                        : null,
+                romanizationStyle:
+                    romanizer && romanizer.romanizationStyle
+                        ? Object.assign({}, romanizer.romanizationStyle)
+                        : null,
+                confidenceSemantics:
+                    romanizer && romanizer.confidenceSemantics
+                        ? romanizer.confidenceSemantics
+                        : null,
+                phonologicalIR:
+                    !!(romanizer && typeof romanizer.phonologicalIR === 'function'),
+                nBestVariants:
+                    !!(romanizer && typeof romanizer.romanizationVariants === 'function'),
+                learnedModelBundled:
+                    !!(romanizer && romanizer.learnedModelBundled),
+                targetedLearnedAdvisorsBundled:
+                    !!(romanizer && romanizer.targetedLearnedAdvisorsBundled),
+                learnedComponentsBundled:
+                    !!(romanizer && romanizer.learnedComponentsBundled),
+                learnedComponents:
+                    romanizer && Array.isArray(romanizer.learnedComponents)
+                        ? romanizer.learnedComponents.map(item => Object.assign({}, item))
+                        : [],
                 songKey: state.songPreferenceKey
             };
+        },
+        explainRomanization(text) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.explain !== 'function') return null;
+            return romanizer.explain(String(text == null ? '' : text));
+        },
+        segmentRomanization(text) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.segmentText !== 'function') return [];
+            return romanizer.segmentText(String(text == null ? '' : text));
+        },
+        detectRomanizationLanguages(text) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.detectLanguages !== 'function') return [];
+            return romanizer.detectLanguages(String(text == null ? '' : text));
+        },
+        romanizationIR(text) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.phonologicalIR !== 'function') return null;
+            return romanizer.phonologicalIR(String(text == null ? '' : text));
+        },
+        romanizationVariants(text, limit) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.romanizationVariants !== 'function') return [];
+            return romanizer.romanizationVariants(String(text == null ? '' : text), limit);
+        },
+        exportRomanizationCase(text, expected) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.exportRomanizationCase !== 'function') return null;
+            return romanizer.exportRomanizationCase(
+                String(text == null ? '' : text),
+                String(expected == null ? '' : expected)
+            );
+        },
+        rankRomanizationCandidates(text, candidates) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.rankCandidates !== 'function') return [];
+            return romanizer.rankCandidates(
+                String(text == null ? '' : text),
+                Array.isArray(candidates) ? candidates : []
+            );
+        },
+        selectRomanizationCandidate(text, candidates) {
+            const romanizer = getRomanizer();
+            if (!romanizer || typeof romanizer.selectCandidate !== 'function') return null;
+            return romanizer.selectCandidate(
+                String(text == null ? '' : text),
+                Array.isArray(candidates) ? candidates : []
+            );
         },
         setTimingOffset: setTimingOffsetSeconds,
         adjustTimingOffset: adjustTimingOffsetSeconds,
         resetTimingOffset() {
-            return setTimingOffsetSeconds(0, true);
+            return resetTimingOffsetValue();
+        },
+        startTimingSync() {
+            return beginTimingSyncMode();
+        },
+        undoTiming() {
+            return undoTimingOffset();
         },
         timing() {
             return {
                 seconds: state.timingOffsetSeconds,
                 display: formatTimingOffset(),
+                fineStepSeconds: TIMING_OFFSET_FINE_STEP_SECONDS,
                 stepSeconds: TIMING_OFFSET_STEP_SECONDS,
                 minSeconds: TIMING_OFFSET_MIN_SECONDS,
                 maxSeconds: TIMING_OFFSET_MAX_SECONDS,
                 changeCount: state.timingOffsetChangeCount,
+                syncPickActive: state.timingPickActive,
+                timelineFingerprint: timingTimelineFingerprint(),
                 songKey: state.songPreferenceKey
             };
         },

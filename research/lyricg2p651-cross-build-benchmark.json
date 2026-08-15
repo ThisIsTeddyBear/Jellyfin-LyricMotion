@@ -1,0 +1,29 @@
+{
+  "node": "v22.16.0",
+  "results": {
+    "base": {
+      "version": "6.5.0",
+      "mixedRomanizeMs": 0.193948,
+      "punjabiRomanizeMs": 0.153017,
+      "devanagariRomanizeMs": 0.103723,
+      "mixedDetailedMs": 0.632956,
+      "punjabiDetailedMs": 0.437539
+    },
+    "alternate": {
+      "version": "6.5.0",
+      "mixedRomanizeMs": 0.227543,
+      "punjabiRomanizeMs": 0.413584,
+      "devanagariRomanizeMs": 0.154371,
+      "mixedDetailedMs": 0.51999,
+      "punjabiDetailedMs": 0.924361
+    },
+    "merged": {
+      "version": "6.5.1",
+      "mixedRomanizeMs": 0.200763,
+      "punjabiRomanizeMs": 0.161327,
+      "devanagariRomanizeMs": 0.110977,
+      "mixedDetailedMs": 0.823314,
+      "punjabiDetailedMs": 0.702638
+    }
+  }
+}

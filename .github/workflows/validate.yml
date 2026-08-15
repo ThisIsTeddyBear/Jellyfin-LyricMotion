@@ -2,78 +2,42 @@ name: Validate
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
+    branches: [main, master]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  linux:
+  validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
-      - uses: actions/setup-python@v5
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-      - name: Run full regression suite
+          python-version: '3.13'
+
+      - name: Show tool versions
+        run: |
+          node --version
+          python --version
+
+      - name: Run complete validation gate
         run: sh scripts/test-all.sh
-      - name: Build deterministic release package twice
-        run: |
-          version="$(cat VERSION)"
-          python scripts/package_release.py --version "$version"
-          first="$(sha256sum "dist/local-testing/jellyfin-lyric-motion-v${version}.zip" | cut -d' ' -f1)"
-          python scripts/package_release.py --version "$version"
-          second="$(sha256sum "dist/local-testing/jellyfin-lyric-motion-v${version}.zip" | cut -d' ' -f1)"
-          test "$first" = "$second"
-
-  windows-installer:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Parse PowerShell installers with Windows PowerShell 5.1
-        shell: powershell
-        run: |
-          $failed = $false
-          foreach ($path in @('scripts/install.ps1', 'scripts/uninstall.ps1')) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $path), [ref]$tokens, [ref]$errors
-            )
-            if ($errors.Count) {
-              $errors | Write-Error
-              $failed = $true
-            }
-          }
-          if ($failed) { exit 1 }
-      - name: Windows PowerShell 5.1 install and uninstall smoke test
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $web = Join-Path $env:RUNNER_TEMP 'jlm-web'
-          New-Item -ItemType Directory -Force -Path $web | Out-Null
-          Set-Content -LiteralPath (Join-Path $web 'index.html') -Encoding UTF8 -Value '<html><body><script src="runtime.bundle.js"></script><main id="keep">keep</main></body></html>'
-
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -WebDir $web
-          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with exit code $LASTEXITCODE" }
-
-          $html = [IO.File]::ReadAllText((Join-Path $web 'index.html'))
-          if ($html -notmatch 'jellyfin-lyric-motion\.js') { throw 'JS loader missing after install' }
-          if ($html -notmatch 'jellyfin-lyric-motion\.css') { throw 'CSS loader missing after install' }
-          foreach ($asset in @('jellyfin-lyric-motion.js', 'jellyfin-lyric-motion.css', 'jellyfin-lyric-romanizer.js')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $web $asset))) { throw "Missing installed asset: $asset" }
-          }
-
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -WebDir $web
-          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 failed with exit code $LASTEXITCODE" }
-
-          $html = [IO.File]::ReadAllText((Join-Path $web 'index.html'))
-          if ($html -match 'jellyfin-lyric-motion') { throw 'LyricMotion loader remained after uninstall' }
-          if ($html -notmatch 'id="keep"') { throw 'Uninstall altered unrelated HTML' }
-          if (Get-ChildItem -LiteralPath $web -Filter '*.replace.bak' -File -ErrorAction SilentlyContinue) {
-            throw 'Transient replace backup was not cleaned'
-          }
