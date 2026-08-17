@@ -123,7 +123,7 @@ class ReleaseStaticTests(unittest.TestCase):
         markdown_files = [
             ROOT/'README.md',
             ROOT/'CONTRIBUTING.md',
-            ROOT/'docs'/'TIMING-OFFSET.md',
+            ROOT/'docs'/'TIMING-ASSISTANT.md',
             ROOT/'docs'/'INSTRUMENTAL-BREAKS.md',
             ROOT/'docs'/'DYNAMIC-BACKGROUND-3.2.5.md',
             ROOT/'docs'/'ROMANIZATION.md',
