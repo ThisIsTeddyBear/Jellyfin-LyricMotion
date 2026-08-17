@@ -105,34 +105,93 @@ stage_copy() {
   return 1
 }
 
-# Stage the complete asset set before replacing any live file. This makes
-# ordinary copy/disk errors fail before an existing installation is touched.
+stage_existing_backup() {
+  live_path=$1
+  if [ ! -e "$live_path" ]; then
+    printf '%s\n' ''
+    return 0
+  fi
+  live_name=$(basename -- "$live_path")
+  backup_path=$(mktemp "$WEB_DIR/.${live_name}.XXXXXX.rollback")
+  if cp -p "$live_path" "$backup_path" 2>/dev/null || cp "$live_path" "$backup_path"; then
+    printf '%s\n' "$backup_path"
+    return 0
+  fi
+  rm -f "$backup_path"
+  return 1
+}
+
+JS_DEST="$WEB_DIR/jellyfin-lyric-motion.js"
+CSS_DEST="$WEB_DIR/jellyfin-lyric-motion.css"
+ROMANIZER_DEST="$WEB_DIR/jellyfin-lyric-romanizer.js"
+
+# Stage the complete replacement set, including the transformed index, before
+# touching any live asset. A malformed Jellyfin index therefore fails before a
+# partial LyricMotion upgrade can become visible.
 JS_TEMP=''
 CSS_TEMP=''
 ROMANIZER_TEMP=''
-cleanup_staged_assets() {
+INDEX_TEMP=''
+JS_ROLLBACK=''
+CSS_ROLLBACK=''
+ROMANIZER_ROLLBACK=''
+COMMITTING=0
+COMMITTED=0
+
+restore_live_asset() {
+  destination_path=$1
+  rollback_path=$2
+  if [ -n "$rollback_path" ] && [ -f "$rollback_path" ]; then
+    cp -p "$rollback_path" "$destination_path" 2>/dev/null \
+      || cp "$rollback_path" "$destination_path" \
+      || return 1
+  else
+    rm -f "$destination_path" || return 1
+  fi
+}
+
+cleanup_transaction_files() {
   [ -z "$JS_TEMP" ] || rm -f "$JS_TEMP"
   [ -z "$CSS_TEMP" ] || rm -f "$CSS_TEMP"
   [ -z "$ROMANIZER_TEMP" ] || rm -f "$ROMANIZER_TEMP"
+  [ -z "$INDEX_TEMP" ] || rm -f "$INDEX_TEMP"
+  [ -z "$JS_ROLLBACK" ] || rm -f "$JS_ROLLBACK"
+  [ -z "$CSS_ROLLBACK" ] || rm -f "$CSS_ROLLBACK"
+  [ -z "$ROMANIZER_ROLLBACK" ] || rm -f "$ROMANIZER_ROLLBACK"
 }
-trap cleanup_staged_assets EXIT HUP INT TERM
-JS_TEMP=$(stage_copy "$JS_SOURCE" "$WEB_DIR/jellyfin-lyric-motion.js")
-CSS_TEMP=$(stage_copy "$CSS_SOURCE" "$WEB_DIR/jellyfin-lyric-motion.css")
-ROMANIZER_TEMP=$(stage_copy "$ROMANIZER_SOURCE" "$WEB_DIR/jellyfin-lyric-romanizer.js")
 
-# Same-directory rename means the browser observes a complete old or complete
-# new asset, never a partially copied JavaScript/CSS file.
-mv -f "$JS_TEMP" "$WEB_DIR/jellyfin-lyric-motion.js"
-JS_TEMP=''
-mv -f "$CSS_TEMP" "$WEB_DIR/jellyfin-lyric-motion.css"
-CSS_TEMP=''
-mv -f "$ROMANIZER_TEMP" "$WEB_DIR/jellyfin-lyric-romanizer.js"
-ROMANIZER_TEMP=''
-trap - EXIT HUP INT TERM
+finish_install_transaction() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ] && [ "$COMMITTING" -eq 1 ] && [ "$COMMITTED" -eq 0 ]; then
+    echo "Installation commit failed; restoring the previous LyricMotion assets." >&2
+    restore_live_asset "$JS_DEST" "$JS_ROLLBACK" || true
+    restore_live_asset "$CSS_DEST" "$CSS_ROLLBACK" || true
+    restore_live_asset "$ROMANIZER_DEST" "$ROMANIZER_ROLLBACK" || true
+    cp -p "$BACKUP" "$INDEX" 2>/dev/null || cp "$BACKUP" "$INDEX" || true
+  fi
+  cleanup_transaction_files
+  exit "$status"
+}
+trap finish_install_transaction EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-python3 - "$INDEX" "$VERSION" "$LYRICG2P_VERSION" <<'PY'
+JS_TEMP=$(stage_copy "$JS_SOURCE" "$JS_DEST")
+CSS_TEMP=$(stage_copy "$CSS_SOURCE" "$CSS_DEST")
+ROMANIZER_TEMP=$(stage_copy "$ROMANIZER_SOURCE" "$ROMANIZER_DEST")
+INDEX_TEMP=$(stage_copy "$INDEX" "$INDEX")
+
+# Snapshot the complete previous live asset set before the first commit. Empty
+# rollback paths mean that asset did not exist and should be removed on rollback.
+JS_ROLLBACK=$(stage_existing_backup "$JS_DEST")
+CSS_ROLLBACK=$(stage_existing_backup "$CSS_DEST")
+ROMANIZER_ROLLBACK=$(stage_existing_backup "$ROMANIZER_DEST")
+
+python3 - "$INDEX_TEMP" "$VERSION" "$LYRICG2P_VERSION" <<'PY'
 from pathlib import Path
-import os, re, stat, sys, tempfile
+import os, re, sys
 
 path = Path(sys.argv[1])
 version = sys.argv[2]
@@ -166,27 +225,27 @@ inject = (
 )
 content = content[:match.start()] + inject + content[match.start():]
 
-mode = stat.S_IMODE(path.stat().st_mode)
-temporary = None
-try:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", newline="", dir=path.parent,
-        prefix=f".{path.name}.", suffix=".tmp", delete=False
-    ) as handle:
-        temporary = Path(handle.name)
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
-    temporary = None
-finally:
-    if temporary is not None:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
+with path.open("w", encoding="utf-8", newline="") as handle:
+    handle.write(content)
+    handle.flush()
+    os.fsync(handle.fileno())
 PY
+
+# Each same-directory rename is atomic. If any commit fails, the EXIT trap
+# restores every previously installed asset and the original index.html.
+COMMITTING=1
+mv -f "$JS_TEMP" "$JS_DEST"
+JS_TEMP=''
+mv -f "$CSS_TEMP" "$CSS_DEST"
+CSS_TEMP=''
+mv -f "$ROMANIZER_TEMP" "$ROMANIZER_DEST"
+ROMANIZER_TEMP=''
+mv -f "$INDEX_TEMP" "$INDEX"
+INDEX_TEMP=''
+COMMITTED=1
+COMMITTING=0
+cleanup_transaction_files
+trap - EXIT HUP INT TERM
 
 rm -f "$WEB_DIR/apple-karaoke.js" "$WEB_DIR/apple-karaoke.css"
 

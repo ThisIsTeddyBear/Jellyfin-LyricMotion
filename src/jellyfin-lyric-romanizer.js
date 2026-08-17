@@ -300,7 +300,7 @@
         'سوہنی':'sohni','سوہنیا':'sohniya','رب':'rab','ربّ':'rabb','وے':'ve','نی':'ni','ماہی':'maahi','ماہیا':'maahiya',
         'کرتا':'karta','کرتی':'karti','کرتے':'karte','کرنا':'karna','کروں':'karoon','کریں':'karein','کر':'kar',
         'ایک':'ek','سفر':'safar','راستہ':'raasta','راستے':'raaste','منزل':'manzil','دنیا':'duniya','جہاں':'jahaan','زمانہ':'zamaana',
-        'بینا':'bina','بغیر':'baghair','دل':'dil','دلوں':'dilon','نظر':'nazar','نظروں':'nazron','چہرہ':'chehra','چہرے':'chehre',
+        'بینا':'bina','بغیر':'baghair','نظر':'nazar','نظروں':'nazron','چہرہ':'chehra','چہرے':'chehre',
         'آنکھوں':'aankhon','آنکھوںمیں':'aankhonmein','پل':'pal','لمحہ':'lamha','لمحے':'lamhe','یاد':'yaad','یادیں':'yaadein',
         'کہتا':'kehta','کہتی':'kehti','کہتے':'kehte','کہنا':'kehna','سن':'sun','سنو':'suno','سنتا':'sunta','سنتی':'sunti',
         'دیکھ':'dekh','دیکھا':'dekha','دیکھو':'dekho','دیکھتی':'dekhti','دیکھتا':'dekhta','مل':'mil','ملا':'mila','ملے':'mile',
@@ -489,7 +489,7 @@
         'हम':'hum','हमको':'humko','हमसे':'humse','हमने':'humne','हमारा':'hamaara','हमारी':'hamaari','हमारे':'hamaare',
         'दिल':'dil','दिलों':'dilon','ज़िंदगी':'zindagi','जिंदगी':'zindagi','मोहब्बत':'mohabbat',
         'इश्क':'ishq','इश्क़':'ishq','ख़्वाब':'khwaab','ख्वाब':'khwaab','खुदा':'khuda','ख़ुदा':'khuda',
-        'तेरे':'tere','मेरे':'mere','साथ':'saath','सदा':'sada','डोली':'doli','बज':'baj','एह':'eh',
+        'साथ':'saath','सदा':'sada','डोली':'doli','बज':'baj','एह':'eh',
         'पहला':'pehla','पहली':'pehli','पहले':'pehle','ओर':'ore','कहता':'kehta','कहती':'kehti','कहते':'kehte',
         'रहता':'rehta','रहती':'rehti','रहते':'rehte','बहकता':'behakta','बहकती':'behakti','बहके':'behke',
         'मिलकर':'milkar','चलकर':'chalkar','सुनकर':'sunkar','देखकर':'dekhkar','कहकर':'kehkar','करके':'karke','दिलबर':'dilbar','धड़कन':'dhadkan','धड़कन':'dhadkan',
@@ -498,7 +498,7 @@
         'कभी':'kabhi','अभी':'abhi','फिर':'phir','जहाँ':'jahaan','जहां':'jahaan','यहाँ':'yahaan','यहां':'yahaan','वहाँ':'wahaan','वहां':'wahaan','कैसे':'kaise','ऐसे':'aise','जैसे':'jaise',
         'तुझे':'tujhe','मुझे':'mujhe','मुझको':'mujhko','तुझको':'tujhko','उसको':'usko','इसको':'isko','अपने':'apne','अपना':'apna','अपनी':'apni','कोई':'koi','कुछ':'kuchh',
         /* Marathi/Konkani high-frequency forms sharing Devanagari. */
-        'माझं':'majha','माझे':'majhe','माझा':'majha','माझी':'majhi','माझ्या':'majhya','तुझं':'tujha','तुझा':'tujha','तुझी':'tujhi','तुझे':'tujhe','तुझ्या':'tujhya',
+        'माझं':'majha','माझे':'majhe','माझा':'majha','माझी':'majhi','माझ्या':'majhya','तुझं':'tujha','तुझा':'tujha','तुझी':'tujhi','तुझ्या':'tujhya',
         'आहे':'aahe','आहेत':'aahet','नाही':'naahi','तुला':'tula','मला':'mala','पाहते':'paahte','पाहतो':'paahto','पाहिले':'paahile','डोळ्यात':'dolyaat','डोळे':'dole','मन':'man','प्रेम':'prem',
         /* Bhojpuri/Awadhi/Hindi-film colloquialisms. */
         'तोहरा':'tohra','हमार':'hamaar','हमरा':'hamra','कइसन':'kaisan','काहे':'kaahe','बाबू':'baabu','सैयाँ':'saiyaan','सइयां':'saiyaan'
@@ -1619,7 +1619,7 @@
             marks: Object.freeze({'ಃ':'h'}), nasalMarks: 'ಁಂ', finalNasal: 'm', inherent: 'a', anusvaraContinuantM: true,
             clusters: Object.freeze({'ಕ್ಷ':'ksh','ಜ್ಞ':'gn','ತ್ರ':'tr','ದ್ರ':'dr','ಪ್ರ':'pr','ಬ್ರ':'br','ಕ್ರ':'kr','ಗ್ರ':'gr','ಶ್ರ':'shr','ಸ್ವ':'sw'}),
             overrides: Object.freeze({
-                'ಕನ್ನಡ':'kannada','ಹಾಡು':'haadu','ಹಾಡುಗಳು':'haadugalu','ಪ್ರೀತಿ':'preeti','ನಿನ್ನ':'ninna','ನಿನ್ನನ್ನು':'ninnannu','ನಾನು':'naanu','ನೀನು':'neenu','ನನ್ನ':'nanna','ನಿನ್ನ':'ninna',
+                'ಕನ್ನಡ':'kannada','ಹಾಡು':'haadu','ಹಾಡುಗಳು':'haadugalu','ಪ್ರೀತಿ':'preeti','ನಿನ್ನ':'ninna','ನಿನ್ನನ್ನು':'ninnannu','ನಾನು':'naanu','ನೀನು':'neenu','ನನ್ನ':'nanna',
                 'ಪ್ರೀತಿಸುತ್ತೇನೆ':'preetisuttene','ಮನಸು':'manasu','ಹೃದಯ':'hrudaya','ಕಣ್ಣು':'kannu','ಕಣ್ಣಲ್ಲಿ':'kannalli','ಕನಸು':'kanasu','ರಾತ್ರಿ':'raathri','ಬೆಳಕು':'belaku','ಏಕೆ':'eke','ಎಲ್ಲಿ':'elli','ಇಲ್ಲ':'illa','ನನ್ನೆದುರು':'nanneduru'
             })
         }),

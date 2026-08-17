@@ -2,6 +2,128 @@
 
 All notable public changes are documented here. The project follows Semantic Versioning.
 
+## [3.2.5] - 2026-08-17
+
+### Fixed
+- Fixed lyric focus/auto-scroll being stranded after `Sync lyric to now` or a corrected lyric click. Those capture-phase handlers intentionally suppress Jellyfin's stock seek, which also suppressed Jellyfin's hidden resume-follow side effect. LyricMotion now owns a guarded follow controller: timing capture and lyric clicks immediately recenter the selected line, playback follows each new active line, manual wheel/touch scrolling gets a short grace period, and explicit lyric interaction resumes follow instantly.
+- Recovered ELRC sweep and Classic Bloom when Jellyfin reuses an existing `.lyricsLine` but replaces its children. LyricMotion now validates owned child nodes in the animation loop, watchdog and mutation observer, including removed nodes and character-data changes.
+- Prevented a new lyric payload from decorating the outgoing song's still-visible DOM by binding decoration to a stable lyric-text identity.
+- Prevented detached instrumental SVG rows from continuing to animate after Jellyfin replaces lyric DOM.
+- Prevented rapid-skip artwork from committing when the image URL explicitly belongs to another Jellyfin item. The old DOM cover is snapshotted at media switch and generic unbound fallback requires additional stability before commit.
+- Fixed music tracks with album-inherited Primary artwork being rejected because the artwork URL belongs to the album item rather than the track item. Current now-playing album art is identity/stability gated, and visible artwork can no longer be misclassified as confirmed no-art.
+- Fixed shuffled transitions from track-owned artwork to album-inherited artwork waiting behind the generic 900 ms + 1.5 s fallback gates, or behind a missing track-image request for up to 6.5 s. Album-inherited now-playing art now has a short dedicated stability path, direct Primary probes have a 550 ms fast-path budget, and fallback stability is tracked independently per artwork URL so multiple Jellyfin candidates cannot reset one another forever.
+- Restored the timing icon and removed the obsolete rounded backing behind the Romanization SVG. Romanization and nonzero timing now use an explicit white active state with black glyph/text.
+- Fixed transient no-art/image failures becoming permanently resolved blank backgrounds. No-art is confirmed only after repeated stable failures and is retried.
+- Normalized volatile Jellyfin media query parameters case-insensitively, including `StartTimeTicks`, `PlaySessionId`, API keys and device/session fields.
+- Added GPU resource cleanup for partial WebGL initialization and exponential retry backoff after renderer creation failures.
+- Removed the coarse/no-pointer TV fallback that could false-positive desktop kiosk or accessibility browser shells. TV bypass now requires identifiable TV/platform signatures.
+
+### Changed
+- Dynamic Background remains the only atmosphere engine. Legacy mode storage, revision bookkeeping and unused focus/playback-state branches were removed.
+- Classic Bloom now shuffles a tighter five-color high-contrast set uniformly. Amber was removed, gains remain luminance-normalized, and the initial/failure fallback stays neutral.
+- Background playback rendering now actually stops while paused, ended, hidden or reduced-motion instead of toggling an unused state class.
+- Route/page teardown now removes stale atmosphere roots and releases their WebGL renderer.
+- Regression coverage now models reused lyric shells, detached owned nodes, payload/DOM races, skipped-item art, case-variant media parameters, kiosk TV false positives and perceptual glow balance.
+
+### Removed
+- Dead runtime constants/helpers, unreachable transition branches, unused CSS custom properties/classes, redundant instrumental state and obsolete atmosphere persistence fields.
+- Superseded audit reports, per-version release-note copies, removed-mode comparison docs and stale testing narratives. Current behavior is documented in the focused feature/architecture docs and this changelog.
+
+## [3.2.4] - 2026-08-16
+
+### Added
+- Timing-aware lyric click-to-seek interception when a nonzero per-song correction is active.
+- Click/touch and Enter/Space seeking on the synthetic instrumental `♪`, with button semantics and visible keyboard focus.
+- Runtime regression coverage for positive/negative corrected seek math and Jellyfin `StartTimeTicks` composition.
+
+### Fixed
+- Clicking a lyric after applying a timing correction seeking to the uncorrected source timestamp and therefore activating the adjacent line by approximately the configured offset.
+- Instrumental break notes being intentionally pointer-inert with no way to revisit the represented section.
+- LyricG2P benchmark reports carrying a stale hard-coded application version.
+- Contributor documentation referencing removed/non-shipped test and corpus scripts.
+- Public release docs linking to maintainer-only `docs/RELEASING.md`, which is excluded from release ZIPs.
+- Timing documentation wording that failed to distinguish changing an offset from an explicit user-requested lyric seek.
+
+### Compatibility
+- Zero-offset lyric clicks remain on Jellyfin's stock click path.
+- LyricG2P remains `6.5.1` with no intended Romanization output changes.
+
+## [3.2.3] - 2026-08-16
+
+### Added
+- Playback-time-driven wave surface for the instrumental `♪`, with progressive flattening near the next vocal and deterministic seek restoration.
+- Full 24-palette Classic Bloom regression coverage across page/container primary, secondary and tertiary CSS variables.
+- Runtime-core coverage for lyric request races/status handling, `StartTimeTicks`, timing-assistant state, song preference fingerprints, reduced motion, atmosphere off-mode, cue nullability and incomplete source positions.
+- Forced mid-commit POSIX installer rollback test and stale-build-output packaging checks.
+
+### Fixed
+- Classic Bloom being visually pinned to Champagne Gold because container-scoped fallback variables shadowed the selected palette.
+- Tertiary palette colors being selected but not contributing to the visible lyric halo.
+- Missing `getJellyfinActiveLineIndex()` in the nonzero `StartTimeTicks` playback-clock branch.
+- Null cue timestamps and source positions being coerced to zero by JavaScript numeric conversion.
+- Partial cue-position data being re-ordered as though unknown positions were position zero.
+- Transient lyric HTTP/auth/network failures replacing a previously accepted lyric payload with an empty state.
+- Atmosphere `off` mode creating hidden DOM despite being disabled.
+- Repeated instrumental phase scans walking every synthetic gap on every active frame.
+- Installer live replacement being able to leave a mixed-version overlay after a mid-commit filesystem failure.
+- Release packaging being able to include stale `dist/` output or root scratch files.
+- Remaining NodeList iterator assumptions in hot DOM mutation/artwork paths on older embedded WebViews.
+- Duplicate identical Romanizer object keys that JavaScript silently overwrote.
+- A visual-regression change that had removed the existing `scale(1.012)` emphasis from the current lyric.
+
+### Changed
+- Instrumental visual motion now uses a vector wave/clip implementation inspired by publicly documented lyric-player interaction patterns, independently implemented for LyricMotion without importing third-party GPL code.
+- The instrumental phase updater now uses binary-search/range transitions instead of an O(number of gaps) per-frame scan.
+- Installer asset updates are transactional, with complete staging and rollback before the HTML loader is committed.
+- Release packager excludes build-output directories and additional scratch/model artifacts.
+
+### Compatibility
+- Application version advances to `3.2.3`; LyricG2P remains `6.5.1`.
+- TV-class clients remain a hard stock-Jellyfin bypass.
+
+## [3.2.2] - 2026-08-16
+
+### Added
+- Inline SVG `♪` renderer with geometric bottom-to-top liquid clipping and an in-shape moving surface highlight.
+- Future/active/past visual phases for instrumental-note rows.
+- Randomized seek/state validation for vector fill geometry and phase restoration.
+
+### Changed
+- Instrumental notes are now visible as subdued future/past lyric-flow items instead of remaining fully transparent outside their active interval.
+- Active instrumental gaps no longer mark adjacent lyrics as near-current; the note is the sole visual focus until vocals resume.
+- Active glow is shape-based SVG drop shadow rather than text-shadow on a clipped Unicode glyph.
+- Application version advances to `3.2.2`; LyricG2P remains `6.5.1`.
+
+### Fixed
+- Rectangular/boxy white clipping artifacts around partially filled music-note glyphs in Chromium-family browsers.
+- Instrumental note appearing abruptly at the exact start of a gap and disappearing abruptly at the end.
+- Completed/upcoming lyrics visually competing with the active instrumental note.
+- Seek-back/seek-forward note state not preserving an intuitive empty/partial/full progression.
+
+## [3.2.1] - 2026-08-16
+
+### Added
+- Time-synchronized instrumental-break `♪` row inserted before the upcoming lyric for trustworthy vocal gaps of at least 2.0 seconds.
+- Bottom-to-top media-time-derived note fill with a restrained neutral glow, intro support and one continuous symbol for long instrumental sections.
+- `JellyfinLyricMotion.instrumentalBreaks()` diagnostics for threshold, planned gaps, active gap and progress.
+- Dedicated instrumental-break regression suite with 5,000 deterministic randomized timing/overlap fuzz timelines, plus an extended 20,000-case acceptance run.
+- Native Windows PowerShell `scripts/test-all.ps1` entry point that locates Git Bash and runs the same canonical release gate as CI.
+
+### Changed
+- During a qualifying instrumental break, completed lyrics become past and upcoming lyrics remain future; no lyric line is visually current until vocals resume.
+- Background/response vocals participate in gap planning so the note cannot claim an instrumental section while a vocal line is still active.
+- Standard LRC remains conservative: internal breaks are synthesized only when a trustworthy line/cue terminal end exists.
+- Line-synced rendering temporarily uses the selected performance-profile cadence while the note is actively filling, then returns to the normal 20 fps line-only cadence.
+- Application version advances to `3.2.1`; LyricG2P remains `6.5.1`.
+
+### Fixed
+- Earlier explicit cue endings being potentially mistaken for the end of the complete lyric line.
+- Optional null timing values coercing to zero during instrumental-gap planning.
+- Malformed line-end evidence occurring before the final vocal start being eligible as silence.
+- Multi-line/background handoff glow lingering into a synthetic instrumental break.
+- Empty timed rows fragmenting otherwise continuous instrumental sections.
+- Hidden instrumental rows being unnecessarily eligible for compositor promotion.
+
 ## [3.2.0] - 2026-08-15
 
 ### Final optimization and hardening

@@ -13,7 +13,9 @@ for file in \
   scripts/calibrate-lyricg2p65-confidence.js \
   tests/lyricg2p65.test.js \
   tests/lyricg2p651-hybrid.test.js \
-  tests/runtime-smoke.test.js
+  tests/runtime-smoke.test.js \
+  tests/runtime-core.test.js \
+  tests/instrumental-breaks.test.js
 do
   node --check "$file"
 done
@@ -28,9 +30,9 @@ python3 -m py_compile \
 sh -n scripts/install.sh
 sh -n scripts/uninstall.sh
 
-test "$(cat VERSION)" = "3.2.0"
+test "$(cat VERSION)" = "3.2.5"
 test "$(cat LYRICG2P_VERSION)" = "6.5.1"
-grep -q "const VERSION = '3.2.0'" src/jellyfin-lyric-motion.js
+grep -q "const VERSION = '3.2.5'" src/jellyfin-lyric-motion.js
 grep -q "const LYRICG2P_VERSION = '6.5.1'" src/jellyfin-lyric-motion.js
 grep -q "COPY LYRICG2P_VERSION /tmp/jellyfin-lyricg2p-version" docker/Dockerfile
 grep -q 'g2p=${LYRICG2P_VERSION}' docker/Dockerfile
@@ -40,6 +42,8 @@ grep -q "const VERSION = '6.5.1'" src/jellyfin-lyric-romanizer.js
 node tests/lyricg2p65.test.js
 node tests/lyricg2p651-hybrid.test.js
 node tests/runtime-smoke.test.js
+node tests/runtime-core.test.js
+node tests/instrumental-breaks.test.js
 python3 tests/ttml_converter_test.py
 python3 tests/research_pipeline_test.py
 python3 tests/release_static_test.py
@@ -71,7 +75,48 @@ grep -q "const VERSION = '6.5.1'" "$TMP_WEB/jellyfin-lyric-romanizer.js"
 sh scripts/uninstall.sh --webdir "$TMP_WEB" >/dev/null
 ! grep -q 'jellyfin-lyric-motion.js' "$TMP_WEB/index.html"
 
-# Deterministic release packaging and automatic checksum sidecar.
+# Forced mid-commit installer failure must roll back every live asset and index.
+TMP_ROLLBACK_WEB=$(mktemp -d)
+TMP_FAKE_BIN=$(mktemp -d)
+ROLLBACK_MV_COUNT=$(mktemp)
+printf '0\n' > "$ROLLBACK_MV_COUNT"
+cat > "$TMP_ROLLBACK_WEB/index.html" <<'HTML'
+<!doctype html><html><head></head><body><script src="runtime.bundle.js"></script></body></html>
+HTML
+printf 'old-js\n' > "$TMP_ROLLBACK_WEB/jellyfin-lyric-motion.js"
+printf 'old-css\n' > "$TMP_ROLLBACK_WEB/jellyfin-lyric-motion.css"
+printf 'old-g2p\n' > "$TMP_ROLLBACK_WEB/jellyfin-lyric-romanizer.js"
+cp "$TMP_ROLLBACK_WEB/index.html" "$TMP_ROLLBACK_WEB/index.expected.html"
+REAL_MV=$(command -v mv)
+cat > "$TMP_FAKE_BIN/mv" <<'SH'
+#!/usr/bin/env sh
+set -eu
+count=$(cat "$LYRICMOTION_TEST_MV_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$LYRICMOTION_TEST_MV_COUNT"
+if [ "$count" -eq 2 ]; then
+  exit 74
+fi
+exec "$LYRICMOTION_REAL_MV" "$@"
+SH
+chmod +x "$TMP_FAKE_BIN/mv"
+if PATH="$TMP_FAKE_BIN:$PATH" \
+  LYRICMOTION_TEST_MV_COUNT="$ROLLBACK_MV_COUNT" \
+  LYRICMOTION_REAL_MV="$REAL_MV" \
+  sh scripts/install.sh --webdir "$TMP_ROLLBACK_WEB" >/dev/null 2>&1; then
+  echo 'Installer rollback test expected a forced commit failure' >&2
+  exit 1
+fi
+test "$(cat "$TMP_ROLLBACK_WEB/jellyfin-lyric-motion.js")" = 'old-js'
+test "$(cat "$TMP_ROLLBACK_WEB/jellyfin-lyric-motion.css")" = 'old-css'
+test "$(cat "$TMP_ROLLBACK_WEB/jellyfin-lyric-romanizer.js")" = 'old-g2p'
+cmp "$TMP_ROLLBACK_WEB/index.html" "$TMP_ROLLBACK_WEB/index.expected.html"
+rm -rf "$TMP_ROLLBACK_WEB" "$TMP_FAKE_BIN" "$ROLLBACK_MV_COUNT"
+
+# Deterministic release packaging and automatic checksum sidecar. Build-output
+# directories must never recurse stale release files back into a new archive.
+mkdir -p dist
+printf 'stale-release-artifact\n' > dist/stale-release.zip.sha256
 python3 scripts/package_release.py --version "$(cat VERSION)" --output /tmp/lyricmotion-package-a.zip >/dev/null
 python3 scripts/package_release.py --version "$(cat VERSION)" --output /tmp/lyricmotion-package-b.zip >/dev/null
 cmp /tmp/lyricmotion-package-a.zip /tmp/lyricmotion-package-b.zip
@@ -90,9 +135,11 @@ for path in ('/tmp/lyricmotion-package-a.zip', '/tmp/lyricmotion-package-b.zip')
             '/docs/RELEASING.md',
         )
         leaked = [name for name in names if any(marker in name for marker in forbidden)]
+        leaked += [name for name in names if '/dist/' in name or '/build/' in name]
         if leaked:
-            raise SystemExit('Repository-only metadata leaked into release ZIP: ' + ', '.join(leaked))
+            raise SystemExit('Repository/build-only metadata leaked into release ZIP: ' + ', '.join(leaked))
 PY
+rm -rf dist
 rm -f /tmp/lyricmotion-package-a.zip /tmp/lyricmotion-package-b.zip \
       /tmp/lyricmotion-package-a.zip.sha256 /tmp/lyricmotion-package-b.zip.sha256
 

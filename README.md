@@ -1,10 +1,13 @@
 # Jellyfin LyricMotion
 
+> **3.2.5 Dynamic Background God Mode build:** single atmosphere engine, same-album visual deduplication, latest-media-only artwork commits, and rapid-skip transition hardening.
+
+
 [![Validate](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/actions/workflows/validate.yml/badge.svg)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/actions/workflows/validate.yml)
 [![Release](https://img.shields.io/github/v/release/ThisIsTeddyBear/Jellyfin-LyricMotion?display_name=tag)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
-An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and mobile: ELRC karaoke motion, overlapping/background vocals, **fully offline on-device Romanization**, per-song lyric timing correction, multilingual Classic Bloom, and adaptive album atmosphere.
+An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and mobile: ELRC karaoke motion, overlapping/background vocals, **time-synced instrumental-break progress**, fully offline on-device Romanization, per-song lyric timing correction, multilingual Classic Bloom, and adaptive album atmosphere.
 
 > [!IMPORTANT]
 > LyricMotion is a community project. It is not affiliated with or endorsed by the Jellyfin Project or Apple Inc. It patches only the Jellyfin Web client installed on your own server.
@@ -12,27 +15,25 @@ An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and 
 > [!NOTE]
 > **TV policy:** LyricMotion intentionally hard-bypasses TV-class clients. Detected TVs use Jellyfin's stock lyrics experience with no LyricMotion fetch/XHR interception, observers, media hooks, lyric DOM decoration, Romanizer loading, or timing controls. Desktop and mobile remain enhanced. See [TV Stock Bypass](docs/TV-STOCK-BYPASS.md).
 
-## What's new in 3.2.0 / LyricG2P 6.5.1
+## What's new in 3.2.5 / LyricG2P 6.5.1
 
-This repository now tracks the **optimized final LyricG2P 6.5.1 implementation** on the Jellyfin LyricMotion 3.2.0 application baseline.
+Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmosphere build centered on the requested album-art shader. LyricG2P remains **6.5.1**. This hotfix also hardens the lyric visual loop so ELRC sweep/Classic Bloom and instrumental liquid progress cannot be permanently starved by a background/lifecycle exception.
 
-- **Best-of-both hybrid Romanization**: deterministic lyric-specific phonology, curated lexical knowledge, production morphology, stronger shared-Devanagari phrase context, targeted Hindi/Punjabi learned schwa advice, richer Malayalam phonetic IR, and category-aware candidate selection.
-- **Playback fast path**: normal `romanize()` no longer pays for full diagnostic edit-alignment provenance unless guarded morphology actually needs it. In the controlled fresh-process Node benchmark, mixed normal Romanization improved by **74.3%**, Punjabi by **80.1%**, and Devanagari by **85.6%** versus the frozen pre-optimization 6.5.1 implementation.
-- **Karaoke mapping hardening**: NFC/NFD coordinate maps, real-script anchor checks, ZWJ/ZWNJ-chain handling, monotonic generic fallbacks, and span-clamped provenance protect source-to-Roman cue mapping even on hostile provider text.
-- **Smarter candidate authority**: curated lexicon and protected morphology stay authoritative; strong same-language learned/provider candidates can replace weak or shared-script-ambiguous local outputs without letting raw model confidence override known pronunciations.
-- **Malayalam improvements**: correct legacy chillu handling is combined with separate display and phonetic interpretations for contextual realizations.
-- **Shared-script language context**: Hindi/Marathi/Bhojpuri/Nepali phrase evidence is stronger while isolated genuinely ambiguous Devanagari tokens can remain unresolved instead of being forced to Hindi.
-- **Targeted learned components only**: compact Hindi/Punjabi schwa advisors are fully local and lazy. No full neural native-to-Roman checkpoint is bundled.
-- **Whole-project hardening**: strict Romanizer-version compatibility, metadata-aware candidate deduplication, bounded pathological edit-distance work, staged installer assets, invalid nested-TTML timing rejection, dataset-pipeline validation, deterministic packaging, checksums, browser-runtime smoke tests, and expanded CI.
-- **UI remains compact**: Romanization and the single lyric-timing chip remain the normal lyric controls; TV-class clients still hard-bypass to stock Jellyfin lyrics.
+- **Dynamic is the only atmosphere engine.** Legacy atmosphere preferences are ignored; removed modes have no runtime branches or persistent setting path to reactivate them.
+- **Album artwork is the color source.** The Dynamic mode does not synthesize a palette. Artwork is uploaded directly to WebGL, tinted only in dark regions, blurred through eight 128 x 128 Kawase passes when the image changes, then animated with simplex-noise domain warping.
+- **Reference shader character preserved.** Warp intensity 1.0, eight blur passes, animation speed 1.8, saturation 1.7, opacity 0.75, dithering 0, and audio responsiveness off follow the theme's shader configuration.
+- **Fast, real song transitions.** Different artwork uses a 260 ms texture crossfade. If another song arrives mid-transition, the currently visible blend is captured first and becomes the next transition's true starting point.
+- **Race-safe artwork.** Artwork commits are tied to the latest live media item. Explicitly mismatched item artwork is rejected, the pre-switch DOM cover is snapshotted as stale, and unbound DOM fallback must remain stable before it can commit.
+- **WebGL hardening.** Attribute locations are explicitly bound across programs, framebuffer completeness is checked, partial initialization is cleaned up, failed initialization uses exponential retry backoff, render resolution is capped for large displays, hidden tabs pause rendering, and WebGL context loss activates a dual-layer CSS artwork fallback.
+- **No audio coupling.** The background uses album artwork and elapsed animation time only. No analyser, FFT, beat response, phrase response, or instrumental response is involved.
+- **Self-healing lyric DOM.** Reused `.lyricsLine` shells are validated against LyricMotion-owned child nodes and lyric identity. If Jellyfin replaces line contents, ELRC sweep, Classic Bloom, and instrumental SVG rows are redecorated instead of continuing on detached nodes.
+- **Perceptually balanced shuffle.** The compact Classic Bloom set now shuffles five high-contrast accents equally. Per-palette gain is normalized so yellow/green choices do not dominate the red/blue/violet choices, and the fallback remains neutral.
 
 ### Validation snapshot
 
-The final optimized tree passed **32 reviewed Romanization regressions**, **500 base Unicode fuzz cases**, **3,000 focused hybrid/model/provenance fuzz cases**, a separate **10,000-case adversarial Unicode/provenance run**, and a **5,000-string frozen-vs-optimized differential** with identical normal output, detailed text, and tested source boundaries. The held-out 2,500-word Dakshina Tamil benchmark produced **zero output differences** from frozen 6.5.1.
+The release gate covers JavaScript/Python syntax, **32 LyricG2P regressions + 500 Unicode fuzz cases**, the 6.5.1 hybrid/provenance suite with **3,000 fuzz cases**, **5,000 randomized instrumental timelines**, runtime smoke/core tests, timing/request/accent/atmosphere tests, TTML conversion, research-pipeline hygiene, installer rollback simulation, static JS/CSS contracts, deterministic packaging and synthetic Jellyfin install/uninstall.
 
-The benchmark numbers are development-machine measurements, not browser/TV latency guarantees. See the detailed reports rather than treating a single throughput number as a language-quality score.
-
-Read: [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), [Song Style](docs/LYRICG2P-6.5.1-STYLE.md), [Three-Way Benchmark](docs/LYRICG2P-6.5.1-THREE-WAY-BENCHMARK.md), [Optimization & Hardening](docs/OPTIMIZATION-HARDENING-3.2.0-LYRICG2P-6.5.1.md), and [Release Notes](docs/RELEASE-NOTES-3.2.0-LYRICG2P-6.5.1.md).
+Read: [Dynamic Background Design](docs/DYNAMIC-BACKGROUND-3.2.5.md), [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), and the canonical [CHANGELOG](CHANGELOG.md).
 
 ## Feature gallery
 
@@ -40,7 +41,13 @@ Read: [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), [Song Style](docs/LYRICG2P-6.5.1
 
 ![Classic Bloom glow with a blue and violet adaptive atmosphere](docs/screenshots/classic-bloom-atmosphere.png)
 
-Classic Bloom uses a crisp letter-bound core followed by a softer dual-color halo and afterglow. Album artwork is sampled once per track into a small prebaked atmosphere bitmap; playback does not run a live full-screen blur.
+Classic Bloom uses a crisp letter-bound core followed by primary/secondary bloom and a restrained tertiary outer halo. The runtime exposes five punchier palettes and shuffles them per song without immediate repetition. Dynamic Background uses the album artwork itself as a preblurred WebGL texture and continuously deforms it with domain warping. Lyric rendering remains independent of the atmosphere and keeps its neutral sweep plus Classic Bloom foreground treatment.
+
+### Instrumental-break progress
+
+For a trustworthy vocal gap of at least two seconds, the completed lyric becomes past, the planned `♪` row is already present as a subdued future item, and the note smoothly becomes active. A subtle liquid surface rises bottom-to-top, oscillates while the break is in progress, then flattens as the next vocal approaches. Long instrumental sections still use one continuous symbol rather than repeating notes or dots.
+
+The fill and wave phase are derived from media time rather than a standalone CSS timer, so pause, seek and playback-rate changes stay locked to the song. Standard LRC without a real line-end timestamp remains conservative and does not synthesize breaks. Reduced-motion keeps the timing fill with decorative wave motion disabled.
 
 ### Concurrent lines and background vocals
 
@@ -52,8 +59,8 @@ LyricMotion tracks an active set instead of a single current line. Overlapping l
 
 | Input | Support | Result |
 |---|---|---|
-| Enhanced LRC / ELRC | Native | Word/syllable-aware wipe, motion, glow, overlaps, background lanes and exact line endings |
-| Standard LRC | Native | Polished line-synced presentation |
+| Enhanced LRC / ELRC | Native | Word/syllable-aware wipe, motion, glow, overlaps, background lanes, exact line endings and trustworthy instrumental-gap progress |
+| Standard LRC | Native | Polished line-synced presentation; instrumental gaps only when the source exposes a trustworthy explicit end |
 | Timed TTML | Converter | Recursive main + `x-bg` extraction into Jellyfin-compatible ELRC |
 | Plain unsynced lyrics | Jellyfin fallback | Displayed by Jellyfin without LyricMotion timing effects |
 
@@ -61,7 +68,7 @@ LyricMotion does not download lyrics. It enhances lyric data already available t
 
 ## Install
 
-Download `jellyfin-lyric-motion-v3.2.0.zip` from GitHub Releases, extract it, then run the installer from the extracted folder.
+Download `jellyfin-lyric-motion-v3.2.5.zip` from GitHub Releases, extract it, then run the installer from the extracted folder.
 
 ### Windows
 
@@ -141,15 +148,15 @@ The broad ICU-derived fallback remains coverage for unsupported scripts; it is n
 
 ## Smart lyric timing assistant
 
-The normal toolbar contains just the two compact controls: `A Romanize` and `⏱ +0.0s`. The timing chip opens a small popover only when needed.
+The normal toolbar is one compact glass capsule: a speech-bubble Romanization toggle plus a timing chip showing the current offset. The timing chip opens a compact popover only when needed.
 
 - **Fine correction**: `-0.1` / `+0.1`
-- **Coarse correction**: `-0.5` / `+0.5`
 - **Sync lyric to now**: tap a word/line exactly when it begins and LyricMotion calculates the constant offset automatically
-- **Undo / Reset**: immediately revert the previous timing edit or return to source timing
+- **Reset**: return to source timing
+- **Auto-dismiss**: clicking outside the popover closes it
 - **Timeline fingerprinting**: stored correction only restores when the exact lyric timeline matches, including cue boundaries and timing
 
-Positive offset delays the lyrics; negative offset makes them appear earlier. Playback itself is never changed. Three-point calibration and drift correction were intentionally removed from the final 3.1.1 design to keep the timing system simple and predictable. See [Smart Timing Assistant](docs/TIMING-ASSISTANT.md).
+Positive offset delays the lyrics; negative offset makes them appear earlier. Changing the timing correction itself never changes playback. An explicit lyric click still seeks, and in 3.2.4 that seek now includes the saved correction so the selected line is the line that actually becomes current. Three-point calibration and drift correction remain intentionally absent to keep the timing model simple and predictable. See [Smart Timing Assistant](docs/TIMING-ASSISTANT.md).
 
 ## Multilingual rendering
 
@@ -186,6 +193,7 @@ JellyfinLyricMotion.performance()
 JellyfinLyricMotion.atmosphere()
 JellyfinLyricMotion.romanization()
 JellyfinLyricMotion.timing()
+JellyfinLyricMotion.instrumentalBreaks()
 JellyfinLyricMotion.explainRomanization('ഇടി')
 ```
 
@@ -205,18 +213,16 @@ Performance:
 JellyfinLyricMotion.setPerformance('auto')
 JellyfinLyricMotion.setPerformance('desktop')
 JellyfinLyricMotion.setPerformance('mobile')
-JellyfinLyricMotion.setPerformance('eco')
 ```
 
 Atmosphere:
 
 ```javascript
-JellyfinLyricMotion.setAtmosphere('subtle')
-JellyfinLyricMotion.setAtmosphere('balanced')
-JellyfinLyricMotion.setAtmosphere('cinematic')
-JellyfinLyricMotion.setAtmosphere('off')
+JellyfinLyricMotion.setAtmosphere('dynamic')
 JellyfinLyricMotion.refreshAtmosphere()
 ```
+
+Dynamic Background is deliberately audio-independent. There is no audio-reactive atmosphere API in this build.
 
 `AppleKaraoke` remains as a compatibility alias for older local-test users.
 
@@ -227,8 +233,7 @@ JellyfinLyricMotion.refreshAtmosphere()
 | Desktop | 60 fps | Multiscript grapheme/whole-shaped eligibility | Prepainted core + halo, 64 opacity buckets |
 | Android/mobile | 60 fps | Multiscript grapheme/whole-shaped eligibility | Prepainted core + halo, 64 opacity buckets |
 | TV-class client | Stock Jellyfin | Stock Jellyfin | Stock Jellyfin |
-| Eco | 20 fps | Whole-word minimal motion | Prepainted layers, 32 buckets |
-| Normal LRC | 20 fps | Line-synced | No ELRC per-word work |
+| Normal LRC | 20 fps normally; active instrumental progress uses the selected performance profile | Line-synced | No ELRC per-word work |
 
 Only currently active overlapping lines receive per-frame word updates. Static line classes change at boundaries instead of walking the entire lyric document each frame.
 
@@ -264,9 +269,9 @@ The uninstaller surgically removes LyricMotion loader tags/assets and normally d
 
 ## Compatibility and validation
 
-The 3.2.0 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients are validated as a hard stock-Jellyfin bypass.
+The 3.2.5 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients are validated as a hard stock-Jellyfin bypass.
 
-The bundled regression suite covers Romanization, Indic language quality, source-to-Roman cue mapping, timing controls, request races/interception, overlapping/background vocals, script safety, multilingual glow, TTML parsing, and installer/uninstaller behavior.
+The bundled regression suite covers Romanization, Indic language quality, source-to-Roman cue mapping, timing controls, instrumental-break planning/progress, request races/interception, overlapping/background vocals, script safety, multilingual glow, TTML parsing, and installer/uninstaller behavior.
 
 Real behavior can still vary by Jellyfin build, browser/WebView, available fonts and source lyric quality.
 
@@ -277,7 +282,7 @@ src/                 browser runtime, offline Romanizer, CSS
 scripts/             installers, converter, dataset/evaluation tools, release packager
 tests/               G2P, runtime, TTML, research-pipeline and static safety gates
 research/            regression seeds, benchmark outputs and model experiments
-docs/                architecture, benchmarks, release notes, audits and feature docs
+docs/                current architecture and feature documentation
 examples/            ELRC examples
 docker/              derived Jellyfin image
 .github/workflows/   validation and tag-driven release automation
@@ -287,9 +292,19 @@ docker/              derived Jellyfin image
 
 Run the complete local suite:
 
+Linux/macOS/Git Bash:
+
 ```bash
 sh scripts/test-all.sh
 ```
+
+Windows PowerShell:
+
+```powershell
+.\scripts\test-all.ps1
+```
+
+The PowerShell entry point locates Git Bash and runs the same canonical release gate used by CI.
 
 Or run individual contracts; see [Contributing](CONTRIBUTING.md).
 
@@ -302,7 +317,7 @@ python3 scripts/package_release.py \
   --output "dist/jellyfin-lyric-motion-v$(cat VERSION).zip"
 ```
 
-For the complete tagging and GitHub Release procedure, see [Releasing](docs/RELEASING.md).
+The complete tagging/GitHub Release procedure lives in the repository-only `docs/RELEASING.md`; it is intentionally excluded from public release ZIPs.
 
 ## Privacy
 
@@ -310,7 +325,7 @@ Romanization is fully local/on-device. LyricMotion has no Romanization cloud ser
 
 ## Credits and license
 
-The duration-aware motion approach was inspired by and adapted after reviewing [`binimum/am-lyrics`](https://github.com/binimum/am-lyrics). The bundled broad transliteration fallback is generated from Unicode ICU transliteration data; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+The duration-aware motion approach was inspired by and adapted after reviewing [`binimum/am-lyrics`](https://github.com/binimum/am-lyrics). Instrumental-row interaction research also consulted the publicly documented behavior of [`better-lyrics/better-lyrics`](https://github.com/better-lyrics/better-lyrics); LyricMotion independently implements its SVG/wave behavior and does not import Better Lyrics GPLv3 source. The bundled broad transliteration fallback is generated from Unicode ICU transliteration data; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
 
 Jellyfin LyricMotion is distributed under the [Mozilla Public License 2.0](LICENSE).
 

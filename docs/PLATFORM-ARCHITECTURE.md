@@ -16,10 +16,10 @@ Romanization is an optional display layer over the same captured Jellyfin lyric 
 
 ## TV-class clients
 
-LyricMotion does not initialize. Known TV platforms and a high-confidence
-remote-only ten-foot fallback are detected at bootstrap, before runtime hooks or
-DOM changes are installed. Jellyfin's built-in lyrics UI remains completely
-authoritative.
+LyricMotion does not initialize on identifiable TV platforms. Known TV and
+living-room client signatures are detected at bootstrap, before runtime hooks or
+DOM changes are installed. Pointer/touch capability alone is deliberately not a
+TV signal, avoiding kiosk and accessibility-browser false positives. Jellyfin's built-in lyrics UI remains completely authoritative.
 
 This split is intentional: PC/mobile get the enhanced renderer, while every TV
 that LyricMotion can identify gets predictable stock Jellyfin behavior with zero

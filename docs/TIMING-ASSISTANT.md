@@ -1,21 +1,17 @@
 # Smart lyric timing assistant
 
-Release: `3.1.1`
+Release: `3.2.5`
 
-v3.1.1 keeps lyric timing correction powerful without turning the lyrics page into a control panel. The normal toolbar contains only the Romanization button and one timing chip:
-
-```text
-[ A  Romanize ]   [ ⏱ +0.0s ]
-```
-
-Opening the timing chip reveals the adjustment tools only when needed.
+The timing UI is intentionally compact. The normal toolbar contains an icon-only Romanization toggle and a timing chip with a clock icon plus the current offset. Opening the timing chip reveals the adjustment tools only when needed.
 
 ## Manual adjustment
 
-The popover offers both fine and coarse correction:
+The popover keeps only the fast controls:
 
 ```text
--0.1   +0.1   -0.5   +0.5
+-0.1   +0.0s   +0.1
+Sync lyric to now
+Reset
 ```
 
 The supported offset range is `-15.0s` to `+15.0s`.
@@ -33,7 +29,7 @@ The displayed and persisted offset is rounded to the nearest tenth of a second w
 1. Open the timing chip.
 2. Choose `Sync lyric to now`.
 3. Wait for a clearly audible lyric or timed word to begin.
-4. Tap/click that lyric exactly at its onset.
+4. Tap/click that lyric exactly at its onset. The outside-click auto-dismiss intentionally waits for this sync click instead of cancelling pick mode on pointer-down.
 
 For word/syllable-synced ELRC or Enhanced LRC, LyricMotion prefers the clicked word's exact cue start. For line-synced lyrics, it uses the line start.
 
@@ -43,11 +39,11 @@ The correction is:
 offset = observed media time - source lyric time
 ```
 
-The result is applied immediately and can be undone.
+The tap is sampled from the exact HTML media clock, not LyricMotion's projected animation clock, then rounded to the supported tenth-second grid. The result is applied immediately and the compact popover closes.
 
-## Undo and reset
+After the sync click, LyricMotion explicitly centers the selected line and resumes playback auto-follow. This is required because the timing capture suppresses Jellyfin's normal lyric click to prevent an uncorrected seek. Manual wheel/touch scrolling temporarily pauses automatic centering, while any explicit lyric click resumes it immediately.
 
-`Undo` swaps back to the previous timing offset for the current session. This protects against an accidental nudge or a badly captured sync point.
+## Reset
 
 `Reset` returns the lyric timeline to the source timing:
 
@@ -63,7 +59,7 @@ If the same song later receives a replacement lyric file, a correction from the 
 
 ## Accessibility and UI state
 
-The timing chip exposes dialog semantics with `aria-haspopup`, `aria-controls`, and `aria-expanded`. A non-zero correction also receives a visible active state. Closing the popover clears its expanded state and cancelling/closing the popover exits lyric-pick mode.
+The timing chip exposes dialog semantics with `aria-haspopup`, `aria-controls`, and `aria-expanded`. A non-zero correction also receives a visible active state. Clicking outside the popover or pressing Escape closes it and exits lyric-pick mode.
 
 ## Diagnostics
 
@@ -76,7 +72,7 @@ JellyfinLyricMotion.undoTiming()
 JellyfinLyricMotion.resetTimingOffset()
 ```
 
-`timing()` reports the current offset, available fine/coarse steps, limits, whether sync-pick mode is active, the lyric-timeline fingerprint, and the current song preference key.
+`timing()` reports the current offset, available step sizes, limits, whether sync-pick mode is active, the lyric-timeline fingerprint, and the current song preference key.
 
 ## What was intentionally removed
 

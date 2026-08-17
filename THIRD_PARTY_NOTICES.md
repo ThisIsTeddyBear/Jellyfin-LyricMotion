@@ -12,6 +12,31 @@ The lyric motion design and duration-based animation approach were inspired by a
 
 Where source-level portions qualify as MPL-covered modifications or derivative work, the relevant LyricMotion source files are distributed under MPL-2.0 and carry the MPL notice.
 
+
+## Better Lyrics interaction reference
+
+Public Better Lyrics documentation was consulted during the 3.2.4 instrumental-break visual review, specifically its documented SVG instrumental-row and wave/fill interaction model. Jellyfin LyricMotion independently implements its own vector geometry, timing logic and CSS. No Better Lyrics source code, assets or runtime dependency are copied or bundled.
+
+- Project: `better-lyrics/better-lyrics`
+- Repository: https://github.com/better-lyrics/better-lyrics
+- License of that project: GPL-3.0
+- Relationship to LyricMotion: design/interaction research reference only; no GPL source incorporated
+
+## Dynamic Background theme and Kawarp
+
+The 3.2.5 Dynamic Background comparison build ports the album-art background model from chengg's Dynamic Background theme and adapts the MIT-licensed Better Lyrics Kawarp WebGL renderer. The LyricMotion implementation modifies the integration and transition lifecycle for Jellyfin, including interrupted-transition capture, stale-artwork rejection, framebuffer validation, WebGL fallback, context-loss recovery and render-resolution caps.
+
+- Dynamic Background theme: `chengggit/YouTube-Music-Dynamic-Theme`
+- License: MIT
+- Copyright: Copyright (c) 2025 chengg
+- Bundled license copy: `licenses/DYNAMIC-BACKGROUND-MIT.txt`
+- Kawarp renderer: `better-lyrics/kawarp`
+- License: MIT
+- Copyright: Copyright (c) 2026 Better Lyrics
+- Bundled license copy: `licenses/KAWARP-MIT.txt`
+
+The GPL-licensed Better Lyrics application itself remains a compatibility/reference project only. This build does not bundle Better Lyrics application source. The renderer code incorporated for Dynamic Background is from the separately MIT-licensed Kawarp project.
+
 ## Jellyfin / Jellyfin Web
 
 LyricMotion patches an **already installed** Jellyfin Web client.
@@ -70,4 +95,4 @@ The repository contains development-only corpus collection/evaluation helpers. P
 - Dakshina dataset: https://github.com/google-research-datasets/dakshina
 - Hindi/Punjabi G2P schwa work: https://aclanthology.org/2020.acl-main.696/
 
-Romanization in release 3.2.0 / LyricG2P 6.5.1 is fully local/on-device and does not call these projects or any third-party Romanization service at runtime.
+Romanization in release 3.2.4 / LyricG2P 6.5.1 is fully local/on-device and does not call these projects or any third-party Romanization service at runtime.

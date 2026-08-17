@@ -1,6 +1,6 @@
 # LyricG2P 6.5.1 Architecture
 
-Jellyfin LyricMotion: `3.2.0`
+Jellyfin LyricMotion: `3.2.4`
 
 Romanizer: `6.5.1`
 
@@ -232,10 +232,10 @@ explain()
 
 ## Release invariants
 
-- Jellyfin LyricMotion remains `3.2.0`.
+- Jellyfin LyricMotion 3.2.4 retains LyricG2P `6.5.1` unchanged.
 - LyricG2P is `6.5.1`.
 - The Romanizer asset is cache-busted with `?v=6.5.1`.
-- The main 3.2.0 script injection also includes `&g2p=6.5.1`, preventing an old 3.2.0 runtime from being reused after the engine-only patch.
+- The 3.2.x main-script injection also carries `&g2p=6.5.1`, preserving an independent Romanizer cache identity across application releases.
 - Runtime Romanization is offline.
 - No full neural transliteration checkpoint is bundled.
 - TV-class clients retain the stock bypass and do not load LyricMotion Romanization.

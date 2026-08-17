@@ -8,7 +8,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.2.0';
+    const VERSION = '3.2.5';
     const LYRICG2P_VERSION = '6.5.1';
 
     /*
@@ -115,28 +115,10 @@
             return { detected: true, family: 'generic-tv' };
         }
 
-        /*
-         * Final high-confidence ten-foot fallback: remote-only embedded
-         * clients generally expose no touch points and no hovering/fine
-         * pointer. Phones/tablets have touch points and desktop browsers have
-         * a fine/hovering primary pointer, so both stay on LyricMotion.
-         */
-        try {
-            const maxTouchPoints = Number(
-                navigatorObject && navigatorObject.maxTouchPoints
-            ) || 0;
-            const remoteOnlyPointer =
-                typeof window.matchMedia === 'function'
-                && window.matchMedia(
-                    '(hover: none) and (pointer: coarse), (hover: none) and (pointer: none)'
-                ).matches;
-
-            if (maxTouchPoints === 0 && remoteOnlyPointer) {
-                return { detected: true, family: 'remote-only-tv' };
-            }
-        } catch {
-            // UA/platform markers above remain authoritative on older engines.
-        }
+        /* Input-capability heuristics are intentionally not used as a TV
+         * signal. Kiosks, desktop browser shells and accessibility setups can
+         * legitimately report no touch and a coarse/no pointer. Only explicit
+         * living-room platform signatures above may trigger stock-TV bypass. */
 
         return { detected: false, family: '' };
     }
@@ -164,6 +146,19 @@
     }
 
     const TICKS_PER_SECOND = 10000000;
+    const INSTRUMENTAL_GAP_MIN_TICKS = 2 * TICKS_PER_SECOND;
+    const INSTRUMENTAL_GAP_SYMBOL = '♪';
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const INSTRUMENTAL_NOTE_VIEWBOX_WIDTH = 64;
+    const INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT = 80;
+    const INSTRUMENTAL_GAP_PROGRESS_EPSILON = 0.001;
+    const INSTRUMENTAL_WAVE_PERIOD_SECONDS = 1.35;
+    const INSTRUMENTAL_WAVE_MAX_AMPLITUDE = 2.35;
+    const INSTRUMENTAL_WAVE_SEGMENTS = 20;
+    const LYRIC_VISUAL_WATCHDOG_MS = 700;
+    const LYRIC_FRAME_RECOVERY_MS = 36;
+    const LYRIC_AUTO_FOLLOW_MANUAL_GRACE_MS = 3600;
+    let reducedMotionMediaQuery = null;
 
     /*
      * Jellyfin's lyric parser can discard Unicode format controls.  The ASCII
@@ -174,7 +169,7 @@
     const BACKGROUND_VOCAL_TOKEN = '[ak:bg]';
     const LEGACY_BACKGROUND_VOCAL_SENTINEL = '\u2063\u2060';
     const UNIFIED_RENDERER_SIGNATURE =
-        'unified-pc-mobile-v3:60fps:multiscript-shaped-wipe:classic-bloom64:atmo360x26';
+        'unified-pc-mobile-v3:60fps:multiscript-shaped-wipe:classic-bloom64:atmo-dynamic-kawarp-v325-hotfix';
 
     // Display-only lyric wipe smoothing.
     const WORD_PROGRESS_SMOOTH_TAU_MS = 20;
@@ -188,7 +183,6 @@
     const SHORT_WORD_GLOW_MIN_DURATION_MS = 1320;
     const MOTION_FINAL_RISE_EM = -0.035;
     const MOTION_HANDOFF_TICKS = 3200000; // 320 ms previous-line glow decay
-    const ECO_COMPOSITOR_HANDOFF_MS = 210; // eco-only handoff decay
     const LINE_CLASS_NEIGHBORHOOD = 6;
     const ZERO_PROGRESS_EPSILON = 0.0025;
 
@@ -206,11 +200,777 @@
     const CLOCK_CORRECTION_GAIN = 0.22;
     const CLOCK_MAX_CORRECTION_SECONDS = 0.012;
 
-    // Adaptive Album Atmosphere (presentation-only; never changes lyric timing).
-    const ATMOSPHERE_STORAGE_KEY = 'appleKaraokeAtmosphereMode';
-    const ATMOSPHERE_CHECK_INTERVAL_MS = 1200;
+    // Dynamic Background is the only atmosphere engine in God Mode.
+    // It is presentation-only and never changes lyric timing.
     const ATMOSPHERE_ART_MAX_WIDTH = 720;
-    const ATMOSPHERE_COLOR_SAMPLE_SIZE = 30;
+    const DYNAMIC_BACKGROUND_SOURCE = 'chengggit Dynamic Background 3.2.4 + Better Lyrics Kawarp';
+    const DYNAMIC_BACKGROUND_ENGINE = 'kawarp-domain-warp-hardened';
+    const DYNAMIC_BACKGROUND_TRANSITION_MS = 260;
+    const DYNAMIC_BACKGROUND_DOM_STABLE_MS = 900;
+    const DYNAMIC_BACKGROUND_UNBOUND_DOM_CONFIRM_MS = 1500;
+    const DYNAMIC_BACKGROUND_INHERITED_DOM_STABLE_MS = 0;
+    const DYNAMIC_BACKGROUND_INHERITED_DOM_CONFIRM_MS = 0;
+    const DYNAMIC_BACKGROUND_DIRECT_GRACE_MS = 700;
+    const DYNAMIC_BACKGROUND_DIRECT_LOAD_TIMEOUT_MS = 900;
+    const DYNAMIC_BACKGROUND_WEAK_RECHECK_MS = 12000;
+    const DYNAMIC_BACKGROUND_NO_ART_CONFIRM_MS = 2500;
+    const DYNAMIC_BACKGROUND_NO_ART_RETRY_MS = 10000;
+    const DYNAMIC_BACKGROUND_DIRECT_RETRY_MS = 1500;
+    const DYNAMIC_BACKGROUND_WEBGL_RETRY_BASE_MS = 30000;
+    const DYNAMIC_BACKGROUND_WEBGL_RETRY_MAX_MS = 300000;
+    const DYNAMIC_BACKGROUND_SETTINGS = Object.freeze({
+        opacity: 0.75,
+        warpIntensity: 1.0,
+        blurPasses: 8,
+        blurSize: 128,
+        animationSpeed: 1.8,
+        transitionDuration: DYNAMIC_BACKGROUND_TRANSITION_MS,
+        saturation: 1.7,
+        dithering: 0,
+        tintColor: [0.157, 0.157, 0.235],
+        tintIntensity: 0.15,
+        scale: 1.0,
+        audioResponsive: false,
+        pauseOnInactive: true
+    });
+
+    /*
+     * Dynamic Background WebGL renderer.
+     *
+     * Visual model adapted from the MIT-licensed Better Lyrics Kawarp core used
+     * by chengg's Dynamic Background theme. LyricMotion keeps the same
+     * low-resolution Kawase blur + domain-warp architecture, but owns image
+     * sequencing and interrupted-transition capture so rapid Jellyfin track
+     * changes cannot flash stale artwork or jump through an unfinished blend.
+     */
+    class DynamicBackgroundRenderer {
+        constructor(canvas, options = {}) {
+            this.canvas = canvas;
+            this.gl = canvas.getContext('webgl', {
+                alpha: true,
+                antialias: false,
+                depth: false,
+                stencil: false,
+                premultipliedAlpha: false,
+                preserveDrawingBuffer: false,
+                powerPreference: 'high-performance'
+            });
+            if (!this.gl) throw new Error('WebGL not supported');
+
+            this.blurSize = Math.max(64, Math.min(256, Math.round(options.blurSize || 128)));
+            this.warpIntensity = Number.isFinite(options.warpIntensity) ? Math.max(0, Math.min(1, options.warpIntensity)) : 1;
+            this.blurPasses = Number.isFinite(options.blurPasses) ? Math.max(1, Math.min(20, Math.floor(options.blurPasses))) : 8;
+            this.animationSpeed = Number.isFinite(options.animationSpeed) ? Math.max(0.1, Math.min(5, options.animationSpeed)) : 1.8;
+            this.transitionDuration = Number.isFinite(options.transitionDuration) ? Math.max(0, Math.min(2000, options.transitionDuration)) : 340;
+            this.saturation = Number.isFinite(options.saturation) ? Math.max(0, Math.min(3, options.saturation)) : 1.7;
+            this.tintColor = Array.isArray(options.tintColor) && options.tintColor.length >= 3
+                ? options.tintColor.slice(0, 3).map(value => Math.max(0, Math.min(1, Number(value) || 0)))
+                : [0.157, 0.157, 0.235];
+            this.tintIntensity = Number.isFinite(options.tintIntensity) ? Math.max(0, Math.min(1, options.tintIntensity)) : 0.15;
+            this.dithering = Number.isFinite(options.dithering) ? Math.max(0, Math.min(0.1, options.dithering)) : 0;
+            this.scale = Number.isFinite(options.scale) ? Math.max(0.8, Math.min(2, options.scale)) : 1.04;
+            this.renderScale = Number.isFinite(options.renderScale) ? Math.max(0.35, Math.min(1.5, options.renderScale)) : 1;
+            this.maxRenderLongEdge = Number.isFinite(options.maxRenderLongEdge) ? Math.max(720, Math.min(4096, options.maxRenderLongEdge)) : 2560;
+            this.onContextLost = typeof options.onContextLost === 'function' ? options.onContextLost : null;
+            this.onContextRestored = typeof options.onContextRestored === 'function' ? options.onContextRestored : null;
+            this.onTransitionInterrupted = typeof options.onTransitionInterrupted === 'function' ? options.onTransitionInterrupted : null;
+            this.onTransitionComplete = typeof options.onTransitionComplete === 'function' ? options.onTransitionComplete : null;
+
+            this.isPlaying = false;
+            this.animationId = 0;
+            this.lastFrameTime = 0;
+            this.accumulatedTime = 0;
+            this.hasCurrent = false;
+            this.isTransitioning = false;
+            this.transitionStartTime = 0;
+            this.contextLost = false;
+            this.renderWidth = 0;
+            this.renderHeight = 0;
+            this.transitionSerial = 0;
+            this.completedTransitions = 0;
+            this.interruptedTransitions = 0;
+            this.renderLoop = this.renderLoop.bind(this);
+
+            this.halfFloatExt = this.gl.getExtension('OES_texture_half_float');
+            this.halfFloatLinearExt = this.gl.getExtension('OES_texture_half_float_linear');
+            this.colorBufferHalfFloatExt = this.gl.getExtension('EXT_color_buffer_half_float');
+
+            this.vertexShaderSource = `
+                attribute vec2 a_position;
+                attribute vec2 a_texCoord;
+                varying vec2 v_texCoord;
+                void main() {
+                    gl_Position = vec4(a_position, 0.0, 1.0);
+                    v_texCoord = a_texCoord;
+                }
+            `;
+            this.blurShaderSource = `
+                precision highp float;
+                uniform sampler2D u_texture;
+                uniform vec2 u_resolution;
+                uniform float u_offset;
+                varying vec2 v_texCoord;
+                void main() {
+                    vec2 texel = 1.0 / u_resolution;
+                    vec4 color = vec4(0.0);
+                    color += texture2D(u_texture, v_texCoord + vec2(-u_offset, -u_offset) * texel);
+                    color += texture2D(u_texture, v_texCoord + vec2( u_offset, -u_offset) * texel);
+                    color += texture2D(u_texture, v_texCoord + vec2(-u_offset,  u_offset) * texel);
+                    color += texture2D(u_texture, v_texCoord + vec2( u_offset,  u_offset) * texel);
+                    gl_FragColor = color * 0.25;
+                }
+            `;
+            this.blendShaderSource = `
+                precision highp float;
+                uniform sampler2D u_texture1;
+                uniform sampler2D u_texture2;
+                uniform float u_blend;
+                varying vec2 v_texCoord;
+                void main() {
+                    gl_FragColor = mix(texture2D(u_texture1, v_texCoord), texture2D(u_texture2, v_texCoord), u_blend);
+                }
+            `;
+            this.tintShaderSource = `
+                precision highp float;
+                uniform sampler2D u_texture;
+                uniform vec3 u_tintColor;
+                uniform float u_tintIntensity;
+                varying vec2 v_texCoord;
+                void main() {
+                    vec4 color = texture2D(u_texture, v_texCoord);
+                    float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+                    float darkMask = 1.0 - smoothstep(0.0, 0.5, luma);
+                    color.rgb = mix(color.rgb, u_tintColor, darkMask * u_tintIntensity);
+                    gl_FragColor = color;
+                }
+            `;
+            this.warpShaderSource = `
+                precision highp float;
+                uniform sampler2D u_texture;
+                uniform float u_time;
+                uniform float u_intensity;
+                varying vec2 v_texCoord;
+                vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+                vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+                vec3 permute(vec3 x) { return mod289(((x * 34.0) + 1.0) * x); }
+                float snoise(vec2 v) {
+                    const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+                    vec2 i = floor(v + dot(v, C.yy));
+                    vec2 x0 = v - i + dot(i, C.xx);
+                    vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+                    vec4 x12 = x0.xyxy + C.xxzz;
+                    x12.xy -= i1;
+                    i = mod289(i);
+                    vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+                    vec3 m = max(0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
+                    m = m * m;
+                    m = m * m;
+                    vec3 x = 2.0 * fract(p * C.www) - 1.0;
+                    vec3 h = abs(x) - 0.5;
+                    vec3 ox = floor(x + 0.5);
+                    vec3 a0 = x - ox;
+                    m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+                    vec3 g;
+                    g.x = a0.x * x0.x + h.x * x0.y;
+                    g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+                    return 130.0 * dot(m, g);
+                }
+                void main() {
+                    vec2 uv = v_texCoord;
+                    float t = u_time * 0.05;
+                    vec2 center = uv - 0.5;
+                    float centerWeight = 1.0 - smoothstep(0.0, 0.7, length(center));
+                    float n1 = snoise(uv * 0.35 + vec2(t, t * 0.7));
+                    float n2 = snoise(uv * 0.35 + vec2(-t * 0.8, t * 0.5) + vec2(50.0));
+                    float n3 = snoise(uv * 0.9 + vec2(t * 1.2, -t) + vec2(100.0, 0.0));
+                    float n4 = snoise(uv * 0.9 + vec2(-t, t * 1.1) + vec2(0.0, 100.0));
+                    vec2 warp = vec2(n1 * 0.65 + n3 * 0.35, n2 * 0.65 + n4 * 0.35) * centerWeight;
+                    vec2 warpedUV = clamp(uv + warp * u_intensity, 0.0, 1.0);
+                    gl_FragColor = texture2D(u_texture, warpedUV);
+                }
+            `;
+            this.outputShaderSource = `
+                precision highp float;
+                uniform sampler2D u_texture;
+                uniform float u_saturation;
+                uniform float u_dithering;
+                uniform float u_time;
+                uniform float u_scale;
+                uniform vec2 u_resolution;
+                varying vec2 v_texCoord;
+                float hash(vec3 p) {
+                    p = fract(p * 0.1031);
+                    p += dot(p, p.zyx + 31.32);
+                    return fract((p.x + p.y) * p.z);
+                }
+                void main() {
+                    vec2 uv = (v_texCoord - 0.5) / u_scale + 0.5;
+                    uv = clamp(uv, 0.0, 1.0);
+                    vec4 color = texture2D(u_texture, uv);
+                    vec2 center = v_texCoord - 0.5;
+                    float vignette = 1.0 - dot(center, center) * 0.3;
+                    color.rgb *= vignette;
+                    float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+                    color.rgb = mix(vec3(gray), color.rgb, u_saturation);
+                    vec2 pixelPos = floor(v_texCoord * u_resolution);
+                    float noise = hash(vec3(pixelPos, floor(u_time * 60.0)));
+                    color.rgb += (noise - 0.5) * u_dithering;
+                    gl_FragColor = vec4(color.rgb, 1.0);
+                }
+            `;
+
+            this.blurProgram = null;
+            this.blendProgram = null;
+            this.tintProgram = null;
+            this.warpProgram = null;
+            this.outputProgram = null;
+            this.positionBuffer = null;
+            this.texCoordBuffer = null;
+            this.sourceTexture = null;
+            this.blurFBO1 = null;
+            this.blurFBO2 = null;
+            this.currentAlbumFBO = null;
+            this.nextAlbumFBO = null;
+            this.snapshotAlbumFBO = null;
+            this.blendScratchFBO = null;
+            this.warpFBO = null;
+            this._onLost = null;
+            this._onRestored = null;
+
+            try {
+                this.blurProgram = this.createProgram(this.vertexShaderSource, this.blurShaderSource);
+                this.blendProgram = this.createProgram(this.vertexShaderSource, this.blendShaderSource);
+                this.tintProgram = this.createProgram(this.vertexShaderSource, this.tintShaderSource);
+                this.warpProgram = this.createProgram(this.vertexShaderSource, this.warpShaderSource);
+                this.outputProgram = this.createProgram(this.vertexShaderSource, this.outputShaderSource);
+
+                this.positionBuffer = this.createBuffer(new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]));
+                this.texCoordBuffer = this.createBuffer(new Float32Array([0,0, 1,0, 0,1, 0,1, 1,0, 1,1]));
+                this.attribPosition = 0;
+                this.attribTexCoord = 1;
+
+                this.uniforms = {
+                blur: {
+                    texture: this.gl.getUniformLocation(this.blurProgram, 'u_texture'),
+                    resolution: this.gl.getUniformLocation(this.blurProgram, 'u_resolution'),
+                    offset: this.gl.getUniformLocation(this.blurProgram, 'u_offset')
+                },
+                blend: {
+                    texture1: this.gl.getUniformLocation(this.blendProgram, 'u_texture1'),
+                    texture2: this.gl.getUniformLocation(this.blendProgram, 'u_texture2'),
+                    blend: this.gl.getUniformLocation(this.blendProgram, 'u_blend')
+                },
+                tint: {
+                    texture: this.gl.getUniformLocation(this.tintProgram, 'u_texture'),
+                    tintColor: this.gl.getUniformLocation(this.tintProgram, 'u_tintColor'),
+                    tintIntensity: this.gl.getUniformLocation(this.tintProgram, 'u_tintIntensity')
+                },
+                warp: {
+                    texture: this.gl.getUniformLocation(this.warpProgram, 'u_texture'),
+                    time: this.gl.getUniformLocation(this.warpProgram, 'u_time'),
+                    intensity: this.gl.getUniformLocation(this.warpProgram, 'u_intensity')
+                },
+                output: {
+                    texture: this.gl.getUniformLocation(this.outputProgram, 'u_texture'),
+                    saturation: this.gl.getUniformLocation(this.outputProgram, 'u_saturation'),
+                    dithering: this.gl.getUniformLocation(this.outputProgram, 'u_dithering'),
+                    time: this.gl.getUniformLocation(this.outputProgram, 'u_time'),
+                    scale: this.gl.getUniformLocation(this.outputProgram, 'u_scale'),
+                    resolution: this.gl.getUniformLocation(this.outputProgram, 'u_resolution')
+                }
+                };
+
+                this.sourceTexture = this.createTexture();
+                this.blurFBO1 = this.createFramebuffer(this.blurSize, this.blurSize, true);
+                this.blurFBO2 = this.createFramebuffer(this.blurSize, this.blurSize, true);
+                this.currentAlbumFBO = this.createFramebuffer(this.blurSize, this.blurSize, true);
+                this.nextAlbumFBO = this.createFramebuffer(this.blurSize, this.blurSize, true);
+                this.snapshotAlbumFBO = this.createFramebuffer(this.blurSize, this.blurSize, true);
+                this.blendScratchFBO = this.createFramebuffer(this.blurSize, this.blurSize, true);
+                this.warpFBO = this.createFramebuffer(1, 1, false);
+
+                this._onLost = event => {
+                    event.preventDefault();
+                    this.contextLost = true;
+                    this.stop();
+                    if (this.onContextLost) this.onContextLost();
+                };
+                this._onRestored = () => {
+                    this.contextLost = false;
+                    if (this.onContextRestored) this.onContextRestored();
+                };
+                canvas.addEventListener('webglcontextlost', this._onLost, false);
+                canvas.addEventListener('webglcontextrestored', this._onRestored, false);
+            } catch (error) {
+                // Listener registration can itself fail after the first listener
+                // has already been installed. Undo both registrations before
+                // releasing GPU state so a failed constructor leaves no hooks.
+                if (this._onLost) {
+                    try { canvas.removeEventListener('webglcontextlost', this._onLost, false); } catch { /* best effort */ }
+                }
+                if (this._onRestored) {
+                    try { canvas.removeEventListener('webglcontextrestored', this._onRestored, false); } catch { /* best effort */ }
+                }
+                this.releaseGpuResources();
+                throw error;
+            }
+        }
+
+        createShader(type, source) {
+            const gl = this.gl;
+            const shader = gl.createShader(type);
+            if (!shader) throw new Error('Failed to create WebGL shader');
+            try {
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                    const detail = gl.getShaderInfoLog(shader) || 'unknown shader error';
+                    throw new Error(`Dynamic background shader compile error: ${detail}`);
+                }
+                return shader;
+            } catch (error) {
+                try { gl.deleteShader(shader); } catch { /* context can fail mid-init */ }
+                throw error;
+            }
+        }
+
+        createProgram(vertexSource, fragmentSource) {
+            const gl = this.gl;
+            const vertex = this.createShader(gl.VERTEX_SHADER, vertexSource);
+            let fragment = null;
+            let program = null;
+            try {
+                fragment = this.createShader(gl.FRAGMENT_SHADER, fragmentSource);
+                program = gl.createProgram();
+                if (!program) throw new Error('Failed to create WebGL program');
+
+                gl.attachShader(program, vertex);
+                gl.attachShader(program, fragment);
+                // Same attribute locations across every program. WebGL does not
+                // guarantee this merely because the vertex shader source matches.
+                gl.bindAttribLocation(program, 0, 'a_position');
+                gl.bindAttribLocation(program, 1, 'a_texCoord');
+                gl.linkProgram(program);
+                if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                    const detail = gl.getProgramInfoLog(program) || 'unknown program link error';
+                    throw new Error(`Dynamic background program link error: ${detail}`);
+                }
+                return program;
+            } catch (error) {
+                if (program) {
+                    try { gl.deleteProgram(program); } catch { /* best effort */ }
+                }
+                throw error;
+            } finally {
+                try { gl.deleteShader(vertex); } catch { /* best effort */ }
+                if (fragment) {
+                    try { gl.deleteShader(fragment); } catch { /* best effort */ }
+                }
+            }
+        }
+
+        createBuffer(data) {
+            const gl = this.gl;
+            const buffer = gl.createBuffer();
+            if (!buffer) throw new Error('Failed to create WebGL buffer');
+            try {
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+                return buffer;
+            } catch (error) {
+                gl.deleteBuffer(buffer);
+                throw error;
+            }
+        }
+
+        createTexture() {
+            const gl = this.gl;
+            const texture = gl.createTexture();
+            if (!texture) throw new Error('Failed to create WebGL texture');
+            try {
+                gl.bindTexture(gl.TEXTURE_2D, texture);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                return texture;
+            } catch (error) {
+                gl.deleteTexture(texture);
+                throw error;
+            }
+        }
+
+        allocateFramebuffer(width, height, type) {
+            const gl = this.gl;
+            const texture = this.createTexture();
+            let framebuffer = null;
+            try {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, type, null);
+                framebuffer = gl.createFramebuffer();
+                if (!framebuffer) throw new Error('Failed to create WebGL framebuffer');
+
+                gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+                const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                if (status !== gl.FRAMEBUFFER_COMPLETE) {
+                    try { gl.deleteFramebuffer(framebuffer); } catch { /* best effort */ }
+                    try { gl.deleteTexture(texture); } catch { /* best effort */ }
+                    return null;
+                }
+                return { framebuffer, texture, width, height, type };
+            } catch (error) {
+                try { gl.bindFramebuffer(gl.FRAMEBUFFER, null); } catch { /* context can fail mid-init */ }
+                if (framebuffer) {
+                    try { gl.deleteFramebuffer(framebuffer); } catch { /* best effort */ }
+                }
+                try { gl.deleteTexture(texture); } catch { /* best effort */ }
+                throw error;
+            }
+        }
+
+        createFramebuffer(width, height, preferHighPrecision) {
+            const gl = this.gl;
+            if (preferHighPrecision && this.halfFloatExt && this.halfFloatLinearExt && this.colorBufferHalfFloatExt) {
+                const high = this.allocateFramebuffer(width, height, this.halfFloatExt.HALF_FLOAT_OES);
+                if (high) return high;
+            }
+            const normal = this.allocateFramebuffer(width, height, gl.UNSIGNED_BYTE);
+            if (!normal) throw new Error('WebGL framebuffer is incomplete');
+            return normal;
+        }
+
+        deleteFramebuffer(fbo) {
+            if (!fbo) return;
+            this.gl.deleteFramebuffer(fbo.framebuffer);
+            this.gl.deleteTexture(fbo.texture);
+        }
+
+        setupAttributes() {
+            const gl = this.gl;
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+            gl.enableVertexAttribArray(this.attribPosition);
+            gl.vertexAttribPointer(this.attribPosition, 2, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.texCoordBuffer);
+            gl.enableVertexAttribArray(this.attribTexCoord);
+            gl.vertexAttribPointer(this.attribTexCoord, 2, gl.FLOAT, false, 0, 0);
+        }
+
+        copyTexture(sourceTexture, targetFBO) {
+            const gl = this.gl;
+            gl.useProgram(this.blurProgram);
+            this.setupAttributes();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targetFBO.framebuffer);
+            gl.viewport(0, 0, targetFBO.width, targetFBO.height);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+            gl.uniform1i(this.uniforms.blur.texture, 0);
+            gl.uniform2f(this.uniforms.blur.resolution, targetFBO.width, targetFBO.height);
+            gl.uniform1f(this.uniforms.blur.offset, 0);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        blurSourceInto(targetFBO) {
+            const gl = this.gl;
+            gl.useProgram(this.tintProgram);
+            this.setupAttributes();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.blurFBO1.framebuffer);
+            gl.viewport(0, 0, this.blurSize, this.blurSize);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
+            gl.uniform1i(this.uniforms.tint.texture, 0);
+            gl.uniform3fv(this.uniforms.tint.tintColor, this.tintColor);
+            gl.uniform1f(this.uniforms.tint.tintIntensity, this.tintIntensity);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+            gl.useProgram(this.blurProgram);
+            this.setupAttributes();
+            gl.uniform2f(this.uniforms.blur.resolution, this.blurSize, this.blurSize);
+            gl.uniform1i(this.uniforms.blur.texture, 0);
+            let readFBO = this.blurFBO1;
+            let writeFBO = this.blurFBO2;
+            for (let index = 0; index < this.blurPasses; index += 1) {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, writeFBO.framebuffer);
+                gl.viewport(0, 0, this.blurSize, this.blurSize);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, readFBO.texture);
+                gl.uniform1f(this.uniforms.blur.offset, index + 0.5);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+                [readFBO, writeFBO] = [writeFBO, readFBO];
+            }
+            this.copyTexture(readFBO.texture, targetFBO);
+        }
+
+        transitionLinearFactor(now = performance.now()) {
+            if (!this.isTransitioning || this.transitionDuration <= 0) return 1;
+            return Math.max(0, Math.min(1, (now - this.transitionStartTime) / this.transitionDuration));
+        }
+
+        transitionFactor(now = performance.now()) {
+            const t = this.transitionLinearFactor(now);
+            // Fast ease-out. The new song becomes visually dominant early while
+            // the final 20% still settles smoothly instead of flashing.
+            return 1 - Math.pow(1 - t, 3);
+        }
+
+        blendInto(targetFBO, fromTexture, toTexture, factor) {
+            const gl = this.gl;
+            gl.useProgram(this.blendProgram);
+            this.setupAttributes();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, targetFBO.framebuffer);
+            gl.viewport(0, 0, targetFBO.width, targetFBO.height);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, fromTexture);
+            gl.uniform1i(this.uniforms.blend.texture1, 0);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, toTexture);
+            gl.uniform1i(this.uniforms.blend.texture2, 1);
+            gl.uniform1f(this.uniforms.blend.blend, Math.max(0, Math.min(1, factor)));
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        captureInterruptedTransition() {
+            if (!this.isTransitioning) return;
+            const factor = this.transitionFactor(performance.now());
+            this.blendInto(this.snapshotAlbumFBO, this.currentAlbumFBO.texture, this.nextAlbumFBO.texture, factor);
+            const oldCurrent = this.currentAlbumFBO;
+            const oldNext = this.nextAlbumFBO;
+            const oldSnapshot = this.snapshotAlbumFBO;
+            this.currentAlbumFBO = oldSnapshot;
+            this.nextAlbumFBO = oldCurrent;
+            this.snapshotAlbumFBO = oldNext;
+            this.isTransitioning = false;
+            this.interruptedTransitions += 1;
+            if (this.onTransitionInterrupted) this.onTransitionInterrupted(this.interruptedTransitions);
+        }
+
+        commitTransition() {
+            if (!this.isTransitioning) return;
+            [this.currentAlbumFBO, this.nextAlbumFBO] = [this.nextAlbumFBO, this.currentAlbumFBO];
+            this.isTransitioning = false;
+            this.completedTransitions += 1;
+            if (this.onTransitionComplete) this.onTransitionComplete(this.completedTransitions);
+        }
+
+        loadImageElement(source) {
+            if (this.contextLost) return false;
+            const gl = this.gl;
+            gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+
+            if (!this.hasCurrent) {
+                this.blurSourceInto(this.currentAlbumFBO);
+                this.copyTexture(this.currentAlbumFBO.texture, this.nextAlbumFBO);
+                this.hasCurrent = true;
+                this.isTransitioning = false;
+                this.renderFrame();
+                return true;
+            }
+
+            if (this.isTransitioning) this.captureInterruptedTransition();
+            this.blurSourceInto(this.nextAlbumFBO);
+            this.transitionStartTime = performance.now();
+            this.isTransitioning = this.transitionDuration > 0;
+            this.transitionSerial += 1;
+            if (!this.isTransitioning) {
+                [this.currentAlbumFBO, this.nextAlbumFBO] = [this.nextAlbumFBO, this.currentAlbumFBO];
+                this.completedTransitions += 1;
+            }
+            this.start();
+            return true;
+        }
+
+        resizeToDisplaySize() {
+            if (this.contextLost) return false;
+            const cssWidth = Math.max(1, Math.round(this.canvas.clientWidth || window.innerWidth || 1));
+            const cssHeight = Math.max(1, Math.round(this.canvas.clientHeight || window.innerHeight || 1));
+            const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+            let width = Math.max(1, Math.round(cssWidth * dpr * this.renderScale));
+            let height = Math.max(1, Math.round(cssHeight * dpr * this.renderScale));
+            const longEdge = Math.max(width, height);
+            if (longEdge > this.maxRenderLongEdge) {
+                const factor = this.maxRenderLongEdge / longEdge;
+                width = Math.max(1, Math.round(width * factor));
+                height = Math.max(1, Math.round(height * factor));
+            }
+            if (width === this.renderWidth && height === this.renderHeight) return false;
+            this.canvas.width = width;
+            this.canvas.height = height;
+            this.renderWidth = width;
+            this.renderHeight = height;
+            this.deleteFramebuffer(this.warpFBO);
+            this.warpFBO = this.createFramebuffer(width, height, false);
+            return true;
+        }
+
+        render(time, timestamp) {
+            if (this.contextLost || !this.hasCurrent) return;
+            this.resizeToDisplaySize();
+            const gl = this.gl;
+            const width = this.renderWidth || this.canvas.width;
+            const height = this.renderHeight || this.canvas.height;
+            let sourceTexture = this.currentAlbumFBO.texture;
+
+            if (this.isTransitioning) {
+                const linear = this.transitionLinearFactor(timestamp);
+                if (linear >= 1) {
+                    this.commitTransition();
+                    sourceTexture = this.currentAlbumFBO.texture;
+                } else {
+                    const factor = 1 - Math.pow(1 - linear, 3);
+                    this.blendInto(this.blendScratchFBO, this.currentAlbumFBO.texture, this.nextAlbumFBO.texture, factor);
+                    sourceTexture = this.blendScratchFBO.texture;
+                }
+            }
+
+            gl.useProgram(this.warpProgram);
+            this.setupAttributes();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.warpFBO.framebuffer);
+            gl.viewport(0, 0, width, height);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
+            gl.uniform1i(this.uniforms.warp.texture, 0);
+            gl.uniform1f(this.uniforms.warp.time, time);
+            gl.uniform1f(this.uniforms.warp.intensity, this.warpIntensity);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+            gl.useProgram(this.outputProgram);
+            this.setupAttributes();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, width, height);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.warpFBO.texture);
+            gl.uniform1i(this.uniforms.output.texture, 0);
+            gl.uniform1f(this.uniforms.output.saturation, this.saturation);
+            gl.uniform1f(this.uniforms.output.dithering, this.dithering);
+            gl.uniform1f(this.uniforms.output.time, time);
+            gl.uniform1f(this.uniforms.output.scale, this.scale);
+            gl.uniform2f(this.uniforms.output.resolution, width, height);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        renderFrame() {
+            if (!this.hasCurrent || this.contextLost) return;
+            const now = performance.now();
+            if (!this.lastFrameTime) this.lastFrameTime = now;
+            const dt = Math.max(0, Math.min(0.1, (now - this.lastFrameTime) / 1000));
+            this.lastFrameTime = now;
+            this.accumulatedTime += dt * this.animationSpeed;
+            this.render(this.accumulatedTime, now);
+        }
+
+        renderLoop(timestamp) {
+            if (!this.isPlaying || this.contextLost) return;
+            const dt = Math.max(0, Math.min(0.1, (timestamp - this.lastFrameTime) / 1000));
+            this.lastFrameTime = timestamp;
+            this.accumulatedTime += dt * this.animationSpeed;
+            this.render(this.accumulatedTime, timestamp);
+            this.animationId = requestAnimationFrame(this.renderLoop);
+        }
+
+        start() {
+            if (this.isPlaying || this.contextLost || !this.hasCurrent) return;
+            this.isPlaying = true;
+            this.lastFrameTime = performance.now();
+            this.animationId = requestAnimationFrame(this.renderLoop);
+        }
+
+        stop() {
+            this.isPlaying = false;
+            if (this.animationId) cancelAnimationFrame(this.animationId);
+            this.animationId = 0;
+        }
+
+        diagnostics() {
+            return {
+                engine: 'kawarp-domain-warp-hardened',
+                webgl: true,
+                blurSize: this.blurSize,
+                blurPasses: this.blurPasses,
+                warpIntensity: this.warpIntensity,
+                animationSpeed: this.animationSpeed,
+                transitionDurationMs: this.transitionDuration,
+                transitionCurve: 'ease-out-cubic',
+                saturation: this.saturation,
+                dithering: this.dithering,
+                scale: this.scale,
+                renderWidth: this.renderWidth,
+                renderHeight: this.renderHeight,
+                transitioning: this.isTransitioning,
+                transitionSerial: this.transitionSerial,
+                completedTransitions: this.completedTransitions,
+                interruptedTransitions: this.interruptedTransitions,
+                accumulatedTime: this.accumulatedTime,
+                contextLost: this.contextLost
+            };
+        }
+
+        releaseGpuResources() {
+            const gl = this.gl;
+            if (gl && !this.contextLost) {
+                [
+                    this.blurProgram,
+                    this.blendProgram,
+                    this.tintProgram,
+                    this.warpProgram,
+                    this.outputProgram
+                ].forEach(program => {
+                    if (!program) return;
+                    try { gl.deleteProgram(program); } catch { /* best effort */ }
+                });
+
+                [this.positionBuffer, this.texCoordBuffer].forEach(buffer => {
+                    if (!buffer) return;
+                    try { gl.deleteBuffer(buffer); } catch { /* best effort */ }
+                });
+                if (this.sourceTexture) {
+                    try { gl.deleteTexture(this.sourceTexture); } catch { /* best effort */ }
+                }
+
+                [
+                    this.blurFBO1,
+                    this.blurFBO2,
+                    this.currentAlbumFBO,
+                    this.nextAlbumFBO,
+                    this.snapshotAlbumFBO,
+                    this.blendScratchFBO,
+                    this.warpFBO
+                ].forEach(fbo => {
+                    if (!fbo) return;
+                    try { this.deleteFramebuffer(fbo); } catch { /* best effort */ }
+                });
+            }
+
+            this.blurProgram = null;
+            this.blendProgram = null;
+            this.tintProgram = null;
+            this.warpProgram = null;
+            this.outputProgram = null;
+            this.positionBuffer = null;
+            this.texCoordBuffer = null;
+            this.sourceTexture = null;
+            this.blurFBO1 = null;
+            this.blurFBO2 = null;
+            this.currentAlbumFBO = null;
+            this.nextAlbumFBO = null;
+            this.snapshotAlbumFBO = null;
+            this.blendScratchFBO = null;
+            this.warpFBO = null;
+        }
+
+        dispose() {
+            this.stop();
+            if (this._onLost) {
+                this.canvas.removeEventListener('webglcontextlost', this._onLost, false);
+            }
+            if (this._onRestored) {
+                this.canvas.removeEventListener('webglcontextrestored', this._onRestored, false);
+            }
+            this.releaseGpuResources();
+        }
+    }
+
 
     const PERFORMANCE_STORAGE_KEY = 'appleKaraokePerformanceMode';
 
@@ -225,8 +985,8 @@
 
     // Per-timeline display synchronization. Positive values delay the lyrics;
     // negative values make lyrics appear earlier. The permanent UI is one
-    // compact timing chip; its popover keeps fine/coarse nudging, one-tap
-    // word/line synchronization, undo and reset out of the main lyric view.
+    // compact timing chip; its popover keeps ±0.1 s nudging, one-tap word/line
+    // synchronization and Reset out of the main lyric view.
     const TIMING_OFFSET_FINE_STEP_SECONDS = 0.1;
     const TIMING_OFFSET_STEP_SECONDS = 0.5;
     const TIMING_OFFSET_MIN_SECONDS = -15;
@@ -235,8 +995,7 @@
 
     const PERFORMANCE_TARGET_FPS = Object.freeze({
         desktop: 60,
-        mobile: 60,
-        eco: 20
+        mobile: 60
     });
 
     /*
@@ -269,23 +1028,6 @@
     const MEDIA_DISCOVERY_RETRY_MS = 250;
     const ATMOSPHERE_IMAGE_TIMEOUT_MS = 6500;
 
-    /*
-     * Premium atmosphere is rendered ONCE per song into a small,
-     * viewport-shaped blurred bitmap. There is no full-screen live CSS blur.
-     */
-    const ATMOSPHERE_RASTER_LONG_EDGE = Object.freeze({
-        desktop: 360,
-        mobile: 360,
-        eco: 160
-    });
-
-    const ATMOSPHERE_RASTER_BLUR_PX = Object.freeze({
-        desktop: 26,
-        mobile: 26,
-        eco: 15
-    });
-
-    const ATMOSPHERE_CROSSFADE_MS = 1800;
 
     /*
      * User-requested premium glow palette.
@@ -300,36 +1042,25 @@
         'appleKaraokeRecentAccents';
 
     /*
-     * Dual-tone OLED palette. Each selection keeps a clean primary edge and a
-     * complementary outer bloom instead of making every shadow the same hue.
-     * The original IDs remain valid for users who previously forced a color.
+     * Compact six-color OLED palette. Each selection keeps a clean primary
+     * edge and a complementary outer bloom instead of making every shadow the
+     * same hue.
      */
     const PREMIUM_ACCENTS = Object.freeze([
-        { id: 'champagne-gold', name: 'Champagne Gold', rgb: '255, 195, 92', secondaryRgb: '255, 126, 76', tertiaryRgb: '255, 231, 178', gain: 1.00 },
-        { id: 'royal-purple', name: 'Royal Purple', rgb: '184, 116, 255', secondaryRgb: '255, 102, 211', tertiaryRgb: '102, 224, 255', gain: 0.94 },
-        { id: 'sapphire', name: 'Sapphire Blue', rgb: '92, 166, 255', secondaryRgb: '104, 229, 255', tertiaryRgb: '244, 114, 182', gain: 0.90 },
-        { id: 'arctic-cyan', name: 'Arctic Cyan', rgb: '82, 224, 242', secondaryRgb: '107, 146, 255', tertiaryRgb: '125, 255, 196', gain: 0.84 },
-        { id: 'neon-rose', name: 'Neon Rose', rgb: '255, 112, 158', secondaryRgb: '201, 110, 255', tertiaryRgb: '255, 177, 94', gain: 0.91 },
-        { id: 'emerald', name: 'Emerald', rgb: '88, 224, 164', secondaryRgb: '96, 255, 211', tertiaryRgb: '166, 132, 255', gain: 0.86 },
-        { id: 'amber', name: 'Amber', rgb: '255, 154, 72', secondaryRgb: '255, 221, 94', tertiaryRgb: '255, 100, 146', gain: 0.96 },
-        { id: 'electric-violet', name: 'Electric Violet', rgb: '143, 119, 255', secondaryRgb: '91, 186, 255', tertiaryRgb: '92, 241, 222', gain: 0.94 },
-        { id: 'ice-blue', name: 'Ice Blue', rgb: '142, 214, 255', secondaryRgb: '196, 171, 255', tertiaryRgb: '255, 164, 206', gain: 0.88 },
-        { id: 'ruby', name: 'Ruby', rgb: '255, 86, 112', secondaryRgb: '255, 149, 82', tertiaryRgb: '197, 110, 255', gain: 0.93 },
-        { id: 'magenta', name: 'Magenta', rgb: '246, 101, 226', secondaryRgb: '153, 116, 255', tertiaryRgb: '78, 226, 255', gain: 0.90 },
-        { id: 'aqua', name: 'Aqua', rgb: '72, 232, 211', secondaryRgb: '112, 176, 255', tertiaryRgb: '190, 242, 100', gain: 0.84 },
-        { id: 'aurora-lime', name: 'Aurora Lime', rgb: '174, 244, 96', secondaryRgb: '73, 229, 191', tertiaryRgb: '104, 148, 255', gain: 0.85 },
-        { id: 'sunset-coral', name: 'Sunset Coral', rgb: '255, 119, 103', secondaryRgb: '255, 187, 97', tertiaryRgb: '245, 104, 211', gain: 0.94 },
-        { id: 'plasma-blue', name: 'Plasma Blue', rgb: '72, 127, 255', secondaryRgb: '78, 226, 255', tertiaryRgb: '186, 106, 255', gain: 0.92 },
-        { id: 'orchid', name: 'Electric Orchid', rgb: '218, 124, 255', secondaryRgb: '255, 142, 201', tertiaryRgb: '92, 185, 255', gain: 0.90 },
-        { id: 'mint', name: 'Polar Mint', rgb: '126, 245, 197', secondaryRgb: '94, 207, 255', tertiaryRgb: '187, 156, 255', gain: 0.82 },
-        { id: 'solar-yellow', name: 'Solar Yellow', rgb: '255, 224, 104', secondaryRgb: '255, 142, 74', tertiaryRgb: '75, 224, 210', gain: 0.94 },
-        { id: 'fuchsia-flare', name: 'Fuchsia Flare', rgb: '255, 84, 199', secondaryRgb: '255, 114, 119', tertiaryRgb: '114, 127, 255', gain: 0.92 },
-        { id: 'glacier', name: 'Glacier', rgb: '111, 238, 255', secondaryRgb: '119, 150, 255', tertiaryRgb: '236, 130, 214', gain: 0.84 },
-        { id: 'cosmic-indigo', name: 'Cosmic Indigo', rgb: '109, 102, 255', secondaryRgb: '204, 104, 255', tertiaryRgb: '79, 220, 231', gain: 0.94 },
-        { id: 'peach-flare', name: 'Peach Flare', rgb: '255, 169, 126', secondaryRgb: '255, 111, 177', tertiaryRgb: '255, 218, 112', gain: 0.90 },
-        { id: 'laser-green', name: 'Laser Green', rgb: '96, 242, 133', secondaryRgb: '79, 224, 232', tertiaryRgb: '242, 222, 96', gain: 0.84 },
-        { id: 'moon-lavender', name: 'Moon Lavender', rgb: '196, 172, 255', secondaryRgb: '124, 197, 255', tertiaryRgb: '239, 145, 215', gain: 0.88 }
+        { id: 'ruby', name: 'Ruby', rgb: '255, 62, 102', secondaryRgb: '255, 112, 72', tertiaryRgb: '226, 78, 255', gain: 0.99 },
+        { id: 'solar-yellow', name: 'Solar Yellow', rgb: '255, 232, 62', secondaryRgb: '255, 142, 48', tertiaryRgb: '48, 242, 220', gain: 0.49 },
+        { id: 'emerald', name: 'Emerald', rgb: '48, 246, 158', secondaryRgb: '52, 255, 214', tertiaryRgb: '148, 94, 255', gain: 0.55 },
+        { id: 'sapphire', name: 'Sapphire Blue', rgb: '66, 136, 255', secondaryRgb: '72, 222, 255', tertiaryRgb: '255, 92, 194', gain: 0.82 },
+        { id: 'electric-violet', name: 'Electric Violet', rgb: '152, 76, 255', secondaryRgb: '82, 172, 255', tertiaryRgb: '72, 255, 228', gain: 1.00 }
     ]);
+    const NEUTRAL_ACCENT = Object.freeze({
+        id: 'neutral-fallback',
+        name: 'Neutral Fallback',
+        rgb: '214, 226, 255',
+        secondaryRgb: '196, 180, 255',
+        tertiaryRgb: '255, 214, 238',
+        gain: 0.72
+    });
     const ROUTE_RE = /^#?!?\/?lyrics(?:[/?#]|$)/i;
 
     const state = {
@@ -348,6 +1079,11 @@
         animationLoopRunning: false,
         animationLoopStarts: 0,
         animationLoopStops: 0,
+        animationLoopErrors: 0,
+        animationLoopRecoveries: 0,
+        animationWatchdogRecoveries: 0,
+        animationWatchdogTimer: 0,
+        lastAnimationLoopError: '',
         lastMediaWarning: 0,
         geometryTimer: 0,
         decorationRetryStartedAt: 0,
@@ -358,6 +1094,12 @@
         activeLineIndexes: [],
         activeLineScratch: [],
         lineEndPrefix: [],
+        instrumentalGaps: [],
+        activeInstrumentalGapIndex: -1,
+        instrumentalPhaseActiveIndex: -1,
+        instrumentalPastCount: 0,
+        instrumentalGapRenderCount: 0,
+        instrumentalGapMaxDurationTicks: 0,
         mediaElement: null,
         mediaProbeAt: 0,
         mediaSwitchCount: 0,
@@ -378,8 +1120,6 @@
         lineTransitionCount: 0,
         lastLineSyncCount: 0,
         maxLineSyncCount: 0,
-        ecoHandoffLineIndex: -1,
-        ecoHandoffUntil: 0,
         playbackClockMedia: null,
         playbackClockSeconds: 0,
         playbackClockRawSeconds: 0,
@@ -391,7 +1131,7 @@
         mediaStartOffsetTicks: 0,
 
         accentMode: 'shuffle',
-        accent: PREMIUM_ACCENTS[0],
+        accent: null,
         accentSignature: '',
         accentHistory: [],
         accentBag: [],
@@ -413,28 +1153,40 @@
         romanizationCache: new Map(),
         romanizationLineCount: 0,
         romanizationToggleCount: 0,
-        lyricsItemId: '',
-        lyricsRequestUrl: '',
 
         songPreferenceKey: '',
         songPreferences: Object.create(null),
         lyricToolsHost: null,
+        lyricToolsBar: null,
         timingControls: null,
         timingPopover: null,
+        timingPopoverDismissInstalled: false,
         timingOffsetSeconds: 0,
         timingOffsetChangeCount: 0,
         timingPickActive: false,
         timingUndo: null,
         timingPickListenerInstalled: false,
+        lyricSeekInteractionInstalled: false,
+        lyricAutoFollowInstalled: false,
+        lyricAutoFollowSuspendedUntil: 0,
+        lyricAutoFollowLastIndex: -1,
+        lyricAutoFollowLastAt: 0,
+        lyricAutoFollowScrollCount: 0,
+        lyricAutoFollowManualScrollCount: 0,
+        lyricAutoFollowForceCount: 0,
+        lyricAutoFollowLastReason: '',
+        lyricSeekCount: 0,
+        instrumentalSeekCount: 0,
+        lastLyricSeekKind: '',
+        lastLyricSeekSourceTicks: null,
+        lastLyricSeekMediaSeconds: null,
 
-        // Adaptive Album Atmosphere state.
-        atmosphereMode: 'balanced',
+        // Dynamic Background state. This build intentionally has one atmosphere engine.
+        atmosphereMode: 'dynamic',
         atmosphereRoot: null,
-        atmosphereSceneIndex: 0,
         atmosphereMediaKey: '',
         atmosphereArtwork: '',
         atmosphereSource: 'none',
-        atmosphereColors: null,
         atmosphereLastCheck: 0,
         atmosphereLoadSeq: 0,
         atmospherePendingKey: '',
@@ -442,10 +1194,38 @@
         atmosphereTimeoutCount: 0,
         atmosphereFailedKey: '',
         atmosphereFailedAt: 0,
-        atmosphereRasterMethod: 'none',
-        atmosphereRasterWidth: 0,
-        atmosphereRasterHeight: 0,
-        atmosphereRasterBlurPx: 0
+        atmosphereAnalysis: null,
+        atmosphereDynamicRenderer: null,
+        atmosphereDynamicCanvas: null,
+        atmosphereDynamicBaseIndex: 0,
+        atmosphereDynamicCurrentArtwork: '',
+        atmosphereDynamicCurrentFingerprint: null,
+        atmosphereDynamicVisualDedupCount: 0,
+        atmosphereDynamicFingerprintFailures: 0,
+        atmosphereDynamicIdentityMethod: 'none',
+        atmosphereDynamicWebglAvailable: null,
+        atmosphereDynamicFallbackReason: '',
+        atmosphereDynamicContextLossCount: 0,
+        atmosphereDynamicTransitionCount: 0,
+        atmosphereDynamicInterruptedTransitions: 0,
+        atmosphereDynamicResizeCount: 0,
+        atmosphereDynamicStaleCommitDrops: 0,
+        atmosphereDynamicDirectLoadFailures: 0,
+        atmosphereDynamicDomFallbackCommits: 0,
+        atmosphereDynamicDirectRetryAt: 0,
+        atmosphereDynamicWeakSource: false,
+        atmosphereDynamicResolvedKey: '',
+        atmosphereDynamicResolvedAt: 0,
+        atmosphereDynamicNoArtwork: false,
+        atmosphereDynamicNoArtFailures: 0,
+        atmosphereDynamicDomBaseline: new Set(),
+        atmosphereDynamicDomCandidateSinceByUrl: new Map(),
+        atmosphereDynamicFastInheritedCommits: 0,
+        atmosphereDynamicMediaStableSince: 0,
+        atmosphereDynamicWebglFailureCount: 0,
+        atmosphereDynamicWebglRetryAt: 0,
+        atmosphereDynamicProbeToken: 0,
+        atmosphereDynamicProbeTimers: []
     };
 
     function log(...args) {
@@ -626,6 +1406,34 @@
     function lyricValue(lyric, pascal, camel) {
         if (!lyric) return undefined;
         return lyric[pascal] !== undefined ? lyric[pascal] : lyric[camel];
+    }
+
+    function orderedCuesBySourcePosition(cues) {
+        const source = Array.isArray(cues) ? cues : [];
+        if (source.length < 2) return source.slice();
+
+        /*
+         * Source positions are optional provider data. Sort only when every
+         * cue supplies a finite position. Treating null as Number(null) === 0
+         * can incorrectly drag an unknown cue to the front of the line and
+         * corrupt both word spans and Romanized source-boundary mapping.
+         * When positions are incomplete, provider array order is the only
+         * stable ordering evidence we actually have.
+         */
+        const positions = source.map(cue => nullableTick(
+            cueValue(cue, 'Position', 'position')
+        ));
+
+        if (positions.some(position => position === null)) {
+            return source.slice();
+        }
+
+        return source
+            .map((cue, index) => ({ cue, index, position: positions[index] }))
+            .sort((left, right) =>
+                left.position - right.position || left.index - right.index
+            )
+            .map(entry => entry.cue);
     }
 
 
@@ -1267,7 +2075,9 @@
     }
 
     function cueRecordStart(record) {
-        return Number(cueValue(record.cue, 'Start', 'start')) || 0;
+        return nullableTick(
+            cueValue(record.cue, 'Start', 'start')
+        ) ?? 0;
     }
 
     function buildWordRecords(text, lineIndex, cueRecords) {
@@ -1863,11 +2673,6 @@
             BASE_WIPE_GRADIENT_EM + extra;
 
         word.element.style.setProperty(
-            '--ak-wipe-width',
-            `${wipeWidth.toFixed(3)}em`
-        );
-
-        word.element.style.setProperty(
             '--ak-wipe-half',
             `${(wipeWidth / 2).toFixed(3)}em`
         );
@@ -2063,26 +2868,6 @@
             '0%'
         );
 
-        span.style.setProperty(
-            '--ak-motion-glow',
-            '0'
-        );
-
-
-        if (word.segments.length) {
-            span.classList.add('ak-word-timed');
-        } else {
-            span.classList.add('ak-word-untimed');
-        }
-
-        if (word.motionMode === 'grow') {
-            span.classList.add('ak-motion-grow');
-        } else if (word.motionMode === 'rise') {
-            span.classList.add('ak-motion-rise');
-        } else if (word.motionMode === 'drag') {
-            span.classList.add('ak-motion-drag');
-        }
-
         span.textContent = word.text;
 
         if (word.motionMode === 'grow') {
@@ -2156,9 +2941,20 @@
                 );
 
             /* v2.4's deterministic "song" mode migrates to shuffle. */
-            return !stored || stored === 'song'
-                ? 'shuffle'
-                : stored;
+            if (!stored || stored === 'song') {
+                return 'shuffle';
+            }
+
+            if (
+                stored === 'shuffle'
+                || stored === 'off'
+                || findAccent(stored)
+            ) {
+                return stored;
+            }
+
+            /* Stale/hand-edited values must not poison every song load. */
+            return 'shuffle';
         } catch {
             return 'shuffle';
         }
@@ -2353,7 +3149,7 @@
         );
 
         return findAccent(id)
-            || PREMIUM_ACCENTS[0];
+            || NEUTRAL_ACCENT;
     }
 
     function applyAccentTheme() {
@@ -2361,25 +3157,55 @@
 
         const page =
             getCurrentLyricPage();
+        const container =
+            getCurrentLyricsContainer(false);
 
-        if (!page) return;
+        if (!page && !container) return;
 
         const accent =
             currentAccent();
-
-        page.style.setProperty(
-            '--ak-glow-primary-rgb',
-            accent.rgb
-        );
-
-        page.style.setProperty(
-            '--ak-glow-secondary-rgb',
+        const primary = accent.rgb;
+        const secondary =
             accent.secondaryRgb
-                || accent.rgb
-        );
+            || primary;
+        const tertiary =
+            accent.tertiaryRgb
+            || secondary;
 
-        page.dataset.akGlowTheme =
-            accent.id;
+        /*
+         * Apply the palette at BOTH scopes. Older releases declared fallback
+         * glow variables directly on .ak-karaoke-container, which shadowed the
+         * song-level variables set on .lyricPage and made every palette look
+         * like Champagne Gold. Inline values on the live container make the
+         * selected palette authoritative even when stale/custom CSS defines a
+         * descendant fallback. The page copy keeps atmosphere/other descendants
+         * on the same theme.
+         */
+        const targets = [];
+        if (page) targets.push(page);
+        if (container && container !== page) targets.push(container);
+
+        targets.forEach(target => {
+            if (!target || !target.style) return;
+
+            target.style.setProperty(
+                '--ak-glow-primary-rgb',
+                primary
+            );
+            target.style.setProperty(
+                '--ak-glow-secondary-rgb',
+                secondary
+            );
+            target.style.setProperty(
+                '--ak-glow-tertiary-rgb',
+                tertiary
+            );
+
+            if (target.dataset) {
+                target.dataset.akGlowTheme =
+                    accent.id;
+            }
+        });
     }
 
     function selectSongAccent(
@@ -2510,7 +3336,7 @@
             ) {
                 state.accent =
                     findAccent(normalized)
-                    || PREMIUM_ACCENTS[0];
+                    || NEUTRAL_ACCENT;
             } else {
                 state.accent =
                     drawShuffledAccent();
@@ -2528,7 +3354,9 @@
             name: state.accent.name,
             primaryRgb: state.accent.rgb,
             secondaryRgb:
-                state.accent.secondaryRgb
+                state.accent.secondaryRgb,
+            tertiaryRgb:
+                state.accent.tertiaryRgb
         };
     }
 
@@ -2561,7 +3389,6 @@
             applyAccentTheme();
         }
 
-        state.atmosphereMediaKey = '';
         wakeAnimationLoop();
 
         return {
@@ -2570,15 +3397,19 @@
             name: state.accent.name,
             primaryRgb: state.accent.rgb,
             secondaryRgb:
-                state.accent.secondaryRgb
+                state.accent.secondaryRgb,
+            tertiaryRgb:
+                state.accent.tertiaryRgb
         };
     }
 
     function currentAccent() {
-        return state.accent || PREMIUM_ACCENTS[0];
+        return state.accent || NEUTRAL_ACCENT;
     }
 
     function retireDecoratedLines() {
+        removeInstrumentalGapRows();
+
         state.lineData.forEach(lineRecord => {
             const element =
                 lineRecord && lineRecord.element;
@@ -2591,6 +3422,8 @@
                     .forEach(name => element.classList.remove(name));
 
                 delete element.dataset.akGeneration;
+                delete element.dataset.akLyricIdentity;
+                delete element.dataset.akTimingLineIndex;
                 delete element.dataset.akVocalRole;
                 delete element.dataset.akVocalRoleSource;
                 delete element.dataset.akBackgroundLane;
@@ -2619,32 +3452,32 @@
         }
     }
 
-    function clearCapturedLyrics(
-        source = 'clear'
-    ) {
+    function clearCapturedLyrics(source = 'clear') {
         const hadLyrics = !!state.lyrics || state.lineData.length > 0;
+        const keepDynamicVisible = isLyricsPage();
 
         cancelDecorationRetry(true);
         if (state.geometryTimer) {
             clearTimeout(state.geometryTimer);
             state.geometryTimer = 0;
         }
+
+        /* Cancel any artwork decode owned by the outgoing track, but never hide
+         * or reset the currently rendered field during lyric-payload churn. */
         invalidateAtmosphereLoads(source);
         stopAnimationLoop(source);
         retireDecoratedLines();
 
-        if (
-            state.atmosphereRoot
-            && state.atmosphereRoot.isConnected
-        ) {
-            state.atmosphereRoot.classList.remove(
-                'ak-atmosphere-ready'
-            );
+        if (keepDynamicVisible) {
+            const root = state.atmosphereRoot;
+            if (root && root.isConnected && state.atmosphereArtwork) {
+                root.classList.add('ak-atmosphere-ready');
+            }
+            document.documentElement.classList.add('ak-lyricmotion-atmosphere-active');
+            document.documentElement.classList.add('ak-atmosphere-dynamic-mode');
+        } else {
+            removeAtmosphereRoot(source);
         }
-
-        state.atmosphereArtwork = '';
-        state.atmosphereSource = 'none';
-        state.atmosphereColors = null;
 
         state.lyrics = null;
         state.lyricsAcceptedKey = '';
@@ -2663,12 +3496,8 @@
         state.timingOffsetSeconds = 0;
         state.timingPickActive = false;
         state.timingUndo = null;
-        if (typeof removeRomanizationToggle === 'function') {
-            removeRomanizationToggle();
-        }
-        if (typeof removeTimingControls === 'function') {
-            removeTimingControls();
-        }
+        if (typeof removeRomanizationToggle === 'function') removeRomanizationToggle();
+        if (typeof removeTimingControls === 'function') removeTimingControls();
         if (state.lyricToolsHost && state.lyricToolsHost.parentNode) {
             state.lyricToolsHost.parentNode.removeChild(state.lyricToolsHost);
         }
@@ -2676,15 +3505,22 @@
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
+        state.lyricAutoFollowSuspendedUntil = 0;
+        state.lyricAutoFollowLastIndex = -1;
+        state.lyricAutoFollowLastAt = 0;
+        state.lyricAutoFollowLastReason = 'lyrics-cleared';
         state.lineEndPrefix = [];
+        state.instrumentalGaps = [];
+        state.activeInstrumentalGapIndex = -1;
+        state.instrumentalPhaseActiveIndex = -1;
+        state.instrumentalPastCount = 0;
+        state.instrumentalGapRenderCount = 0;
+        state.instrumentalGapMaxDurationTicks = 0;
         state.overlapFrameCount = 0;
         state.maxSimultaneousLines = 1;
         resetPlaybackClock();
 
-        if (hadLyrics) {
-            log(`cleared captured lyrics from ${source}`);
-        }
-
+        if (hadLyrics) log(`cleared captured lyrics from ${source}`);
         return hadLyrics;
     }
 
@@ -2720,38 +3556,16 @@
             : path;
     }
 
-    function lyricItemIdFromUrl(url) {
-        const raw = String(url || '');
-        try {
-            const parsed = new URL(raw, location.href);
-            const path = parsed.pathname || '';
-            const patterns = [
-                /\/Audio\/([^/]+)\/Lyrics(?:\/|$)/i,
-                /\/Items\/([^/]+)\/Lyrics(?:\/|$)/i,
-                /\/Lyrics\/([^/?#]+)/i
-            ];
-            for (let i = 0; i < patterns.length; i += 1) {
-                const match = path.match(patterns[i]);
-                if (match && match[1]) return decodeURIComponent(match[1]);
-            }
-            return parsed.searchParams.get('itemId')
-                || parsed.searchParams.get('item_id')
-                || '';
-        } catch {
-            const match = raw.match(/\/(?:Audio|Items)\/([^/?#]+)\/Lyrics/i);
-            return match && match[1] ? match[1] : '';
-        }
-    }
-
     function beginLyricsRequest(
         url
     ) {
         const key = lyricsRequestIdentity(url);
         if (!key) return 0;
 
-        state.lyricsRequestUrl = String(url || '');
-        const itemId = lyricItemIdFromUrl(url);
-        if (itemId) state.lyricsItemId = itemId;
+        /* Keep request identity only in normalized form. Do not retain the
+         * complete request URL because Jellyfin URLs can contain authentication
+         * or cache query parameters that LyricMotion does not need after the
+         * interceptor has classified the request. */
 
         const switchedSong =
             !!state.lyricsRequestKey
@@ -2795,6 +3609,29 @@
         return state.lyricsRequestSeq;
     }
 
+    function scheduleLyricVisualRecoveryBurst(generation, reason = 'lyrics') {
+        for (const delay of [48, 160, 420]) {
+            window.setTimeout(() => {
+                if (
+                    generation !== state.generation
+                    || !state.lyrics
+                    || document.hidden
+                    || !isLyricsPage()
+                ) {
+                    return;
+                }
+
+                if (!lyricVisualDomHealthy()) {
+                    queueDecoration();
+                    return;
+                }
+
+                wakeAnimationLoop();
+            }, delay);
+        }
+        return reason;
+    }
+
     function acceptLyricsPayload(
         payload,
         source,
@@ -2834,22 +3671,14 @@
         state.decoratedGeneration = -1;
         selectSongAccent(lyrics);
 
-        // Force atmosphere rediscovery and invalidate any old-song async load.
+        /* Lyrics and background are independent state machines. Keep the current
+         * shader field visible, invalidate only obsolete asynchronous art work,
+         * then probe the CURRENT media element several times while Jellyfin swaps
+         * its player source. */
         invalidateAtmosphereLoads('lyrics-accepted');
-        state.atmosphereMediaKey = '';
         state.atmosphereFailedKey = '';
-        state.atmosphereArtwork = '';
-        state.atmosphereSource = 'pending';
-        state.atmosphereColors = null;
-
-        if (
-            state.atmosphereRoot
-            && state.atmosphereRoot.isConnected
-        ) {
-            state.atmosphereRoot.classList.remove(
-                'ak-atmosphere-ready'
-            );
-        }
+        state.atmosphereLastCheck = 0;
+        scheduleDynamicBackgroundProbeBurst('lyrics-accepted');
 
         const cueCount = lyrics.reduce((total, lyric) => {
             const cues = lyricValue(lyric, 'Cues', 'cues');
@@ -2860,7 +3689,16 @@
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
+        state.lyricAutoFollowSuspendedUntil = 0;
+        state.lyricAutoFollowLastIndex = -1;
+        state.lyricAutoFollowLastReason = 'lyrics-accepted';
         state.lineEndPrefix = [];
+        state.instrumentalGaps = [];
+        state.activeInstrumentalGapIndex = -1;
+        state.instrumentalPhaseActiveIndex = -1;
+        state.instrumentalPastCount = 0;
+        state.instrumentalGapRenderCount = 0;
+        state.instrumentalGapMaxDurationTicks = 0;
         state.overlapFrameCount = 0;
         state.maxSimultaneousLines = 1;
         resetPlaybackClock();
@@ -2871,6 +3709,7 @@
             prepareRomanizationForLyrics();
         }
         queueDecoration();
+        scheduleLyricVisualRecoveryBurst(state.generation, 'lyrics-accepted');
 
         if (cueCount === 0) {
             warn('Lyrics loaded without enhanced ELRC cue data.');
@@ -2927,6 +3766,23 @@
         return String(method || 'GET').toUpperCase() === 'GET';
     }
 
+    function lyricsResponseDisposition(status) {
+        const numeric = Number(status);
+
+        if (numeric === 204 || numeric === 404) {
+            return 'empty';
+        }
+
+        if (Number.isFinite(numeric) && numeric >= 200 && numeric < 300) {
+            return 'json';
+        }
+
+        /* A transient auth/server/network response must not erase lyrics that
+         * are already on screen. Only an authoritative empty status or a
+         * successful JSON response can replace the captured model. */
+        return 'ignore';
+    }
+
     function installFetchInterceptor() {
         if (typeof window.fetch !== 'function' || window.fetch.__appleKaraokeWrapped) return;
         const originalFetch = window.fetch;
@@ -2960,16 +3816,18 @@
                      * those as an authoritative empty model for the current
                      * request so a same-song refresh cannot keep stale lyrics.
                      */
-                    if (
-                        response.status === 204
-                        || response.status === 404
-                    ) {
+                    const disposition =
+                        lyricsResponseDisposition(
+                            response.status
+                        );
+
+                    if (disposition === 'empty') {
                         acceptLyricsPayload(
                             { Lyrics: [] },
                             'fetch-empty',
                             effectiveSeq
                         );
-                    } else {
+                    } else if (disposition === 'json') {
                         response.clone().json()
                             .then(data => acceptLyricsPayload(
                                 data,
@@ -3028,10 +3886,12 @@
                             this.__appleKaraokeLyricsSeq
                             || beginLyricsRequest(url);
 
-                        if (
-                            this.status === 204
-                            || this.status === 404
-                        ) {
+                        const disposition =
+                            lyricsResponseDisposition(
+                                this.status
+                            );
+
+                        if (disposition === 'empty') {
                             acceptLyricsPayload(
                                 { Lyrics: [] },
                                 'XMLHttpRequest-empty',
@@ -3039,6 +3899,8 @@
                             );
                             return;
                         }
+
+                        if (disposition !== 'json') return;
 
                         let data = null;
                         if (this.responseType === 'json' && this.response && typeof this.response === 'object') {
@@ -3270,25 +4132,23 @@
 
         lyrics.forEach((lyric, lineIndex) => {
             const profile = lyricTextProfile(lyric);
-            const start = finiteNumber(
-                lyricValue(lyric, 'Start', 'start'),
-                0
+            const start = nullableTick(
+                lyricValue(lyric, 'Start', 'start')
             );
-            const end = finiteNumber(
-                lyricValue(lyric, 'End', 'end'),
-                0
+            const end = nullableTick(
+                lyricValue(lyric, 'End', 'end')
             );
             const rawCues = lyricValue(lyric, 'Cues', 'cues');
             const cues = Array.isArray(rawCues) ? rawCues : [];
             const cueSignature = cues.map(cue => [
-                finiteNumber(cueValue(cue, 'Position', 'position'), -1),
-                finiteNumber(cueValue(cue, 'EndPosition', 'endPosition'), -1),
-                finiteNumber(cueValue(cue, 'Start', 'start'), -1),
-                finiteNumber(cueValue(cue, 'End', 'end'), -1)
-            ].join(':')).join(',');
+                nullableTick(cueValue(cue, 'Position', 'position')),
+                nullableTick(cueValue(cue, 'EndPosition', 'endPosition')),
+                nullableTick(cueValue(cue, 'Start', 'start')),
+                nullableTick(cueValue(cue, 'End', 'end'))
+            ].map(value => value === null ? 'null' : value).join(':')).join(',');
 
             parts.push(
-                `${lineIndex}:${start}:${end}:${profile.rawText}:${cueSignature}`
+                `${lineIndex}:${start === null ? 'null' : start}:${end === null ? 'null' : end}:${profile.rawText}:${cueSignature}`
             );
         });
 
@@ -3629,23 +4489,31 @@
             return cloneLyricWithDisplay(lyric, marker + convertedLine, rawCues);
         }
 
-        const sorted = rawCues.slice().sort((a, b) =>
-            (Number(cueValue(a, 'Position', 'position')) || 0)
-            - (Number(cueValue(b, 'Position', 'position')) || 0)
-        );
+        const sorted = orderedCuesBySourcePosition(rawCues);
+        let rawCursor = profile.positionOffset;
 
         const convertedCues = sorted.map(cue => {
-            let start = Number(cueValue(cue, 'Position', 'position'));
-            let end = Number(cueValue(cue, 'EndPosition', 'endPosition'));
-            if (!Number.isFinite(start)) start = profile.positionOffset;
-            if (!Number.isFinite(end)) end = start;
-            start = Math.max(0, Math.min(sourceText.length, start - profile.positionOffset));
-            end = Math.max(start, Math.min(sourceText.length, end - profile.positionOffset));
+            let start = nullableTick(cueValue(cue, 'Position', 'position'));
+            let end = nullableTick(cueValue(cue, 'EndPosition', 'endPosition'));
+            if (start === null) start = rawCursor;
+            if (end === null) end = start;
+            start = Math.max(profile.positionOffset, Math.min(profile.rawText.length, start));
+            end = Math.max(start, Math.min(profile.rawText.length, end));
+            rawCursor = end;
+
+            const sourceStart = Math.max(0, Math.min(
+                sourceText.length,
+                start - profile.positionOffset
+            ));
+            const sourceEnd = Math.max(sourceStart, Math.min(
+                sourceText.length,
+                end - profile.positionOffset
+            ));
 
             return cloneCueWithPositions(
                 cue,
-                profile.positionOffset + romanizedBoundaryStart(sourceText, start, convertedLine),
-                profile.positionOffset + romanizedBoundaryEnd(sourceText, end, convertedLine)
+                profile.positionOffset + romanizedBoundaryStart(sourceText, sourceStart, convertedLine),
+                profile.positionOffset + romanizedBoundaryEnd(sourceText, sourceEnd, convertedLine)
             );
         });
 
@@ -3665,13 +4533,33 @@
 
     function removeLyricsToolsHostIfEmpty() {
         const host = state.lyricToolsHost;
+        const bar = state.lyricToolsBar;
+
+        if (bar && (!bar.isConnected || !bar.childElementCount)) {
+            if (bar.parentNode) bar.parentNode.removeChild(bar);
+            state.lyricToolsBar = null;
+        }
+
         if (!host || !host.isConnected) {
             state.lyricToolsHost = null;
+            state.lyricToolsBar = null;
             return;
         }
-        if (!host.children.length && host.parentNode) {
+
+        const hasPopover = !!(
+            state.timingPopover
+            && state.timingPopover.isConnected
+        );
+        const hasBar = !!(
+            state.lyricToolsBar
+            && state.lyricToolsBar.isConnected
+            && state.lyricToolsBar.childElementCount
+        );
+
+        if (!hasPopover && !hasBar && host.parentNode) {
             host.parentNode.removeChild(host);
             state.lyricToolsHost = null;
+            state.lyricToolsBar = null;
         }
     }
 
@@ -3689,10 +4577,29 @@
             host.setAttribute('aria-label', 'Lyric display controls');
             page.appendChild(host);
             state.lyricToolsHost = host;
+            state.lyricToolsBar = null;
         } else if (host.parentNode !== page) {
             page.appendChild(host);
         }
         return host;
+    }
+
+    function ensureLyricsToolsBar() {
+        const host = ensureLyricsToolsHost();
+        if (!host) return null;
+
+        let bar = state.lyricToolsBar;
+        if (!bar || !bar.isConnected) {
+            bar = document.createElement('div');
+            bar.className = 'ak-lyrics-tools-bar';
+            bar.dataset.akOwned = '1';
+            host.insertBefore(bar, host.firstChild || null);
+            state.lyricToolsBar = bar;
+        } else if (bar.parentNode !== host) {
+            host.insertBefore(bar, host.firstChild || null);
+        }
+
+        return bar;
     }
 
     function formatTimingOffset(seconds = state.timingOffsetSeconds) {
@@ -3737,22 +4644,22 @@
 
         const current =
             popover.querySelector('.ak-timing-current-value');
-        const status =
-            popover.querySelector('.ak-timing-sync-status');
-        const undo =
-            popover.querySelector('[data-ak-timing-action="undo"]');
+        const sync =
+            popover.querySelector('[data-ak-timing-action="sync-one"]');
         const reset =
             popover.querySelector('[data-ak-timing-action="reset"]');
 
         if (current) current.textContent = formatTimingOffset();
 
-        if (status) {
-            status.textContent = state.timingPickActive
-                ? 'Tap the lyric or timed word exactly when it starts.'
-                : 'Use Sync for an exact word/line anchor, or nudge by 0.1s / 0.5s.';
+        if (sync) {
+            sync.textContent = state.timingPickActive
+                ? 'Tap lyric to sync…'
+                : 'Sync lyric to now';
+            sync.dataset.akTimingActive = state.timingPickActive
+                ? 'true'
+                : 'false';
         }
 
-        if (undo) undo.disabled = state.timingUndo === null;
         if (reset) {
             reset.disabled =
                 Math.abs(state.timingOffsetSeconds) < 0.0001;
@@ -3898,17 +4805,447 @@
         return null;
     }
 
+    function mediaSeekSecondsForTimelineTicks(
+        media,
+        timelineTicks,
+        frameNow = performance.now()
+    ) {
+        if (!media || !Number.isFinite(timelineTicks)) return null;
+
+        const currentSeconds = Math.max(
+            0,
+            Number(media.currentTime) || 0
+        );
+        const now = Number.isFinite(frameNow)
+            ? frameNow
+            : performance.now();
+
+        /*
+         * Resolve the target from the same source timeline that drives lyric
+         * painting instead of assuming that media.currentTime is always the
+         * original file timeline. This keeps explicit lyric seeking correct
+         * with per-song timing correction and Jellyfin StartTimeTicks streams.
+         * Resetting the projection first removes interpolation lead from a
+         * user-initiated seek, so a click lands on the exact corrected anchor.
+         */
+        resetPlaybackClock(media, now);
+
+        const currentTimelineTicks =
+            chooseTimelineTicks(media, now);
+
+        if (!Number.isFinite(currentTimelineTicks)) return null;
+
+        let targetSeconds =
+            currentSeconds
+            + (
+                timelineTicks
+                - currentTimelineTicks
+            ) / TICKS_PER_SECOND;
+
+        if (!Number.isFinite(targetSeconds)) return null;
+
+        targetSeconds = Math.max(0, targetSeconds);
+
+        const duration = Number(media.duration);
+        if (Number.isFinite(duration) && duration > 0) {
+            targetSeconds = Math.min(duration, targetSeconds);
+        }
+
+        return targetSeconds;
+    }
+
+    function seekMediaToTimelineTicks(
+        timelineTicks,
+        kind = 'lyric'
+    ) {
+        if (!Number.isFinite(timelineTicks)) return false;
+
+        const media = getLocalMediaElement(true);
+        if (!media) return false;
+
+        const frameNow = performance.now();
+        const targetSeconds =
+            mediaSeekSecondsForTimelineTicks(
+                media,
+                timelineTicks,
+                frameNow
+            );
+
+        if (!Number.isFinite(targetSeconds)) return false;
+
+        try {
+            media.currentTime = targetSeconds;
+        } catch {
+            return false;
+        }
+
+        resetPlaybackClock(media, frameNow);
+        state.lastActiveLine = -999;
+        state.lastActiveLineSignature = '';
+        state.activeLineIndexes = [];
+        state.forceNextFrame = true;
+        state.lyricSeekCount += 1;
+        if (kind === 'instrumental') {
+            state.instrumentalSeekCount += 1;
+        }
+        state.lastLyricSeekKind = kind;
+        state.lastLyricSeekSourceTicks = timelineTicks;
+        state.lastLyricSeekMediaSeconds = targetSeconds;
+        wakeAnimationLoop();
+        return true;
+    }
+
+    function lyricLineIndexForTarget(target) {
+        if (!target || !target.closest) return -1;
+
+        const lineElement = target.closest('.ak-enhanced-line');
+        if (!lineElement) return -1;
+
+        const lineIndex = Number(
+            lineElement.dataset.akTimingLineIndex
+        );
+
+        return (
+            Number.isInteger(lineIndex)
+            && lineIndex >= 0
+            && lineIndex < state.lineData.length
+        )
+            ? lineIndex
+            : -1;
+    }
+
+    function lyricAutoFollowReducedMotion() {
+        try {
+            if (!reducedMotionMediaQuery && window.matchMedia) {
+                reducedMotionMediaQuery = window.matchMedia(
+                    '(prefers-reduced-motion: reduce)'
+                );
+            }
+            return !!(
+                reducedMotionMediaQuery
+                && reducedMotionMediaQuery.matches
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    function resumeLyricAutoFollow(reason = 'resume') {
+        state.lyricAutoFollowSuspendedUntil = 0;
+        state.lyricAutoFollowLastReason = reason;
+    }
+
+    function suspendLyricAutoFollow(
+        reason = 'manual-scroll',
+        frameNow = performance.now()
+    ) {
+        state.lyricAutoFollowSuspendedUntil =
+            frameNow + LYRIC_AUTO_FOLLOW_MANUAL_GRACE_MS;
+        state.lyricAutoFollowManualScrollCount += 1;
+        state.lyricAutoFollowLastReason = reason;
+    }
+
+    function focusLyricLineIndex(
+        lineIndex,
+        {
+            force = false,
+            behavior = 'smooth',
+            reason = 'playback'
+        } = {}
+    ) {
+        if (
+            !Number.isInteger(lineIndex)
+            || lineIndex < 0
+            || lineIndex >= state.lineData.length
+        ) {
+            return false;
+        }
+
+        const lineRecord = state.lineData[lineIndex];
+        const element = lineRecord && lineRecord.element;
+        if (
+            !element
+            || element.isConnected === false
+            || typeof element.scrollIntoView !== 'function'
+        ) {
+            return false;
+        }
+
+        const now = performance.now();
+
+        if (
+            !force
+            && (
+                state.timingPickActive
+                || now < state.lyricAutoFollowSuspendedUntil
+            )
+        ) {
+            return false;
+        }
+
+        if (
+            !force
+            && state.lyricAutoFollowLastIndex === lineIndex
+        ) {
+            return false;
+        }
+
+        const resolvedBehavior =
+            lyricAutoFollowReducedMotion()
+                ? 'auto'
+                : behavior;
+
+        try {
+            element.scrollIntoView({
+                behavior: resolvedBehavior,
+                block: 'center',
+                inline: 'nearest'
+            });
+        } catch {
+            try {
+                element.scrollIntoView();
+            } catch {
+                return false;
+            }
+        }
+
+        state.lyricAutoFollowLastIndex = lineIndex;
+        state.lyricAutoFollowLastAt = now;
+        state.lyricAutoFollowScrollCount += 1;
+        state.lyricAutoFollowLastReason = reason;
+        if (force) state.lyricAutoFollowForceCount += 1;
+        return true;
+    }
+
+    function handleLyricManualScroll(event) {
+        if (!isLyricsPage()) return;
+
+        const page = getCurrentLyricPage();
+        const target = event && event.target;
+        if (
+            page
+            && target
+            && typeof page.contains === 'function'
+            && !page.contains(target)
+        ) {
+            return;
+        }
+
+        suspendLyricAutoFollow(
+            event && event.type
+                ? `manual-${event.type}`
+                : 'manual-scroll'
+        );
+    }
+
+    function installLyricAutoFollowHooks() {
+        if (
+            state.lyricAutoFollowInstalled
+            || typeof document === 'undefined'
+        ) {
+            return;
+        }
+
+        document.addEventListener(
+            'wheel',
+            handleLyricManualScroll,
+            { capture: true, passive: true }
+        );
+        document.addEventListener(
+            'touchmove',
+            handleLyricManualScroll,
+            { capture: true, passive: true }
+        );
+        state.lyricAutoFollowInstalled = true;
+    }
+
+    function lyricLineSourceTicksForTarget(target) {
+        if (!target || !target.closest) return null;
+
+        const lineElement = target.closest('.ak-enhanced-line');
+        if (!lineElement) return null;
+
+        const lineIndex = Number(
+            lineElement.dataset.akTimingLineIndex
+        );
+
+        if (
+            !Number.isInteger(lineIndex)
+            || lineIndex < 0
+            || lineIndex >= state.lineData.length
+        ) {
+            return null;
+        }
+
+        const line = state.lineData[lineIndex];
+        return line && Number.isFinite(line.startTicks)
+            ? line.startTicks
+            : null;
+    }
+
+    function instrumentalSourceTicksForTarget(target) {
+        if (!target || !target.closest) return null;
+
+        const note = target.closest('.ak-instrumental-note');
+        if (!note) return null;
+
+        const row = note.closest('.ak-instrumental-gap-line');
+        if (!row) return null;
+
+        const gapIndex = Number(row.dataset.akInstrumentalGap);
+        const gap = Number.isInteger(gapIndex)
+            ? state.instrumentalGaps[gapIndex]
+            : null;
+
+        return gap && Number.isFinite(gap.startTicks)
+            ? gap.startTicks
+            : null;
+    }
+
+    function handleLyricSeekClick(event) {
+        if (state.timingPickActive) return;
+
+        const target = event && event.target;
+        if (!target || !target.closest) return;
+
+        if (
+            Number.isFinite(Number(event.button))
+            && Number(event.button) !== 0
+        ) {
+            return;
+        }
+
+        const instrumentalTicks =
+            instrumentalSourceTicksForTarget(target);
+
+        if (Number.isFinite(instrumentalTicks)) {
+            if (
+                seekMediaToTimelineTicks(
+                    instrumentalTicks,
+                    'instrumental'
+                )
+            ) {
+                event.preventDefault();
+                if (typeof event.stopImmediatePropagation === 'function') {
+                    event.stopImmediatePropagation();
+                } else {
+                    event.stopPropagation();
+                }
+            }
+            return;
+        }
+
+        const lineIndex = lyricLineIndexForTarget(target);
+        if (lineIndex < 0) return;
+
+        /*
+         * A lyric click is also an explicit request to resume follow mode.
+         * Jellyfin normally performs that bookkeeping inside its own click
+         * handler. Corrected-timing clicks are intercepted before Jellyfin, so
+         * LyricMotion must restore focus itself or a prior manual scroll can
+         * leave playback updating off-screen indefinitely.
+         */
+        resumeLyricAutoFollow('lyric-click');
+        focusLyricLineIndex(
+            lineIndex,
+            {
+                force: true,
+                behavior: 'smooth',
+                reason: 'lyric-click'
+            }
+        );
+
+        /*
+         * Preserve stock Jellyfin click behavior when no timing correction is
+         * active. Once a correction exists, stock seeking still targets the
+         * uncorrected lyric timestamp, which makes the renderer land on the
+         * previous/next line by exactly the configured offset. Intercept only
+         * that corrected case and seek on LyricMotion's adjusted timeline.
+         */
+        if (Math.abs(state.timingOffsetSeconds) < 0.0001) return;
+
+        const lineTicks = lyricLineSourceTicksForTarget(target);
+        if (!Number.isFinite(lineTicks)) return;
+
+        if (seekMediaToTimelineTicks(lineTicks, 'lyric')) {
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+                event.stopImmediatePropagation();
+            } else {
+                event.stopPropagation();
+            }
+        }
+    }
+
+    function handleLyricSeekKeydown(event) {
+        if (state.timingPickActive) return;
+
+        const key = String(
+            (event && event.key) || ''
+        );
+
+        if (key !== 'Enter' && key !== ' ' && key !== 'Spacebar') return;
+
+        const target = event && event.target;
+        const instrumentalTicks =
+            instrumentalSourceTicksForTarget(target);
+
+        if (!Number.isFinite(instrumentalTicks)) return;
+
+        if (
+            seekMediaToTimelineTicks(
+                instrumentalTicks,
+                'instrumental'
+            )
+        ) {
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+                event.stopImmediatePropagation();
+            } else {
+                event.stopPropagation();
+            }
+        }
+    }
+
+    function installLyricSeekInteractionHooks() {
+        if (
+            state.lyricSeekInteractionInstalled
+            || typeof document === 'undefined'
+        ) {
+            return;
+        }
+
+        /*
+         * Capture registration happens before Jellyfin's runtime.bundle.js
+         * loads. This lets a corrected lyric click suppress the stock
+         * unadjusted seek without replacing Jellyfin's normal zero-offset path.
+         */
+        document.addEventListener(
+            'click',
+            handleLyricSeekClick,
+            true
+        );
+        document.addEventListener(
+            'keydown',
+            handleLyricSeekKeydown,
+            true
+        );
+        state.lyricSeekInteractionInstalled = true;
+    }
+
     function currentUnadjustedTimelineTicks() {
         const media = getLocalMediaElement(true);
         if (!media) return null;
 
-        const adjustedTicks =
-            chooseTimelineTicks(
-                media,
-                performance.now()
-            );
+        const frameNow = performance.now();
 
-        return removeUserTimingOffsetTicks(adjustedTicks);
+        /* Sync is a human tap against audible media, so it must use the exact
+         * HTML media clock at the click instant. The animation clock normally
+         * projects between currentTime samples for smoother painting, but that
+         * projection can be ~100-250 ms ahead of the audible anchor and made
+         * "Sync lyric to now" save a visibly wrong correction. */
+        resetPlaybackClock(media, frameNow);
+        return sourceTimelineTicks(media, frameNow, false);
     }
 
     function stopTimingSyncMode() {
@@ -3977,9 +5314,29 @@
         if (!lyricTarget) return;
 
         event.preventDefault();
-        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        } else {
+            event.stopPropagation();
+        }
 
-        captureTimingSync(lyricTarget);
+        const captured = captureTimingSync(lyricTarget);
+        if (captured) {
+            /* The capture-phase listener intentionally suppresses Jellyfin's
+             * stock lyric click so it cannot perform an uncorrected seek. That
+             * also suppresses Jellyfin's normal resume-auto-scroll side effect,
+             * so restore focus explicitly after calibration. */
+            resumeLyricAutoFollow('timing-sync');
+            focusLyricLineIndex(
+                captured.lineIndex,
+                {
+                    force: true,
+                    behavior: 'smooth',
+                    reason: 'timing-sync'
+                }
+            );
+            removeTimingPopover();
+        }
     }
 
     function beginTimingSyncMode() {
@@ -4007,6 +5364,7 @@
 
     function removeTimingPopover() {
         stopTimingSyncMode();
+        removeTimingPopoverDismissListeners();
 
         const popover = state.timingPopover;
         if (popover && popover.parentNode) {
@@ -4014,6 +5372,7 @@
         }
         state.timingPopover = null;
         updateTimingControlsUi();
+        removeLyricsToolsHostIfEmpty();
     }
 
     function createTimingActionButton(
@@ -4028,6 +5387,132 @@
         button.dataset.akTimingAction = action;
         button.textContent = label;
         return button;
+    }
+
+
+    function createSpeechIconSvg() {
+        const svg = createSvgElement('svg', {
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            stroke: 'currentColor',
+            'stroke-width': '2',
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round',
+            'aria-hidden': 'true',
+            focusable: 'false'
+        });
+        svg.classList.add('ak-romanization-speech-icon');
+
+        svg.appendChild(createSvgElement('path', {
+            d: 'M8.8 20v-4.1l1.9.2a2.3 2.3 0 0 0 2.164-2.1V8.3A5.37 5.37 0 0 0 2 8.25c0 2.8.656 3.054 1 4.55a5.77 5.77 0 0 1 .029 2.758L2 20'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M19.8 17.8a7.5 7.5 0 0 0 .003-10.603'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M17 15a3.5 3.5 0 0 0-.025-4.975'
+        }));
+
+        return svg;
+    }
+
+
+    function createTimingIconSvg() {
+        const svg = createSvgElement('svg', {
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            stroke: 'currentColor',
+            'stroke-width': '2',
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round',
+            'aria-hidden': 'true',
+            focusable: 'false'
+        });
+        svg.classList.add('ak-timing-clock-icon');
+        svg.appendChild(createSvgElement('circle', {
+            cx: '12',
+            cy: '13',
+            r: '8'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M12 9v4l2.5 1.5'
+        }));
+        svg.appendChild(createSvgElement('path', {
+            d: 'M9 2h6M12 2v3'
+        }));
+        return svg;
+    }
+
+    function handleTimingPopoverDismissPointerDown(event) {
+        if (
+            !state.timingPopover
+            || !state.timingPopover.isConnected
+        ) {
+            removeTimingPopoverDismissListeners();
+            return;
+        }
+
+        const target = event.target;
+        const insidePopover = !!(
+            target
+            && target.closest
+            && target.closest('#ak-lyrics-timing-popover')
+        );
+        const insideChip = !!(
+            target
+            && target.closest
+            && target.closest('#lyrics-timing-display')
+        );
+
+        const timingPickTarget = !!(
+            state.timingPickActive
+            && target
+            && target.closest
+            && target.closest('.ak-word, .ak-enhanced-line')
+        );
+
+        /* pointerdown occurs before click. Closing here used to call
+         * stopTimingSyncMode(), remove the click listener, and silently cancel
+         * the very lyric tap the user was trying to use as the sync anchor. */
+        if (!insidePopover && !insideChip && !timingPickTarget) {
+            removeTimingPopover();
+        }
+    }
+
+    function handleTimingPopoverDismissKeyDown(event) {
+        if (event && event.key === 'Escape') {
+            removeTimingPopover();
+        }
+    }
+
+    function installTimingPopoverDismissListeners() {
+        if (state.timingPopoverDismissInstalled) return;
+        document.addEventListener(
+            'pointerdown',
+            handleTimingPopoverDismissPointerDown,
+            true
+        );
+        document.addEventListener(
+            'keydown',
+            handleTimingPopoverDismissKeyDown,
+            true
+        );
+        state.timingPopoverDismissInstalled = true;
+    }
+
+    function removeTimingPopoverDismissListeners() {
+        if (!state.timingPopoverDismissInstalled) return;
+        document.removeEventListener(
+            'pointerdown',
+            handleTimingPopoverDismissPointerDown,
+            true
+        );
+        document.removeEventListener(
+            'keydown',
+            handleTimingPopoverDismissKeyDown,
+            true
+        );
+        state.timingPopoverDismissInstalled = false;
     }
 
     function ensureTimingPopover() {
@@ -4045,30 +5530,18 @@
         popover.setAttribute('role', 'dialog');
         popover.setAttribute('aria-label', 'Lyrics timing assistant');
 
-        const heading = document.createElement('div');
-        heading.className = 'ak-timing-popover-heading';
-        heading.textContent = 'Lyrics timing';
-
-        const summary = document.createElement('div');
-        summary.className = 'ak-timing-summary';
+        const compactRow = document.createElement('div');
+        compactRow.className = 'ak-timing-compact-row';
+        compactRow.appendChild(
+            createTimingActionButton('−0.1', 'minus-fine')
+        );
 
         const current = document.createElement('strong');
         current.className = 'ak-timing-current-value';
-        summary.appendChild(current);
+        compactRow.appendChild(current);
 
-        const fineRow = document.createElement('div');
-        fineRow.className = 'ak-timing-action-row';
-        fineRow.appendChild(
-            createTimingActionButton('−0.1', 'minus-fine')
-        );
-        fineRow.appendChild(
+        compactRow.appendChild(
             createTimingActionButton('+0.1', 'plus-fine')
-        );
-        fineRow.appendChild(
-            createTimingActionButton('−0.5', 'minus-coarse')
-        );
-        fineRow.appendChild(
-            createTimingActionButton('+0.5', 'plus-coarse')
         );
 
         const sync = createTimingActionButton(
@@ -4076,23 +5549,17 @@
             'sync-one',
             'ak-timing-action-wide ak-timing-action-primary'
         );
+        sync.setAttribute('aria-live', 'polite');
 
-        const status = document.createElement('div');
-        status.className = 'ak-timing-sync-status';
-        status.setAttribute('aria-live', 'polite');
+        const reset = createTimingActionButton(
+            'Reset',
+            'reset',
+            'ak-timing-action-wide'
+        );
 
-        const footer = document.createElement('div');
-        footer.className = 'ak-timing-action-row';
-        footer.appendChild(createTimingActionButton('Undo', 'undo'));
-        footer.appendChild(createTimingActionButton('Reset', 'reset'));
-        footer.appendChild(createTimingActionButton('Close', 'close'));
-
-        popover.appendChild(heading);
-        popover.appendChild(summary);
-        popover.appendChild(fineRow);
+        popover.appendChild(compactRow);
         popover.appendChild(sync);
-        popover.appendChild(status);
-        popover.appendChild(footer);
+        popover.appendChild(reset);
 
         popover.addEventListener('click', event => {
             const button =
@@ -4118,22 +5585,10 @@
                 adjustTimingOffsetSeconds(
                     TIMING_OFFSET_FINE_STEP_SECONDS
                 );
-            } else if (action === 'minus-coarse') {
-                adjustTimingOffsetSeconds(
-                    -TIMING_OFFSET_STEP_SECONDS
-                );
-            } else if (action === 'plus-coarse') {
-                adjustTimingOffsetSeconds(
-                    TIMING_OFFSET_STEP_SECONDS
-                );
             } else if (action === 'sync-one') {
                 beginTimingSyncMode();
-            } else if (action === 'undo') {
-                undoTimingOffset();
             } else if (action === 'reset') {
                 resetTimingOffsetValue();
-            } else if (action === 'close') {
-                removeTimingPopover();
             }
 
             updateTimingControlsUi();
@@ -4141,6 +5596,7 @@
 
         host.appendChild(popover);
         state.timingPopover = popover;
+        installTimingPopoverDismissListeners();
         updateTimingControlsUi();
 
         return popover;
@@ -4175,8 +5631,8 @@
             return null;
         }
 
-        const host = ensureLyricsToolsHost();
-        if (!host) return null;
+        const bar = ensureLyricsToolsBar();
+        if (!bar) return null;
 
         let controls = state.timingControls;
 
@@ -4194,7 +5650,7 @@
             const icon = document.createElement('span');
             icon.className = 'ak-timing-chip-icon';
             icon.setAttribute('aria-hidden', 'true');
-            icon.textContent = '⏱';
+            icon.appendChild(createTimingIconSvg());
 
             const value = document.createElement('span');
             value.className = 'ak-timing-chip-value';
@@ -4209,10 +5665,10 @@
                 toggleTimingPopover();
             });
 
-            host.appendChild(controls);
+            bar.appendChild(controls);
             state.timingControls = controls;
-        } else if (controls.parentNode !== host) {
-            host.appendChild(controls);
+        } else if (controls.parentNode !== bar) {
+            bar.appendChild(controls);
         }
 
         updateTimingControlsUi();
@@ -4242,8 +5698,6 @@
             ? 'Show native lyrics'
             : 'Show romanized lyrics';
 
-        const label = button.querySelector('.ak-romanization-label');
-        if (label) label.textContent = active ? 'Romanized' : 'Romanize';
     }
 
     function ensureRomanizationToggle() {
@@ -4252,8 +5706,8 @@
             return null;
         }
 
-        const host = ensureLyricsToolsHost();
-        if (!host) return null;
+        const bar = ensureLyricsToolsBar();
+        if (!bar) return null;
 
         let button = state.romanizationToggle;
         if (!button || !button.isConnected) {
@@ -4265,13 +5719,9 @@
             const icon = document.createElement('span');
             icon.className = 'ak-romanization-icon';
             icon.setAttribute('aria-hidden', 'true');
-            icon.textContent = 'A';
-
-            const label = document.createElement('span');
-            label.className = 'ak-romanization-label';
+            icon.appendChild(createSpeechIconSvg());
 
             button.appendChild(icon);
-            button.appendChild(label);
             button.addEventListener('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -4282,12 +5732,12 @@
                 );
             });
 
-            /* Romanize is always the first tool. The only other visible
-             * LyricMotion control group is the existing timing offset. */
-            host.insertBefore(button, host.firstChild || null);
+            /* Romanization remains the leading desktop/mobile tool, but the
+             * shared toolbar presents both controls as one compact glass bar. */
+            bar.insertBefore(button, bar.firstChild || null);
             state.romanizationToggle = button;
-        } else if (button.parentNode !== host) {
-            host.insertBefore(button, host.firstChild || null);
+        } else if (button.parentNode !== bar) {
+            bar.insertBefore(button, bar.firstChild || null);
         }
 
         updateRomanizationToggleUi();
@@ -4298,6 +5748,7 @@
         state.romanizationLineCount = 0;
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
+        state.lyricAutoFollowLastIndex = -1;
         state.forceNextFrame = true;
 
         if (state.lyrics && isLyricsPage()) {
@@ -4394,10 +5845,23 @@
     loadSongPreferences();
 
     function finiteTick(value) {
+        if (
+            value === null
+            || value === undefined
+            || value === ''
+            || typeof value === 'boolean'
+        ) {
+            return null;
+        }
+
         const numeric = Number(value);
         return Number.isFinite(numeric)
             ? numeric
             : null;
+    }
+
+    function nullableTick(value) {
+        return finiteTick(value);
     }
 
     function nextLyricStartTicks(lineIndex) {
@@ -4436,12 +5900,14 @@
             );
 
         const endCandidates = [];
+        const trustedEndCandidates = [];
         const lyricEnd = finiteTick(
             lyricValue(lyric, 'End', 'end')
         );
 
         if (lyricEnd !== null && lyricEnd > startTicks) {
             endCandidates.push(lyricEnd);
+            trustedEndCandidates.push(lyricEnd);
         }
 
         (words || []).forEach(word => {
@@ -4451,24 +5917,81 @@
             }
         });
 
-        (cues || []).forEach(cue => {
+        const cueList = Array.isArray(cues) ? cues : [];
+        let terminalTextCue = null;
+
+        let latestTextCueStart = startTicks;
+
+        cueList.forEach(cue => {
+            const position = finiteTick(
+                cueValue(cue, 'Position', 'position')
+            );
+            const endPosition = finiteTick(
+                cueValue(cue, 'EndPosition', 'endPosition')
+            );
+            const cueStart = finiteTick(
+                cueValue(cue, 'Start', 'start')
+            );
+
+            if (
+                position !== null
+                && position < rawTextLength
+                && (
+                    endPosition === null
+                    || endPosition > position
+                )
+            ) {
+                terminalTextCue = cue;
+                if (cueStart !== null) {
+                    latestTextCueStart = Math.max(
+                        latestTextCueStart,
+                        cueStart
+                    );
+                }
+            } else if (
+                position === null
+                && cueList.length
+            ) {
+                /*
+                 * Some Jellyfin/provider payloads omit source positions. In
+                 * that case array order is the only available cue order, so
+                 * remember the latest non-empty candidate conservatively.
+                 */
+                terminalTextCue = cue;
+                if (cueStart !== null) {
+                    latestTextCueStart = Math.max(
+                        latestTextCueStart,
+                        cueStart
+                    );
+                }
+            }
+        });
+
+        cueList.forEach(cue => {
+            const cueStart = finiteTick(
+                cueValue(cue, 'Start', 'start')
+            );
             const explicitEnd = finiteTick(
                 cueValue(cue, 'End', 'end')
             );
 
             if (
                 explicitEnd !== null
-                && explicitEnd > startTicks
+                && explicitEnd > Math.max(
+                    startTicks,
+                    cueStart === null
+                        ? startTicks
+                        : cueStart
+                )
             ) {
                 endCandidates.push(explicitEnd);
+                if (cue === terminalTextCue) {
+                    trustedEndCandidates.push(explicitEnd);
+                }
             }
 
             const position = finiteTick(
                 cueValue(cue, 'Position', 'position')
-            );
-
-            const cueStart = finiteTick(
-                cueValue(cue, 'Start', 'start')
             );
 
             /*
@@ -4483,6 +6006,7 @@
                 && cueStart > startTicks
             ) {
                 endCandidates.push(cueStart);
+                trustedEndCandidates.push(cueStart);
             }
         });
 
@@ -4497,9 +6021,867 @@
             endTicks = startTicks + 7500000;
         }
 
+        const latestWordStart = wordStarts.length
+            ? Math.max(...wordStarts)
+            : startTicks;
+        const latestVocalStart = Math.max(
+            latestTextCueStart,
+            latestWordStart
+        );
+        const trustworthyTerminalEnds =
+            trustedEndCandidates.filter(
+                value => value > latestVocalStart
+            );
+
         return {
             startTicks,
-            endTicks
+            endTicks,
+            /*
+             * Instrumental-break detection must never invent a vocal ending.
+             * Only explicit lyric/cue endings or the converter's final empty
+             * enhanced timestamp count as trustworthy silence boundaries.
+             * A normal LRC line without an end therefore stays conservative
+             * and will not create a fake music-note row before the next line.
+             */
+            trustedEndTicks:
+                trustworthyTerminalEnds.length
+                    ? Math.max(...trustworthyTerminalEnds)
+                    : null
+        };
+    }
+
+    function planInstrumentalGaps(
+        lineData,
+        minimumTicks = INSTRUMENTAL_GAP_MIN_TICKS
+    ) {
+        if (!Array.isArray(lineData) || !lineData.length) return [];
+
+        const threshold = Math.max(
+            0,
+            finiteNumber(minimumTicks, INSTRUMENTAL_GAP_MIN_TICKS)
+        );
+
+        const ordered = lineData
+            .map((line, lineIndex) => ({
+                line,
+                lineIndex,
+                startTicks: nullableTick(line && line.startTicks),
+                endTicks: nullableTick(line && line.endTicks),
+                trustedEndTicks: nullableTick(line && line.trustedEndTicks)
+            }))
+            .filter(item =>
+                item.startTicks !== null
+                && (
+                    item.line == null
+                    || item.line.text == null
+                    || String(item.line.text).trim().length > 0
+                ))
+            .sort((left, right) =>
+                left.startTicks - right.startTicks
+                || left.lineIndex - right.lineIndex);
+
+        if (!ordered.length) return [];
+
+        /*
+         * Several lead/background lines can begin on the same tick. They are
+         * one vocal start event, so only the first DOM line in that group can
+         * own a synthetic instrumental row.
+         */
+        const startGroups = [];
+
+        ordered.forEach(item => {
+            const previous = startGroups[startGroups.length - 1];
+
+            if (previous && previous.startTicks === item.startTicks) {
+                previous.items.push(item);
+                previous.targetLineIndex = Math.min(
+                    previous.targetLineIndex,
+                    item.lineIndex
+                );
+                return;
+            }
+
+            startGroups.push({
+                startTicks: item.startTicks,
+                targetLineIndex: item.lineIndex,
+                items: [item]
+            });
+        });
+
+        const gaps = [];
+
+        startGroups.forEach((group, groupIndex) => {
+            const nextStart = group.startTicks;
+
+            if (!Number.isFinite(nextStart) || nextStart <= 0) return;
+
+            let gapStart = 0;
+
+            if (groupIndex > 0) {
+                const previousStart = startGroups[groupIndex - 1].startTicks;
+                let foundRelevantVocal = false;
+                let unresolvedEnd = false;
+
+                for (const item of ordered) {
+                    if (item.startTicks >= nextStart) break;
+
+                    /*
+                     * Only vocals that can belong to the immediately prior
+                     * overlap block matter. Older completed lines must not
+                     * suppress a later instrumental section forever.
+                     */
+                    const reachesPreviousBlock =
+                        item.startTicks >= previousStart
+                        || (
+                            item.endTicks !== null
+                            && item.endTicks > previousStart
+                        );
+
+                    if (!reachesPreviousBlock) continue;
+
+                    foundRelevantVocal = true;
+
+                    if (item.trustedEndTicks === null) {
+                        unresolvedEnd = true;
+                        break;
+                    }
+
+                    gapStart = Math.max(
+                        gapStart,
+                        item.trustedEndTicks
+                    );
+                }
+
+                if (!foundRelevantVocal || unresolvedEnd) return;
+            }
+
+            const durationTicks = nextStart - gapStart;
+
+            if (
+                !Number.isFinite(durationTicks)
+                || durationTicks < threshold
+            ) {
+                return;
+            }
+
+            gaps.push({
+                index: gaps.length,
+                startTicks: gapStart,
+                endTicks: nextStart,
+                durationTicks,
+                nextLineIndex: group.targetLineIndex,
+                isIntro: groupIndex === 0,
+                element: null,
+                lastProgress: -1
+            });
+        });
+
+        return gaps;
+    }
+
+    function createSvgElement(name, attributes = null) {
+        const node = typeof document.createElementNS === 'function'
+            ? document.createElementNS(SVG_NS, name)
+            : document.createElement(name);
+
+        if (attributes) {
+            Object.entries(attributes).forEach(([key, value]) => {
+                node.setAttribute(key, String(value));
+            });
+        }
+
+        return node;
+    }
+
+    const INSTRUMENTAL_NOTE_PATH =
+        'M18.15 72.25C10.90 72.25 5.75 68.35 5.75 62.85'
+        + 'C5.75 56.75 12.10 51.55 20.25 51.55'
+        + 'C24.55 51.55 28.15 52.70 30.75 54.60'
+        + 'V13.45C30.75 11.65 32.20 10.20 34.00 10.20H37.05'
+        + 'C47.90 10.20 56.20 15.10 59.10 23.35'
+        + 'C60.55 27.45 60.10 31.60 58.00 35.00'
+        + 'C53.35 31.30 47.05 29.10 38.55 28.70V59.10'
+        + 'C38.55 66.65 29.80 72.25 18.15 72.25Z';
+
+    function appendInstrumentalNoteShape(parent, className = '') {
+        if (!parent) return;
+
+        /* One closed silhouette is used for base paint, liquid paint and clip.
+         * The previous ellipse+rect+flag construction could expose seams at
+         * fractional scaling and made the moving clip look broken in Chromium. */
+        const shape = createSvgElement('path', {
+            d: INSTRUMENTAL_NOTE_PATH,
+            'fill-rule': 'nonzero',
+            'clip-rule': 'nonzero'
+        });
+
+        if (className) shape.setAttribute('class', className);
+        parent.appendChild(shape);
+    }
+
+    function prefersReducedMotion() {
+        try {
+            if (!reducedMotionMediaQuery && window.matchMedia) {
+                reducedMotionMediaQuery = window.matchMedia(
+                    '(prefers-reduced-motion: reduce)'
+                );
+            }
+
+            return !!(
+                reducedMotionMediaQuery
+                && reducedMotionMediaQuery.matches
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    function instrumentalWaveMotionAllowed() {
+        return !prefersReducedMotion();
+    }
+
+    function instrumentalWaveGeometry(
+        gap,
+        progress,
+        ticks = null
+    ) {
+        const normalized = clamp01(
+            finiteNumber(progress, 0)
+        );
+        const baseY =
+            INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT
+            * (1 - normalized);
+
+        /*
+         * The liquid surface remains alive through most of the break, then
+         * intentionally settles before the next vocal arrives. Motion is
+         * derived from media time, not a free-running CSS timer, so pause and
+         * seek are deterministic. Reduced-motion clients receive the
+         * same fill progression with a flat surface.
+         */
+        const riseIn = smoothstepBetween(
+            0.015,
+            0.09,
+            normalized
+        );
+        const flattenOut = 1 - smoothstepBetween(
+            0.68,
+            0.98,
+            normalized
+        );
+        const amplitude = instrumentalWaveMotionAllowed()
+            ? INSTRUMENTAL_WAVE_MAX_AMPLITUDE
+                * riseIn
+                * flattenOut
+            : 0;
+
+        const elapsedSeconds = gap
+            ? Math.max(
+                0,
+                (
+                    finiteNumber(
+                        ticks,
+                        gap.startTicks
+                    ) - gap.startTicks
+                ) / TICKS_PER_SECOND
+            )
+            : 0;
+        const phase =
+            elapsedSeconds
+            / INSTRUMENTAL_WAVE_PERIOD_SECONDS
+            * Math.PI
+            * 2;
+
+        const points = [];
+        for (
+            let index = 0;
+            index <= INSTRUMENTAL_WAVE_SEGMENTS;
+            index += 1
+        ) {
+            const ratio =
+                index / INSTRUMENTAL_WAVE_SEGMENTS;
+            const x =
+                INSTRUMENTAL_NOTE_VIEWBOX_WIDTH
+                * ratio;
+            const y = Math.max(
+                0,
+                Math.min(
+                    INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT,
+                    baseY
+                    + amplitude
+                        * Math.sin(
+                            phase
+                            + ratio
+                                * Math.PI
+                                * 2
+                        )
+                )
+            );
+
+            points.push([x, y]);
+        }
+
+        const surfacePath = points
+            .map((point, index) =>
+                `${index ? 'L' : 'M'}${point[0].toFixed(3)} ${point[1].toFixed(3)}`
+            )
+            .join(' ');
+        const fillPath =
+            `${surfacePath} `
+            + `L${INSTRUMENTAL_NOTE_VIEWBOX_WIDTH} ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} `
+            + `L0 ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} Z`;
+
+        return {
+            baseY,
+            amplitude,
+            phase,
+            fillPath,
+            surfacePath
+        };
+    }
+
+    function setInstrumentalGapFill(
+        gap,
+        progress,
+        ticks = null
+    ) {
+        if (!gap || !gap.element) return 0;
+
+        const normalized = clamp01(
+            finiteNumber(progress, 0)
+        );
+        const geometry = instrumentalWaveGeometry(
+            gap,
+            normalized,
+            ticks
+        );
+
+        if (gap.fillClipElement) {
+            gap.fillClipElement.setAttribute(
+                'd',
+                geometry.fillPath
+            );
+        }
+
+        if (gap.surfaceElement) {
+            gap.surfaceElement.setAttribute(
+                'd',
+                geometry.surfacePath
+            );
+            gap.surfaceElement.style.opacity =
+                normalized > 0.02 && normalized < 0.992
+                    ? '1'
+                    : '0';
+        }
+
+        gap.lastProgress = normalized;
+        gap.lastWavePhase = geometry.phase;
+        gap.lastWaveAmplitude = geometry.amplitude;
+        return normalized;
+    }
+
+    function setInstrumentalGapPhase(gap, phase) {
+        if (!gap || !gap.element || gap.visualPhase === phase) {
+            return false;
+        }
+
+        gap.visualPhase = phase;
+        gap.element.classList.toggle(
+            'ak-future',
+            phase === 'future'
+        );
+        gap.element.classList.toggle(
+            'ak-active',
+            phase === 'active'
+        );
+        gap.element.classList.toggle(
+            'ak-past',
+            phase === 'past'
+        );
+
+        if (phase === 'future') {
+            setInstrumentalGapFill(gap, 0);
+        } else if (phase === 'past') {
+            setInstrumentalGapFill(gap, 1);
+        }
+
+        return true;
+    }
+
+    function instrumentalPastCountAtTicks(ticks) {
+        const gaps = state.instrumentalGaps;
+        if (!gaps.length) return 0;
+
+        const now = finiteNumber(ticks, 0);
+        let low = 0;
+        let high = gaps.length;
+
+        /* Upper-bound search on endTicks: number of fully completed gaps. */
+        while (low < high) {
+            const middle = (low + high) >> 1;
+            if (gaps[middle].endTicks <= now) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+
+        return low;
+    }
+
+    function syncInstrumentalGapPhases(ticks, activeGap = null) {
+        const gaps = state.instrumentalGaps;
+        if (!gaps.length) {
+            state.instrumentalPastCount = 0;
+            state.instrumentalPhaseActiveIndex = -1;
+            return;
+        }
+
+        const pastCount = instrumentalPastCountAtTicks(ticks);
+        const previousPastCount = Math.max(
+            0,
+            Math.min(gaps.length, state.instrumentalPastCount || 0)
+        );
+        const activeIndex = activeGap
+            ? finiteNumber(activeGap.index, -1)
+            : -1;
+        const previousActiveIndex = finiteNumber(
+            state.instrumentalPhaseActiveIndex,
+            -1
+        );
+
+        /*
+         * Normal playback crosses at most one boundary at a time. Update only
+         * rows whose phase can have changed instead of rescanning every
+         * instrumental row on every animation frame. Arbitrary seeks remain
+         * correct because the changed past/future range is replayed here.
+         */
+        if (pastCount > previousPastCount) {
+            for (let index = previousPastCount; index < pastCount; index += 1) {
+                if (index !== activeIndex) {
+                    setInstrumentalGapPhase(gaps[index], 'past');
+                }
+            }
+        } else if (pastCount < previousPastCount) {
+            for (let index = pastCount; index < previousPastCount; index += 1) {
+                if (index !== activeIndex) {
+                    setInstrumentalGapPhase(gaps[index], 'future');
+                }
+            }
+        }
+
+        if (
+            previousActiveIndex >= 0
+            && previousActiveIndex < gaps.length
+            && previousActiveIndex !== activeIndex
+        ) {
+            setInstrumentalGapPhase(
+                gaps[previousActiveIndex],
+                previousActiveIndex < pastCount ? 'past' : 'future'
+            );
+        }
+
+        if (activeIndex >= 0 && activeIndex < gaps.length) {
+            setInstrumentalGapPhase(gaps[activeIndex], 'active');
+        }
+
+        state.instrumentalPastCount = pastCount;
+        state.instrumentalPhaseActiveIndex = activeIndex;
+    }
+
+    function createInstrumentalGapRow(gap) {
+        if (!gap) return null;
+
+        const row = document.createElement('div');
+        row.className = 'ak-instrumental-gap-line ak-future';
+        row.dataset.akInstrumentalGap = String(gap.index);
+        row.dataset.akInstrumentalNextLine = String(gap.nextLineIndex);
+
+        const note = document.createElement('span');
+        note.className = 'ak-instrumental-note';
+        note.setAttribute('role', 'button');
+        note.setAttribute('tabindex', '0');
+        note.setAttribute(
+            'aria-label',
+            `Seek to start of ${Math.max(0, gap.durationTicks / TICKS_PER_SECOND).toFixed(1)} second instrumental break`
+        );
+        note.setAttribute(
+            'title',
+            'Seek to start of instrumental break'
+        );
+
+        const svg = createSvgElement('svg', {
+            class: 'ak-instrumental-note-svg',
+            viewBox: `0 0 ${INSTRUMENTAL_NOTE_VIEWBOX_WIDTH} ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT}`,
+            'aria-hidden': 'true',
+            focusable: 'false',
+            role: 'presentation'
+        });
+
+        const defs = createSvgElement('defs');
+        const idRoot = `ak-instrumental-${state.generation}-${gap.index}`;
+        const fillClipId = `${idRoot}-fill`;
+        const shapeClipId = `${idRoot}-shape`;
+
+        const fillClip = createSvgElement('clipPath', {
+            id: fillClipId,
+            clipPathUnits: 'userSpaceOnUse'
+        });
+        const fillWave = createSvgElement('path', {
+            d: `M0 ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} `
+                + `L${INSTRUMENTAL_NOTE_VIEWBOX_WIDTH} ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} `
+                + `L${INSTRUMENTAL_NOTE_VIEWBOX_WIDTH} ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} `
+                + `L0 ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} Z`
+        });
+        fillClip.appendChild(fillWave);
+
+        const shapeClip = createSvgElement('clipPath', {
+            id: shapeClipId,
+            clipPathUnits: 'userSpaceOnUse'
+        });
+        appendInstrumentalNoteShape(shapeClip);
+
+        defs.appendChild(fillClip);
+        defs.appendChild(shapeClip);
+        svg.appendChild(defs);
+
+        const base = createSvgElement('g', {
+            class: 'ak-instrumental-note-base-vector'
+        });
+        appendInstrumentalNoteShape(base);
+        svg.appendChild(base);
+
+        const liquid = createSvgElement('g', {
+            class: 'ak-instrumental-note-liquid',
+            'clip-path': `url(#${fillClipId})`
+        });
+        appendInstrumentalNoteShape(liquid);
+        svg.appendChild(liquid);
+
+        const surface = createSvgElement('path', {
+            class: 'ak-instrumental-note-surface',
+            d: `M0 ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT} `
+                + `L${INSTRUMENTAL_NOTE_VIEWBOX_WIDTH} ${INSTRUMENTAL_NOTE_VIEWBOX_HEIGHT}`,
+            'clip-path': `url(#${shapeClipId})`
+        });
+        svg.appendChild(surface);
+
+        note.appendChild(svg);
+        row.appendChild(note);
+
+        gap.element = row;
+        gap.fillClipElement = fillWave;
+        gap.surfaceElement = surface;
+        gap.visualPhase = 'future';
+        gap.lastProgress = 0;
+        setInstrumentalGapFill(gap, 0);
+
+        return row;
+    }
+
+    function removeInstrumentalGapRows(container = null) {
+        state.instrumentalGaps.forEach(gap => {
+            const element = gap && gap.element;
+
+            if (element && element.parentNode) {
+                try {
+                    element.parentNode.removeChild(element);
+                } catch {
+                    // Framework-owned lyric DOM can disappear during cleanup.
+                }
+            }
+        });
+
+        const root = container || getCurrentLyricsContainer(true);
+
+        if (root && typeof root.querySelectorAll === 'function') {
+            try {
+                Array.from(
+                    root.querySelectorAll('.ak-instrumental-gap-line')
+                ).forEach(element => {
+                    if (element.parentNode) {
+                        element.parentNode.removeChild(element);
+                    }
+                });
+            } catch {
+                // Best-effort stale-row cleanup only.
+            }
+        }
+
+        state.instrumentalGaps = [];
+        state.activeInstrumentalGapIndex = -1;
+        state.instrumentalPhaseActiveIndex = -1;
+        state.instrumentalPastCount = 0;
+    }
+
+    function installInstrumentalGapRows(container) {
+        removeInstrumentalGapRows(container);
+
+        const gaps = planInstrumentalGaps(state.lineData);
+
+        gaps.forEach(gap => {
+            const nextLine = state.lineData[gap.nextLineIndex];
+            const nextElement = nextLine && nextLine.element;
+            const parent = nextElement && nextElement.parentNode;
+
+            if (!parent) return;
+
+            const row = createInstrumentalGapRow(gap);
+
+            if (!row) return;
+
+            /*
+             * Follow the upcoming lyric's base direction so mixed LTR/RTL
+             * songs place the synthetic note on the same reading lane instead
+             * of inheriting only the document direction.
+             */
+            try {
+                const direction =
+                    String(nextElement.getAttribute('dir') || '')
+                        .toLowerCase();
+                if (direction === 'rtl' || direction === 'ltr') {
+                    row.setAttribute('dir', direction);
+                }
+            } catch {
+                // Direction is visual-only; never block lyric decoration.
+            }
+
+            parent.insertBefore(row, nextElement);
+        });
+
+        state.instrumentalGaps = gaps.filter(gap => !!gap.element);
+        state.instrumentalGaps.forEach((gap, index) => {
+            gap.index = index;
+            if (gap.element) {
+                gap.element.dataset.akInstrumentalGap = String(index);
+            }
+        });
+        state.instrumentalGapMaxDurationTicks =
+            state.instrumentalGaps.reduce(
+                (maximum, gap) => Math.max(maximum, gap.durationTicks),
+                0
+            );
+        state.activeInstrumentalGapIndex = -1;
+        state.instrumentalPhaseActiveIndex = -1;
+        state.instrumentalPastCount = 0;
+
+        return state.instrumentalGaps;
+    }
+
+    function findInstrumentalGapInList(gaps, ticks) {
+        if (!gaps || !gaps.length) return null;
+
+        let low = 0;
+        let high = gaps.length - 1;
+        let candidate = -1;
+
+        while (low <= high) {
+            const middle = (low + high) >> 1;
+            const gap = gaps[middle];
+
+            if (gap.startTicks <= ticks) {
+                candidate = middle;
+                low = middle + 1;
+            } else {
+                high = middle - 1;
+            }
+        }
+
+        if (candidate < 0) return null;
+
+        const gap = gaps[candidate];
+
+        return ticks >= gap.startTicks && ticks < gap.endTicks
+            ? gap
+            : null;
+    }
+
+    function findInstrumentalGapAtTicks(ticks) {
+        return findInstrumentalGapInList(
+            state.instrumentalGaps,
+            ticks
+        );
+    }
+
+    function instrumentalGapProgress(gap, ticks) {
+        if (!gap) return 0;
+
+        const duration = Math.max(
+            1,
+            finiteNumber(gap.durationTicks, 0)
+        );
+
+        return Math.max(
+            0,
+            Math.min(
+                1,
+                (
+                    finiteNumber(ticks, gap.startTicks)
+                    - gap.startTicks
+                ) / duration
+            )
+        );
+    }
+
+    function instrumentalGapDistanceBand(lineIndex, nextLineIndex) {
+        const center = nextLineIndex - 0.5;
+        const distance = Math.abs(lineIndex - center);
+
+        /*
+         * No lyric line is the visual focus during an instrumental gap.
+         * Returning near/near2 here used to keep the lines immediately around
+         * the synthetic note too bright, making the completed lyric compete
+         * with the progress indicator. Preserve only the far-distance fade;
+         * the normal past/future phase opacity handles nearby lyrics.
+         */
+        if (distance >= 4.5) return 'far';
+        return 'middle';
+    }
+
+    function updateInstrumentalGapVisual(gap, ticks) {
+        const nextIndex = gap ? gap.index : -1;
+        const previousIndex = state.activeInstrumentalGapIndex;
+
+        if (previousIndex !== nextIndex) {
+            if (gap) {
+                state.instrumentalGapRenderCount += 1;
+            }
+            state.activeInstrumentalGapIndex = nextIndex;
+        }
+
+        /*
+         * Synthetic note rows remain visible as dim future/past lyric items,
+         * just like the surrounding text. This prevents the indicator from
+         * popping into existence at the exact gap boundary and also makes
+         * seek-back/seek-forward state deterministic.
+         */
+        syncInstrumentalGapPhases(ticks, gap);
+
+        if (
+            !gap
+            || !gap.element
+            || !gap.element.isConnected
+            || !gap.element.parentNode
+        ) {
+            return 0;
+        }
+
+        const progress =
+            instrumentalGapProgress(gap, ticks);
+
+        const currentTicks = finiteNumber(
+            ticks,
+            gap.startTicks
+        );
+        const playbackAdvanced =
+            gap.lastRenderTicks !== currentTicks;
+        const animatedSurface =
+            instrumentalWaveMotionAllowed();
+
+        if (
+            gap.lastProgress < 0
+            || Math.abs(progress - gap.lastProgress)
+                >= INSTRUMENTAL_GAP_PROGRESS_EPSILON
+            || (animatedSurface && playbackAdvanced)
+        ) {
+            setInstrumentalGapFill(gap, progress, currentTicks);
+            gap.lastRenderTicks = currentTicks;
+        }
+
+        return progress;
+    }
+
+    function inspectInstrumentalBreaks() {
+        const active =
+            state.instrumentalGaps[
+                state.activeInstrumentalGapIndex
+            ] || null;
+
+        return {
+            symbol: INSTRUMENTAL_GAP_SYMBOL,
+            visualRenderer: 'inline-svg-liquid-wave-v3',
+            transitionModel: 'future-active-past',
+            rectangularTextClipArtifact: false,
+            liquidSurface: 'media-time-wave+progressive-flattening',
+            reducedMotionSurface: 'flat',
+            seekable: true,
+            seekTarget: 'gap-start',
+            keyboardActivation: 'enter-space',
+            seekCount: state.instrumentalSeekCount,
+            minimumGapSeconds:
+                INSTRUMENTAL_GAP_MIN_TICKS
+                / TICKS_PER_SECOND,
+            detected: state.instrumentalGaps.length,
+            activeIndex:
+                state.activeInstrumentalGapIndex,
+            active: active
+                ? {
+                    startSeconds:
+                        Number(
+                            (
+                                active.startTicks
+                                / TICKS_PER_SECOND
+                            ).toFixed(3)
+                        ),
+                    endSeconds:
+                        Number(
+                            (
+                                active.endTicks
+                                / TICKS_PER_SECOND
+                            ).toFixed(3)
+                        ),
+                    durationSeconds:
+                        Number(
+                            (
+                                active.durationTicks
+                                / TICKS_PER_SECOND
+                            ).toFixed(3)
+                        ),
+                    nextLineIndex:
+                        active.nextLineIndex,
+                    intro: !!active.isIntro,
+                    progress:
+                        active.lastProgress >= 0
+                            ? Number(
+                                active.lastProgress.toFixed(4)
+                            )
+                            : 0
+                }
+                : null,
+            renderCount:
+                state.instrumentalGapRenderCount,
+            longestSeconds:
+                Number(
+                    (
+                        state.instrumentalGapMaxDurationTicks
+                        / TICKS_PER_SECOND
+                    ).toFixed(3)
+                ),
+            gaps: state.instrumentalGaps.map(gap => ({
+                startSeconds:
+                    Number(
+                        (
+                            gap.startTicks
+                            / TICKS_PER_SECOND
+                        ).toFixed(3)
+                    ),
+                endSeconds:
+                    Number(
+                        (
+                            gap.endTicks
+                            / TICKS_PER_SECOND
+                        ).toFixed(3)
+                    ),
+                durationSeconds:
+                    Number(
+                        (
+                            gap.durationTicks
+                            / TICKS_PER_SECOND
+                        ).toFixed(3)
+                    ),
+                nextLineIndex: gap.nextLineIndex,
+                intro: !!gap.isIntro
+            }))
         };
     }
 
@@ -4515,16 +6897,13 @@
             textProfile.backgroundVocalRoleSource;
         const rawCues = lyricValue(displayLyric, 'Cues', 'cues');
         const cues = Array.isArray(rawCues)
-            ? rawCues.slice().sort((a, b) =>
-                (cueValue(a, 'Position', 'position') || 0) -
-                (cueValue(b, 'Position', 'position') || 0))
+            ? orderedCuesBySourcePosition(rawCues)
             : [];
 
         lineElement.style.removeProperty('visibility');
         lineElement.removeAttribute('aria-hidden');
         lineElement.classList.add('ak-enhanced-line');
         lineElement.dataset.akTimingLineIndex = String(lineIndex);
-        lineElement.classList.toggle('ak-word-synced', cues.length > 0);
         lineElement.classList.toggle('ak-line-synced', cues.length === 0);
         lineElement.classList.toggle(
             'ak-background-vocal',
@@ -4543,6 +6922,7 @@
             'ak-has-shaped-script'
         );
         lineElement.dataset.akGeneration = String(state.generation);
+        lineElement.dataset.akLyricIdentity = lyricDomIdentity(lyric);
         lineElement.dataset.akVocalRole =
             isBackgroundVocal
                 ? 'background'
@@ -4578,8 +6958,10 @@
                 words: [],
                 startTicks: bounds.startTicks,
                 endTicks: bounds.endTicks,
+                trustedEndTicks: bounds.trustedEndTicks,
                 isBackgroundVocal,
-                backgroundVocalRoleSource
+                backgroundVocalRoleSource,
+                ownedNodes: Array.from(lineElement.children || [])
             };
         }
 
@@ -4590,11 +6972,15 @@
         let rawCursor = 0;
 
         cues.forEach((cue, cueIndex) => {
-            let startPos = Number(cueValue(cue, 'Position', 'position'));
-            let endPos = Number(cueValue(cue, 'EndPosition', 'endPosition'));
+            let startPos = nullableTick(
+                cueValue(cue, 'Position', 'position')
+            );
+            let endPos = nullableTick(
+                cueValue(cue, 'EndPosition', 'endPosition')
+            );
 
-            if (!Number.isFinite(startPos)) startPos = rawCursor;
-            if (!Number.isFinite(endPos)) endPos = startPos;
+            if (startPos === null) startPos = rawCursor;
+            if (endPos === null) endPos = startPos;
 
             startPos = Math.max(rawCursor, Math.min(rawText.length, startPos));
             endPos = Math.max(startPos, Math.min(rawText.length, endPos));
@@ -4736,8 +7122,10 @@
             words,
             startTicks: bounds.startTicks,
             endTicks: bounds.endTicks,
+            trustedEndTicks: bounds.trustedEndTicks,
             isBackgroundVocal,
-            backgroundVocalRoleSource
+            backgroundVocalRoleSource,
+            ownedNodes: Array.from(lineElement.children || [])
         };
     }
 
@@ -4843,6 +7231,108 @@
         };
     }
 
+    function normalizedLyricDomText(value) {
+        return String(value || '')
+            .replace(/\s+/gu, ' ')
+            .trim();
+    }
+
+    function lyricDomIdentity(lyric) {
+        const text = normalizedLyricDomText(
+            lyricTextProfile(lyric).text
+        );
+        return stableHash(text).toString(16);
+    }
+
+    function lineHasOwnedLyricNodes(line) {
+        if (!line || !line.children) return false;
+        return Array.from(line.children).some(child =>
+            child
+            && child.classList
+            && (
+                child.classList.contains('ak-word')
+                || child.classList.contains('ak-untimed')
+            )
+        );
+    }
+
+    function lyricDomLineReady(line, lyric) {
+        if (!line || !lyric) return false;
+        const expectedIdentity = lyricDomIdentity(lyric);
+        if (
+            line.dataset
+            && line.dataset.akLyricIdentity === expectedIdentity
+        ) {
+            return true;
+        }
+
+        /* A different LyricMotion identity means Jellyfin is still showing the
+         * outgoing song. Wait until the framework actually replaces our owned
+         * children instead of painting the new timing model onto stale text. */
+        if (lineHasOwnedLyricNodes(line)) return false;
+
+        const expected = normalizedLyricDomText(
+            lyricTextProfile(lyric).text
+        );
+        const actual = normalizedLyricDomText(line.textContent);
+        return actual === expected;
+    }
+
+    function lyricsDomReadyForPayload(lines, lyrics) {
+        const count = Math.min(lines.length, lyrics.length);
+        if (!count) return false;
+        for (let index = 0; index < count; index += 1) {
+            if (!lyricDomLineReady(lines[index], lyrics[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function lineRecordHealthy(lineRecord) {
+        const element = lineRecord && lineRecord.element;
+        if (
+            !element
+            || !element.isConnected
+            || !element.classList
+            || !element.classList.contains('ak-enhanced-line')
+            || Number(element.dataset && element.dataset.akGeneration)
+                !== state.generation
+        ) {
+            return false;
+        }
+
+        const ownedNodes = lineRecord.ownedNodes;
+        if (!Array.isArray(ownedNodes) || !ownedNodes.length) {
+            return false;
+        }
+
+        const liveChildren = Array.from(element.children || []);
+        if (liveChildren.length !== ownedNodes.length) return false;
+        return ownedNodes.every(
+            (node, index) =>
+                node
+                && node.parentNode === element
+                && liveChildren[index] === node
+        );
+    }
+
+    function instrumentalGapRowsHealthy() {
+        return state.instrumentalGaps.every(gap =>
+            gap
+            && gap.element
+            && gap.element.isConnected
+            && !!gap.element.parentNode
+        );
+    }
+
+    function lyricVisualDomHealthy() {
+        return state.decoratedGeneration === state.generation
+            && state.lineData.length > 0
+            && state.lineData.every(lineRecordHealthy)
+            && instrumentalGapRowsHealthy();
+    }
+
     function decorateExistingLines() {
         if (!state.lyrics || !isLyricsPage()) return false;
         const container = getCurrentLyricsContainer(false);
@@ -4850,6 +7340,12 @@
 
         const lines = Array.from(container.querySelectorAll('.lyricsLine'));
         if (!lines.length) return false;
+
+        if (!lyricsDomReadyForPayload(lines, state.lyrics)) {
+            return false;
+        }
+
+        removeInstrumentalGapRows(container);
 
         const count = Math.min(lines.length, state.lyrics.length);
         state.lineData = [];
@@ -4909,17 +7405,15 @@
             }
         );
 
+        installInstrumentalGapRows(container);
+
         state.decoratedGeneration = state.generation;
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
+        state.lyricAutoFollowLastIndex = -1;
 
         container.classList.add('ak-karaoke-container');
-        container.classList.toggle(
-            'ak-romanized-mode',
-            state.romanizationMode === 'romanized'
-                && state.romanizationAvailable
-        );
         ensureRomanizationToggle();
         ensureTimingControls();
 
@@ -5034,152 +7528,77 @@
 
     function readPerformanceMode() {
         try {
-            const stored =
-                localStorage.getItem(
-                    PERFORMANCE_STORAGE_KEY
-                );
-
-            if (
-                stored === 'auto'
-                || stored === 'desktop'
-                || stored === 'mobile'
-                || stored === 'eco'
-            ) {
+            const stored = localStorage.getItem(PERFORMANCE_STORAGE_KEY);
+            if (stored === 'auto' || stored === 'desktop' || stored === 'mobile') {
                 return stored;
+            }
+            /* v3.2.5 God Mode removes the legacy Eco profile. Migrate it to
+             * automatic device selection instead of retaining a dead mode. */
+            if (stored === 'eco') {
+                localStorage.setItem(PERFORMANCE_STORAGE_KEY, 'auto');
             }
         } catch {
             // Ignore storage failure.
         }
-
         return 'auto';
     }
 
     function detectPerformanceProfile() {
-        if (
-            state.performanceMode
-            && state.performanceMode !== 'auto'
-        ) {
+        if (state.performanceMode && state.performanceMode !== 'auto') {
             return state.performanceMode;
         }
-
-        if (isMobileEnvironment()) {
-            return 'mobile';
-        }
-
-        /* Eco is now explicit only; auto never weakens the visual renderer. */
-        return 'desktop';
+        return isMobileEnvironment() ? 'mobile' : 'desktop';
     }
 
     function applyPerformanceClassToPage(page) {
         if (!page) return;
-
-        for (const name of [
-            'desktop',
-            'mobile',
-            'eco'
-        ]) {
-            page.classList.remove(
-                `ak-perf-${name}`
-            );
+        /* Remove the retired class too so upgrading in-place cannot leave an
+         * Eco stylesheet branch attached to Jellyfin's current lyric page. */
+        for (const name of ['desktop', 'mobile', 'eco']) {
+            page.classList.remove(`ak-perf-${name}`);
         }
-
-        page.classList.add(
-            `ak-perf-${state.performanceProfile}`
-        );
+        page.classList.add(`ak-perf-${state.performanceProfile}`);
     }
 
-    function applyPerformanceProfile(
-        refreshGeometry = true
-    ) {
-        const previous =
-            state.performanceProfile;
+    function applyPerformanceProfile(refreshGeometry = true) {
+        const previous = state.performanceProfile;
+        state.performanceProfile = detectPerformanceProfile();
 
-        state.performanceProfile =
-            detectPerformanceProfile();
-
-        if (
-            previous !== state.performanceProfile
-        ) {
+        if (previous !== state.performanceProfile) {
             state.lastRenderedFrameAt = 0;
-
-            /* Profile-sized atmosphere rasters must be rebuilt after a real
-             * desktop/mobile/eco profile change. */
-            invalidateAtmosphereLoads(
-                'performance-profile-change'
-            );
-            state.atmosphereMediaKey = '';
+            invalidateAtmosphereLoads('performance-profile-change');
             state.atmosphereLastCheck = 0;
+            rebuildDynamicBackgroundRenderer('performance-profile-change');
         }
 
-        const page =
-            isLyricsPage()
-                ? getCurrentLyricPage()
-                : null;
-
+        const page = isLyricsPage() ? getCurrentLyricPage() : null;
         applyPerformanceClassToPage(page);
         applyAccentTheme();
 
-        if (
-            refreshGeometry
-            && previous !== state.performanceProfile
-            && state.lineData.length
-        ) {
+        if (refreshGeometry && previous !== state.performanceProfile && state.lineData.length) {
             queueMotionGeometryRefresh();
         }
     }
 
     function setPerformanceMode(mode) {
-        const normalized =
-            String(mode || '')
-                .trim()
-                .toLowerCase();
-
-        if (
-            normalized !== 'auto'
-            && normalized !== 'desktop'
-            && normalized !== 'mobile'
-            && normalized !== 'eco'
-        ) {
-            throw new Error(
-                'Performance mode must be: '
-                + '"auto", "desktop", "mobile", or "eco".'
-            );
+        const normalized = String(mode || '').trim().toLowerCase();
+        if (normalized !== 'auto' && normalized !== 'desktop' && normalized !== 'mobile') {
+            throw new Error('Performance mode must be: "auto", "desktop", or "mobile".');
         }
-
-        state.performanceMode =
-            normalized;
-
-        try {
-            localStorage.setItem(
-                PERFORMANCE_STORAGE_KEY,
-                normalized
-            );
-        } catch {
-            // Ignore storage failure.
-        }
-
+        state.performanceMode = normalized;
+        try { localStorage.setItem(PERFORMANCE_STORAGE_KEY, normalized); } catch { /* ignore */ }
         applyPerformanceProfile(true);
         wakeAnimationLoop();
-
         return {
             mode: state.performanceMode,
             profile: state.performanceProfile,
-            targetFps:
-                PERFORMANCE_TARGET_FPS[
-                    state.performanceProfile
-                ]
+            targetFps: PERFORMANCE_TARGET_FPS[state.performanceProfile]
         };
     }
 
     function shouldUsePerGlyphMotion(
         glyphCount
     ) {
-        if (
-            state.performanceProfile === 'eco'
-        ) {
-            return false;
-        }
-
         return Number(glyphCount) > 0;
     }
 
@@ -5197,6 +7616,7 @@
 
         if (
             state.timedCueCount === 0
+            && state.activeInstrumentalGapIndex < 0
         ) {
             return 1000 / LRC_TARGET_FPS;
         }
@@ -5236,1792 +7656,1067 @@
     }
 
     function readAtmosphereMode() {
-        try {
-            const stored =
-                localStorage.getItem(
-                    ATMOSPHERE_STORAGE_KEY
-                );
-
-            if (
-                stored === 'off'
-                || stored === 'subtle'
-                || stored === 'balanced'
-                || stored === 'cinematic'
-            ) {
-                return stored;
-            }
-        } catch {
-            // Storage unavailable; use default.
-        }
-
-        return 'balanced';
+        /* God Mode is intentionally single-engine. There is no atmosphere
+         * preference state to migrate, persist, or accidentally revive. */
+        return 'dynamic';
     }
-
 
     function getAtmospherePage() {
         if (!isLyricsPage()) return null;
         return getCurrentLyricPage();
     }
 
-    function ensureAtmosphereRoot() {
-        const page =
-            getAtmospherePage();
+    function removeAtmosphereRoot(source = 'remove-root') {
+        const root = state.atmosphereRoot;
+        const parent = root && root.parentNode;
+        disposeDynamicBackgroundRenderer(source);
+        if (root) removeNodeCompat(root);
+        if (parent && parent.classList) {
+            parent.classList.remove('ak-atmosphere-host');
+        }
+        state.atmosphereRoot = null;
+        document.documentElement.classList.remove('ak-atmosphere-dynamic-mode');
+        document.documentElement.classList.remove('ak-lyricmotion-atmosphere-active');
+    }
 
+    function ensureAtmosphereRoot() {
+        const page = getAtmospherePage();
         if (!page) {
-            state.atmosphereRoot = null;
+            removeAtmosphereRoot('no-page');
             return null;
+        }
+
+        if (state.atmosphereRoot && state.atmosphereRoot.isConnected && state.atmosphereRoot.parentNode === page) {
+            document.documentElement.classList.add('ak-lyricmotion-atmosphere-active');
+            document.documentElement.classList.add('ak-atmosphere-dynamic-mode');
+            startDynamicBackgroundRenderer();
+            return state.atmosphereRoot;
         }
 
         if (
             state.atmosphereRoot
             && state.atmosphereRoot.isConnected
-            && state.atmosphereRoot.parentNode === page
+            && state.atmosphereRoot.parentNode !== page
         ) {
-            return state.atmosphereRoot;
+            const staleParent = state.atmosphereRoot.parentNode;
+            disposeDynamicBackgroundRenderer('stale-page-root');
+            removeNodeCompat(state.atmosphereRoot);
+            if (staleParent && staleParent.classList) {
+                staleParent.classList.remove('ak-atmosphere-host');
+            }
+            state.atmosphereRoot = null;
         }
 
-        const old =
-            directChildByClass(
-                page,
-                'ak-atmosphere'
-            );
-
+        const old = directChildByClass(page, 'ak-atmosphere');
+        if (old && state.atmosphereDynamicCanvas && old.contains && old.contains(state.atmosphereDynamicCanvas)) {
+            disposeDynamicBackgroundRenderer('root-replaced');
+        }
         removeNodeCompat(old);
 
-        const root =
-            document.createElement('div');
-
+        const root = document.createElement('div');
         root.className = 'ak-atmosphere';
         root.setAttribute('aria-hidden', 'true');
-        root.dataset.akMode =
-            state.atmosphereMode;
+        root.dataset.akMode = 'dynamic';
 
-        for (let i = 0; i < 2; i += 1) {
-            const scene =
-                document.createElement('div');
-
-            scene.className =
-                'ak-atmosphere-scene';
-
-            scene.dataset.akScene =
-                String(i);
-
-            const art =
-                document.createElement('div');
-
-            art.className =
-                'ak-atmosphere-art';
-
-            const wash =
-                document.createElement('div');
-
-            wash.className =
-                'ak-atmosphere-wash';
-
-            scene.appendChild(art);
-            scene.appendChild(wash);
-            root.appendChild(scene);
+        for (let index = 0; index < 2; index += 1) {
+            const fallback = document.createElement('div');
+            fallback.className = `ak-atmosphere-dynamic-fallback ak-atmosphere-dynamic-fallback-${index === 0 ? 'a' : 'b'}`;
+            fallback.dataset.akDynamicFallback = String(index);
+            root.appendChild(fallback);
         }
 
-        const vignette =
-            document.createElement('div');
+        const canvas = document.createElement('canvas');
+        canvas.className = 'ak-atmosphere-dynamic-canvas';
+        canvas.setAttribute('aria-hidden', 'true');
+        root.appendChild(canvas);
 
-        vignette.className =
-            'ak-atmosphere-vignette';
+        const shade = document.createElement('div');
+        shade.className = 'ak-atmosphere-dynamic-shade';
+        root.appendChild(shade);
 
-        root.appendChild(vignette);
-
-        page.insertBefore(
-            root,
-            page.firstChild
-        );
-
-        page.classList.add(
-            'ak-atmosphere-host'
-        );
-
-        applyPerformanceClassToPage(
-            page
-        );
-
-
+        page.insertBefore(root, page.firstChild);
+        page.classList.add('ak-atmosphere-host');
+        document.documentElement.classList.add('ak-lyricmotion-atmosphere-active');
+        document.documentElement.classList.add('ak-atmosphere-dynamic-mode');
+        applyPerformanceClassToPage(page);
         state.atmosphereRoot = root;
-
+        startDynamicBackgroundRenderer();
         return root;
     }
 
     function setAtmosphereMode(mode) {
-        const normalized =
-            String(mode || '')
-                .trim()
-                .toLowerCase();
-
-        if (
-            normalized !== 'off'
-            && normalized !== 'subtle'
-            && normalized !== 'balanced'
-            && normalized !== 'cinematic'
-        ) {
-            throw new Error(
-                'Atmosphere mode must be: '
-                + '"off", "subtle", "balanced", or "cinematic".'
-            );
+        const normalized = String(mode || 'dynamic').trim().toLowerCase();
+        if (normalized !== 'dynamic') {
+            throw new Error('This God Mode build contains only the "dynamic" atmosphere.');
         }
-
-        const previousMode =
-            state.atmosphereMode;
-
-        state.atmosphereMode =
-            normalized;
-
-        if (normalized === 'off') {
-            invalidateAtmosphereLoads(
-                'atmosphere-off'
-            );
-        } else if (previousMode === 'off') {
-            state.atmosphereMediaKey = '';
-            state.atmosphereLastCheck = 0;
-        }
-
-        try {
-            localStorage.setItem(
-                ATMOSPHERE_STORAGE_KEY,
-                normalized
-            );
-        } catch {
-            // Ignore storage failure.
-        }
-
-        const root =
-            ensureAtmosphereRoot();
-
-        if (root) {
-            root.dataset.akMode =
-                normalized;
-        }
-
-        /* Apply a mode change promptly even while playback is paused. */
+        state.atmosphereMode = 'dynamic';
+        const root = ensureAtmosphereRoot();
+        if (root) root.dataset.akMode = 'dynamic';
+        state.atmosphereLastCheck = 0;
+        scheduleDynamicBackgroundProbeBurst('mode-confirmed');
         wakeAnimationLoop();
-
-        return {
-            mode: normalized,
-            artwork: state.atmosphereArtwork,
-            source: state.atmosphereSource
-        };
+        return { mode: 'dynamic', artwork: state.atmosphereArtwork, source: state.atmosphereSource };
     }
 
-    function parseRgbString(value) {
-        const parts =
-            String(value || '')
-                .split(',')
-                .map(part => Number(part.trim()))
-                .filter(Number.isFinite);
-
-        if (parts.length < 3) {
-            return [120, 120, 150];
-        }
-
-        return parts
-            .slice(0, 3)
-            .map(value =>
-                Math.max(
-                    0,
-                    Math.min(
-                        255,
-                        Math.round(value)
-                    )
-                )
-            );
-    }
-
-    function rgbToHsl(r, g, b) {
-        r /= 255;
-        g /= 255;
-        b /= 255;
-
-        const max =
-            Math.max(r, g, b);
-
-        const min =
-            Math.min(r, g, b);
-
-        const lightness =
-            (max + min) / 2;
-
-        if (max === min) {
-            return {
-                h: 0,
-                s: 0,
-                l: lightness
-            };
-        }
-
-        const delta =
-            max - min;
-
-        const saturation =
-            lightness > 0.5
-                ? delta / (2 - max - min)
-                : delta / (max + min);
-
-        let hue;
-
-        if (max === r) {
-            hue =
-                (g - b) / delta
-                + (g < b ? 6 : 0);
-        } else if (max === g) {
-            hue =
-                (b - r) / delta + 2;
-        } else {
-            hue =
-                (r - g) / delta + 4;
-        }
-
-        hue *= 60;
-
-        return {
-            h: hue,
-            s: saturation,
-            l: lightness
-        };
-    }
-
-    function normalizeAtmosphereColor(rgb) {
-        let [r, g, b] = rgb;
-
-        const max =
-            Math.max(r, g, b);
-
-        const min =
-            Math.min(r, g, b);
-
-        const brightness =
-            0.2126 * r
-            + 0.7152 * g
-            + 0.0722 * b;
-
-        if (brightness < 78) {
-            const scale =
-                Math.min(
-                    2.05,
-                    98 / Math.max(
-                        brightness,
-                        1
-                    )
-                );
-
-            r *= scale;
-            g *= scale;
-            b *= scale;
-        }
-
-        if (max - min < 18) {
-            /*
-             * Near-gray covers still receive a faint cool separation so the
-             * atmosphere is visible without fabricating a loud color.
-             */
-            b *= 1.08;
-            r *= 0.98;
-        }
-
-        return [r, g, b].map(
-            value =>
-                Math.max(
-                    0,
-                    Math.min(
-                        255,
-                        Math.round(value)
-                    )
-                )
-        );
-    }
-
-    function fallbackAtmosphereColors() {
-        const accent =
-            currentAccent();
-
-        const primary =
-            normalizeAtmosphereColor(
-                parseRgbString(
-                    accent.rgb
-                )
-            );
-
-        const secondary =
-            normalizeAtmosphereColor(
-                parseRgbString(
-                    accent.secondaryRgb
-                    || accent.rgb
-                )
-            );
-
-        return [
-            primary,
-            secondary
-        ];
-    }
-
-    function extractAtmosphereColors(image) {
+    function normalizedMediaSource(media) {
+        const raw = media ? (media.currentSrc || media.src || '') : '';
+        if (!raw) return '';
         try {
-            const canvas =
-                document.createElement('canvas');
-
-            canvas.width =
-                ATMOSPHERE_COLOR_SAMPLE_SIZE;
-
-            canvas.height =
-                ATMOSPHERE_COLOR_SAMPLE_SIZE;
-
-            const context =
-                canvas.getContext(
-                    '2d',
-                    {
-                        willReadFrequently: true
-                    }
-                );
-
-            if (!context) {
-                return null;
-            }
-
-            context.drawImage(
-                image,
-                0,
-                0,
-                canvas.width,
-                canvas.height
-            );
-
-            const data =
-                context.getImageData(
-                    0,
-                    0,
-                    canvas.width,
-                    canvas.height
-                ).data;
-
-            const bins =
-                Array.from(
-                    { length: 12 },
-                    () => ({
-                        weight: 0,
-                        r: 0,
-                        g: 0,
-                        b: 0
-                    })
-                );
-
-            let fallbackWeight = 0;
-            let fallbackR = 0;
-            let fallbackG = 0;
-            let fallbackB = 0;
-
-            for (
-                let i = 0;
-                i < data.length;
-                i += 4
-            ) {
-                const alpha =
-                    data[i + 3] / 255;
-
-                if (alpha < 0.82) continue;
-
-                const r = data[i];
-                const g = data[i + 1];
-                const b = data[i + 2];
-
-                const hsl =
-                    rgbToHsl(r, g, b);
-
-                /*
-                 * Ignore near-black, near-white, and very weak gray pixels for
-                 * dominant color selection. They still contribute to fallback.
-                 */
-                const luminance =
-                    0.2126 * r
-                    + 0.7152 * g
-                    + 0.0722 * b;
-
-                const fallbackPixelWeight =
-                    0.18 + hsl.s * 0.82;
-
-                fallbackWeight +=
-                    fallbackPixelWeight;
-
-                fallbackR +=
-                    r * fallbackPixelWeight;
-
-                fallbackG +=
-                    g * fallbackPixelWeight;
-
-                fallbackB +=
-                    b * fallbackPixelWeight;
-
-                if (
-                    luminance < 28
-                    || luminance > 238
-                    || hsl.s < 0.12
-                ) {
-                    continue;
+            const url = new URL(raw, location.href);
+            const volatile = new Set([
+                'api_key', 'apikey', 'access_token', 'token', 'playsessionid',
+                'deviceid', 'starttimeticks', 'transcodingcontainer', 'audiocodec',
+                'videocodec', 'maxstreamingbitrate', 'userid'
+            ]);
+            for (const [key] of Array.from(url.searchParams.entries())) {
+                if (volatile.has(String(key).toLowerCase())) {
+                    url.searchParams.delete(key);
                 }
-
-                const hueIndex =
-                    Math.floor(
-                        (
-                            (hsl.h % 360 + 360)
-                            % 360
-                        )
-                        / 30
-                    ) % 12;
-
-                const lightnessPreference =
-                    1
-                    - Math.min(
-                        0.72,
-                        Math.abs(
-                            hsl.l - 0.48
-                        )
-                    );
-
-                const weight =
-                    (
-                        0.28
-                        + hsl.s * 1.55
-                    )
-                    * lightnessPreference;
-
-                const bin =
-                    bins[hueIndex];
-
-                bin.weight +=
-                    weight;
-
-                bin.r +=
-                    r * weight;
-
-                bin.g +=
-                    g * weight;
-
-                bin.b +=
-                    b * weight;
             }
-
-            const ranked =
-                bins
-                    .map((bin, index) => ({
-                        ...bin,
-                        index
-                    }))
-                    .filter(
-                        bin =>
-                            bin.weight > 0
-                    )
-                    .sort(
-                        (a, b) =>
-                            b.weight - a.weight
-                    );
-
-            const colorFromBin =
-                bin =>
-                    normalizeAtmosphereColor([
-                        bin.r / bin.weight,
-                        bin.g / bin.weight,
-                        bin.b / bin.weight
-                    ]);
-
-            if (ranked.length) {
-                const first =
-                    ranked[0];
-
-                let second =
-                    ranked.find(bin => {
-                        const distance =
-                            Math.min(
-                                Math.abs(
-                                    bin.index
-                                    - first.index
-                                ),
-                                12
-                                - Math.abs(
-                                    bin.index
-                                    - first.index
-                                )
-                            );
-
-                        return distance >= 2;
-                    });
-
-                if (!second) {
-                    second =
-                        ranked[1]
-                        || first;
-                }
-
-                return [
-                    colorFromBin(first),
-                    colorFromBin(second)
-                ];
-            }
-
-            if (fallbackWeight > 0) {
-                const average =
-                    normalizeAtmosphereColor([
-                        fallbackR / fallbackWeight,
-                        fallbackG / fallbackWeight,
-                        fallbackB / fallbackWeight
-                    ]);
-
-                return [
-                    average,
-                    normalizeAtmosphereColor([
-                        average[2] * 0.72
-                            + average[0] * 0.28,
-                        average[0] * 0.55
-                            + average[1] * 0.45,
-                        average[1] * 0.70
-                            + average[2] * 0.30
-                    ])
-                ];
-            }
+            /* Track identity is normally encoded in /Audio/<id> or /Videos/<id>.
+             * Preserve the path and stable query parameters while removing only
+             * transport/session noise. */
+            const params = Array.from(url.searchParams.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+            url.search = '';
+            for (const [key, value] of params) url.searchParams.append(key, value);
+            return `${url.origin}${url.pathname}${url.search}`;
         } catch {
-            /*
-             * Canvas can be blocked by cross-origin image rules.
-             * Artwork can still be displayed; color falls back safely.
-             */
+            /* Never retain malformed query strings in diagnostics/state because
+             * they may contain API keys or session tokens. */
+            return String(raw).split(/[?#]/, 1)[0];
         }
-
-        return null;
-    }
-
-    function mediaItemArtworkCandidate(media) {
-        try {
-            const src =
-                media.currentSrc
-                || media.src;
-
-            if (!src) return null;
-
-            const mediaUrl =
-                new URL(
-                    src,
-                    location.href
-                );
-
-            const match =
-                mediaUrl.pathname.match(
-                    /\/(?:Audio|Videos)\/([^/?]+)/i
-                );
-
-            if (!match) return null;
-
-            const itemId =
-                decodeURIComponent(
-                    match[1]
-                );
-
-            const prefix =
-                mediaUrl.pathname.slice(
-                    0,
-                    match.index
-                );
-
-            const imageUrl =
-                new URL(
-                    `${prefix}/Items/${encodeURIComponent(itemId)}/Images/Primary`,
-                    mediaUrl.origin
-                );
-
-            imageUrl.searchParams.set(
-                'maxWidth',
-                String(
-                    ATMOSPHERE_ART_MAX_WIDTH
-                )
-            );
-
-            imageUrl.searchParams.set(
-                'quality',
-                '86'
-            );
-
-            for (const key of [
-                'api_key',
-                'apiKey',
-                'access_token',
-                'token'
-            ]) {
-                const value =
-                    mediaUrl.searchParams.get(
-                        key
-                    );
-
-                if (value) {
-                    imageUrl.searchParams.set(
-                        key,
-                        value
-                    );
-                }
-            }
-
-            return imageUrl.href;
-        } catch {
-            return null;
-        }
-    }
-
-    function getBackgroundImageUrl(element) {
-        try {
-            const value =
-                getComputedStyle(
-                    element
-                ).backgroundImage;
-
-            if (
-                !value
-                || value === 'none'
-            ) {
-                return null;
-            }
-
-            const match =
-                value.match(
-                    /url\(["']?(.*?)["']?\)/i
-                );
-
-            return match
-                ? match[1]
-                : null;
-        } catch {
-            return null;
-        }
-    }
-
-    function domArtworkCandidates() {
-        const candidates = [];
-        const seen = new Set();
-
-        const add =
-            (url, score) => {
-                if (
-                    !url
-                    || seen.has(url)
-                ) {
-                    return;
-                }
-
-                if (
-                    !/\/Items\/|\/Images\//i.test(
-                        url
-                    )
-                ) {
-                    return;
-                }
-
-                seen.add(url);
-                candidates.push({
-                    url,
-                    score
-                });
-            };
-
-        const images =
-            document.querySelectorAll(
-                [
-                    '.nowPlayingBar img',
-                    '.nowPlayingPage img',
-                    '.nowPlayingInfoContainer img',
-                    '.detailImageContainer img',
-                    'img[src*="/Items/"]',
-                    'img[src*="/Images/"]'
-                ].join(',')
-            );
-
-        images.forEach(image => {
-            const rect =
-                image.getBoundingClientRect();
-
-            const area =
-                Math.max(
-                    1,
-                    rect.width * rect.height
-                );
-
-            const classText =
-                String(
-                    image.className || ''
-                ).toLowerCase();
-
-            let score =
-                Math.min(
-                    500000,
-                    area
-                );
-
-            if (
-                classText.includes('nowplaying')
-                || classText.includes('now-playing')
-            ) {
-                score += 1000000;
-            }
-
-            if (
-                /\/Images\/Primary/i.test(
-                    image.currentSrc
-                    || image.src
-                    || ''
-                )
-            ) {
-                score += 300000;
-            }
-
-            add(
-                image.currentSrc
-                || image.src,
-                score
-            );
-        });
-
-        const backgroundNodes =
-            document.querySelectorAll(
-                [
-                    '.nowPlayingBar [style]',
-                    '.nowPlayingPage [style]',
-                    '.nowPlayingInfoContainer [style]',
-                    '.detailImageContainer [style]'
-                ].join(',')
-            );
-
-        backgroundNodes.forEach(node => {
-            const url =
-                getBackgroundImageUrl(
-                    node
-                );
-
-            const rect =
-                node.getBoundingClientRect();
-
-            add(
-                url,
-                500000
-                    + Math.min(
-                        500000,
-                        Math.max(
-                            1,
-                            rect.width
-                                * rect.height
-                        )
-                    )
-            );
-        });
-
-        return candidates
-            .sort(
-                (a, b) =>
-                    b.score - a.score
-            )
-            .map(
-                candidate =>
-                    candidate.url
-            );
     }
 
     function atmosphereMediaKey(media) {
-        const src =
-            media
-                ? (
-                    media.currentSrc
-                    || media.src
-                    || ''
-                )
-                : '';
-
-        let lyricKey = '';
-
-        if (state.lyrics && state.lyrics.length) {
-            const first =
-                state.lyrics[0];
-
-            const last =
-                state.lyrics[
-                    state.lyrics.length - 1
-                ];
-
-            lyricKey =
-                `${lyricValue(first, 'Start', 'start') || 0}:`
-                + `${lyricValue(first, 'Text', 'text') || ''}:`
-                + `${lyricValue(last, 'Start', 'start') || 0}`;
-        }
-
-        return `${src}|${lyricKey}`;
+        return normalizedMediaSource(media);
     }
 
-    function invalidateAtmosphereLoads(
-        source = 'invalidate'
-    ) {
+    function invalidateAtmosphereLoads(source = 'invalidate') {
         state.atmosphereLoadSeq += 1;
         state.atmospherePendingKey = '';
         state.atmospherePendingSince = 0;
         return source;
     }
 
-    function preloadAtmosphereImage(url) {
-        return new Promise(
-            (resolve, reject) => {
-                const image =
-                    new Image();
+    function clearDynamicProbeTimers() {
+        for (const timer of state.atmosphereDynamicProbeTimers || []) clearTimeout(timer);
+        state.atmosphereDynamicProbeTimers = [];
+    }
 
-                let settled = false;
+    function scheduleDynamicBackgroundProbeBurst(source = 'probe') {
+        const token = ++state.atmosphereDynamicProbeToken;
+        clearDynamicProbeTimers();
+        const delays = [0, 90, 220, 450, 800, 1250];
+        state.atmosphereDynamicProbeTimers = delays.map(delay => window.setTimeout(() => {
+            if (token !== state.atmosphereDynamicProbeToken || !isLyricsPage()) return;
+            const media = getLocalMediaElement(true);
+            if (!media) return;
+            refreshAtmosphere(media, false).catch(error => warn('Dynamic Background probe failed:', error));
+        }, delay));
+        return source;
+    }
 
-                const finish = (
-                    callback,
-                    value
-                ) => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timeoutId);
-                    image.onload = null;
-                    image.onerror = null;
-                    callback(value);
-                };
-
-                const timeoutId =
-                    window.setTimeout(() => {
-                        state.atmosphereTimeoutCount += 1;
-                        finish(
-                            reject,
-                            new Error(
-                                'Artwork image load timed out.'
-                            )
-                        );
-                    }, ATMOSPHERE_IMAGE_TIMEOUT_MS);
-
-                image.decoding =
-                    'async';
-
-                image.onload =
-                    () => finish(resolve, image);
-
-                image.onerror =
-                    () => finish(
-                        reject,
-                        new Error(
-                            'Artwork image failed to load.'
-                        )
-                    );
-
-                image.src = url;
+    function mediaItemArtworkCandidate(media) {
+        try {
+            const src = media && (media.currentSrc || media.src);
+            if (!src) return null;
+            const mediaUrl = new URL(src, location.href);
+            const match = mediaUrl.pathname.match(/\/(?:Audio|Videos)\/([^/?]+)/i);
+            if (!match) return null;
+            const itemId = decodeURIComponent(match[1]);
+            const prefix = mediaUrl.pathname.slice(0, match.index);
+            const imageUrl = new URL(`${prefix}/Items/${encodeURIComponent(itemId)}/Images/Primary`, mediaUrl.origin);
+            imageUrl.searchParams.set('maxWidth', String(ATMOSPHERE_ART_MAX_WIDTH));
+            imageUrl.searchParams.set('quality', '88');
+            const authKeys = new Set(['api_key', 'apikey', 'access_token', 'token']);
+            for (const [key, value] of mediaUrl.searchParams.entries()) {
+                if (value && authKeys.has(String(key).toLowerCase())) {
+                    imageUrl.searchParams.set(key, value);
+                }
             }
+            return imageUrl.href;
+        } catch {
+            return null;
+        }
+    }
+
+    function mediaItemId(media) {
+        try {
+            const src = media && (media.currentSrc || media.src);
+            if (!src) return '';
+            const url = new URL(src, location.href);
+            const match = url.pathname.match(/\/(?:Audio|Videos)\/([^/?]+)/i);
+            return match ? decodeURIComponent(match[1]).toLowerCase() : '';
+        } catch {
+            return '';
+        }
+    }
+
+    function currentLyricsItemId() {
+        const key = String(
+            state.lyricsAcceptedKey
+            || state.lyricsRequestKey
+            || ''
+        );
+        const pathMatch = key.match(
+            /\/(?:audio|videos|items)\/([^/?]+)\/lyrics(?:[/?]|$)/i
+        );
+        if (pathMatch) return decodeURIComponent(pathMatch[1]).toLowerCase();
+        const queryMatch = key.match(/[?&]itemid=([^&]+)/i);
+        return queryMatch ? decodeURIComponent(queryMatch[1]).toLowerCase() : '';
+    }
+
+    function artworkItemId(url) {
+        try {
+            const parsed = new URL(url, location.href);
+            const match = parsed.pathname.match(/\/Items\/([^/?]+)\/Images\//i);
+            return match ? decodeURIComponent(match[1]).toLowerCase() : '';
+        } catch {
+            return '';
+        }
+    }
+
+    function nodeBindsToItem(node, itemId) {
+        if (!node || !itemId) return false;
+        let current = node;
+        for (let depth = 0; current && depth < 10; depth += 1) {
+            const dataset = current.dataset || {};
+            const candidates = [
+                dataset.itemId,
+                dataset.itemid,
+                dataset.id,
+                typeof current.getAttribute === 'function'
+                    ? current.getAttribute('data-item-id')
+                    : null,
+                typeof current.getAttribute === 'function'
+                    ? current.getAttribute('data-itemid')
+                    : null,
+                typeof current.getAttribute === 'function'
+                    ? current.getAttribute('data-id')
+                    : null
+            ];
+            if (candidates.some(value =>
+                String(value || '').toLowerCase() === String(itemId).toLowerCase()
+            )) {
+                return true;
+            }
+            current = current.parentNode;
+        }
+        return false;
+    }
+
+    function getBackgroundImageUrl(element) {
+        try {
+            const value = getComputedStyle(element).backgroundImage;
+            if (!value || value === 'none') return null;
+            const match = value.match(/url\(["']?(.*?)["']?\)/i);
+            return match ? match[1] : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function domArtworkCandidates(media = null) {
+        const candidates = [];
+        const seen = new Set();
+        const itemId = mediaItemId(media);
+        const add = (url, score, node = null) => {
+            if (!url || seen.has(url) || !/\/Items\/|\/Images\//i.test(url)) return;
+            seen.add(url);
+            const urlItemId = artworkItemId(url);
+            const nodeBound = !!(itemId && nodeBindsToItem(node, itemId));
+            const playbackContext = !!(
+                node
+                && typeof node.closest === 'function'
+                && node.closest(
+                    '.nowPlayingBar,.nowPlayingPage,.nowPlayingInfoContainer'
+                )
+            );
+            const boundToCurrentItem = !!(
+                itemId
+                && (urlItemId === itemId || nodeBound)
+            );
+
+            /* Music commonly inherits Primary artwork from its Album item.
+             * A URL item-id mismatch is therefore not enough to call the cover
+             * stale when Jellyfin is presenting it inside the live now-playing
+             * UI. Rapid-skip safety is still provided by the key-switch DOM
+             * baseline and the unbound-candidate stability confirmation. */
+            candidates.push({
+                url,
+                score,
+                node,
+                urlItemId,
+                nodeBound,
+                playbackContext,
+                boundToCurrentItem,
+                inheritedArtworkCandidate: !!(
+                    itemId
+                    && urlItemId
+                    && urlItemId !== itemId
+                    && (nodeBound || playbackContext)
+                ),
+                conflictsCurrentItem: !!(
+                    itemId
+                    && urlItemId
+                    && urlItemId !== itemId
+                    && !nodeBound
+                    && !playbackContext
+                )
+            });
+        };
+        const selector = [
+            '.nowPlayingBar img', '.nowPlayingPage img', '.nowPlayingInfoContainer img',
+            '.detailImageContainer img', 'img[src*="/Items/"]', 'img[src*="/Images/"]'
+        ].join(',');
+        Array.from(document.querySelectorAll(selector)).forEach(image => {
+            const rect = image.getBoundingClientRect ? image.getBoundingClientRect() : { width: 1, height: 1 };
+            const area = Math.max(1, rect.width * rect.height);
+            const classText = String(image.className || '').toLowerCase();
+            let score = Math.min(500000, area);
+            if (classText.includes('nowplaying') || classText.includes('now-playing')) score += 1000000;
+            const url = image.currentSrc || image.src || '';
+            if (/\/Images\/Primary/i.test(url)) score += 300000;
+            add(url, score, image);
+        });
+        const bgSelector = [
+            '.nowPlayingBar [style]', '.nowPlayingPage [style]',
+            '.nowPlayingInfoContainer [style]', '.detailImageContainer [style]'
+        ].join(',');
+        Array.from(document.querySelectorAll(bgSelector)).forEach(node => {
+            const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : { width: 1, height: 1 };
+            add(
+                getBackgroundImageUrl(node),
+                500000 + Math.min(500000, Math.max(1, rect.width * rect.height)),
+                node
+            );
+        });
+        return candidates.sort((a, b) => b.score - a.score);
+    }
+
+    function dynamicDomArtworkCandidateAllowed(candidate, baseline = null) {
+        if (!candidate || !candidate.url || candidate.conflictsCurrentItem) {
+            return false;
+        }
+        if (candidate.boundToCurrentItem) return true;
+        return !(baseline && baseline.has(candidate.url));
+    }
+
+    function dynamicDomArtworkSignalsPresence(candidate) {
+        return !!(
+            candidate
+            && candidate.url
+            && !candidate.conflictsCurrentItem
+            && (
+                candidate.boundToCurrentItem
+                || candidate.playbackContext
+                || candidate.inheritedArtworkCandidate
+            )
         );
     }
 
-    function atmosphereRasterDimensions() {
-        const profile =
-            state.performanceProfile;
-
-        const longEdge =
-            ATMOSPHERE_RASTER_LONG_EDGE[
-                profile
-            ]
-            || 220;
-
-        const viewportWidth =
-            Math.max(
-                1,
-                window.innerWidth
-                || document.documentElement.clientWidth
-                || 16
-            );
-
-        const viewportHeight =
-            Math.max(
-                1,
-                window.innerHeight
-                || document.documentElement.clientHeight
-                || 9
-            );
-
-        const aspect =
-            Math.max(
-                0.58,
-                Math.min(
-                    2.40,
-                    viewportWidth
-                    / viewportHeight
-                )
-            );
-
-        let width;
-        let height;
-
-        if (aspect >= 1) {
-            width =
-                longEdge;
-
-            height =
-                Math.max(
-                    84,
-                    Math.round(
-                        longEdge
-                        / aspect
-                    )
-                );
-        } else {
-            height =
-                longEdge;
-
-            width =
-                Math.max(
-                    84,
-                    Math.round(
-                        longEdge
-                        * aspect
-                    )
-                );
+    function dynamicDomArtworkTiming(candidate) {
+        if (!candidate || !candidate.url) {
+            return {
+                mediaStableMs: DYNAMIC_BACKGROUND_DOM_STABLE_MS,
+                confirmMs: DYNAMIC_BACKGROUND_UNBOUND_DOM_CONFIRM_MS,
+                inheritedFastPath: false
+            };
         }
-
+        if (candidate.boundToCurrentItem) {
+            return {
+                mediaStableMs: 0,
+                confirmMs: 0,
+                inheritedFastPath: false
+            };
+        }
+        if (
+            candidate.inheritedArtworkCandidate
+            && candidate.playbackContext
+            && !candidate.conflictsCurrentItem
+        ) {
+            return {
+                mediaStableMs: DYNAMIC_BACKGROUND_INHERITED_DOM_STABLE_MS,
+                confirmMs: DYNAMIC_BACKGROUND_INHERITED_DOM_CONFIRM_MS,
+                inheritedFastPath: true
+            };
+        }
         return {
-            width,
-            height
+            mediaStableMs: DYNAMIC_BACKGROUND_DOM_STABLE_MS,
+            confirmMs: DYNAMIC_BACKGROUND_UNBOUND_DOM_CONFIRM_MS,
+            inheritedFastPath: false
         };
     }
 
-    function drawImageCover(
-        context,
-        image,
-        width,
-        height
-    ) {
-        const sourceWidth =
-            image.naturalWidth
-            || image.width
-            || width;
 
-        const sourceHeight =
-            image.naturalHeight
-            || image.height
-            || height;
-
-        if (
-            !sourceWidth
-            || !sourceHeight
-        ) {
-            return false;
-        }
-
-        const sourceAspect =
-            sourceWidth
-            / sourceHeight;
-
-        const targetAspect =
-            width
-            / height;
-
-        let sx = 0;
-        let sy = 0;
-        let sw = sourceWidth;
-        let sh = sourceHeight;
-
-        if (sourceAspect > targetAspect) {
-            sw =
-                sourceHeight
-                * targetAspect;
-
-            sx =
-                (sourceWidth - sw)
-                / 2;
-        } else if (
-            sourceAspect < targetAspect
-        ) {
-            sh =
-                sourceWidth
-                / targetAspect;
-
-            sy =
-                (sourceHeight - sh)
-                / 2;
-        }
-
-        context.drawImage(
-            image,
-            sx,
-            sy,
-            sw,
-            sh,
-            0,
-            0,
-            width,
-            height
-        );
-
-        return true;
-    }
-
-    function makeFallbackSoftRaster(
-        sourceCanvas,
-        width,
-        height
-    ) {
-        /*
-         * Older browsers may not support CanvasRenderingContext2D
-         * filters. Multi-stage downsample/upscale creates a smooth light field
-         * ONCE per song without leaving a live CSS blur on the GPU.
-         */
-        const tiny =
-            document.createElement(
-                'canvas'
-            );
-
-        const tinyLong =
-            state.performanceProfile === 'eco'
-                ? 28
-                : 38;
-
-        if (width >= height) {
-            tiny.width =
-                tinyLong;
-
-            tiny.height =
-                Math.max(
-                    12,
-                    Math.round(
-                        tinyLong
-                        * height
-                        / width
-                    )
-                );
-        } else {
-            tiny.height =
-                tinyLong;
-
-            tiny.width =
-                Math.max(
-                    12,
-                    Math.round(
-                        tinyLong
-                        * width
-                        / height
-                    )
-                );
-        }
-
-        const tinyContext =
-            tiny.getContext('2d');
-
-        if (!tinyContext) {
+    function loadedDomArtworkImage(candidate) {
+        const node = candidate && candidate.node;
+        if (!node || String(node.tagName || '').toUpperCase() !== 'IMG') {
             return null;
         }
-
-        tinyContext.imageSmoothingEnabled =
-            true;
-
-        tinyContext.drawImage(
-            sourceCanvas,
-            0,
-            0,
-            tiny.width,
-            tiny.height
-        );
-
-        const middle =
-            document.createElement(
-                'canvas'
-            );
-
-        middle.width =
-            Math.max(
-                tiny.width * 3,
-                Math.round(
-                    width * 0.42
-                )
-            );
-
-        middle.height =
-            Math.max(
-                tiny.height * 3,
-                Math.round(
-                    height * 0.42
-                )
-            );
-
-        const middleContext =
-            middle.getContext('2d');
-
-        if (!middleContext) {
-            return null;
-        }
-
-        middleContext.imageSmoothingEnabled =
-            true;
-
+        const naturalWidth = Number(node.naturalWidth);
+        const naturalHeight = Number(node.naturalHeight);
         if (
-            'imageSmoothingQuality'
-            in middleContext
+            node.complete === true
+            && naturalWidth > 0
+            && naturalHeight > 0
         ) {
-            middleContext.imageSmoothingQuality =
-                'high';
+            return node;
         }
-
-        middleContext.drawImage(
-            tiny,
-            0,
-            0,
-            middle.width,
-            middle.height
-        );
-
-        return middle;
+        return null;
     }
 
-    function createAtmosphereRaster(image) {
+    function dynamicArtworkFingerprintFromPixels(data, width, height) {
+        const w = Math.max(1, Math.floor(Number(width) || 0));
+        const h = Math.max(1, Math.floor(Number(height) || 0));
+        if (!data || data.length < w * h * 4) return null;
+        const rgb = new Uint8Array(w * h * 3);
+        const luma = new Float32Array(w * h);
+        const edges = [];
+        let rgbIndex = 0;
+        let meanR = 0, meanG = 0, meanB = 0;
+        let hash = 2166136261;
+        for (let index = 0; index < w * h; index += 1) {
+            const source = index * 4;
+            const alpha = Math.max(0, Math.min(255, Number(data[source + 3]) || 0)) / 255;
+            const r = Math.round((Number(data[source]) || 0) * alpha);
+            const g = Math.round((Number(data[source + 1]) || 0) * alpha);
+            const b = Math.round((Number(data[source + 2]) || 0) * alpha);
+            rgb[rgbIndex++] = r; rgb[rgbIndex++] = g; rgb[rgbIndex++] = b;
+            meanR += r; meanG += g; meanB += b;
+            luma[index] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            for (const value of [r >> 3, g >> 3, b >> 3]) {
+                hash ^= value; hash = Math.imul(hash, 16777619);
+            }
+        }
+        for (let y = 0; y < h; y += 1) {
+            for (let x = 0; x < w; x += 1) {
+                const index = y * w + x;
+                if (x + 1 < w) edges.push(luma[index + 1] - luma[index]);
+                if (y + 1 < h) edges.push(luma[index + w] - luma[index]);
+            }
+        }
+        const count = w * h;
+        return {
+            width: w,
+            height: h,
+            hash: (hash >>> 0).toString(16).padStart(8, '0'),
+            rgb,
+            edges: Float32Array.from(edges),
+            mean: [meanR / count, meanG / count, meanB / count]
+        };
+    }
+
+    function dynamicArtworkFingerprint(image) {
+        if (!image) return null;
         try {
-            const dimensions =
-                atmosphereRasterDimensions();
-
-            const width =
-                dimensions.width;
-
-            const height =
-                dimensions.height;
-
-            const sourceCanvas =
-                document.createElement(
-                    'canvas'
-                );
-
-            sourceCanvas.width =
-                width;
-
-            sourceCanvas.height =
-                height;
-
-            const sourceContext =
-                sourceCanvas.getContext(
-                    '2d'
-                );
-
-            if (!sourceContext) {
-                return null;
-            }
-
-            sourceContext.imageSmoothingEnabled =
-                true;
-
-            if (
-                'imageSmoothingQuality'
-                in sourceContext
-            ) {
-                sourceContext.imageSmoothingQuality =
-                    'high';
-            }
-
-            if (
-                !drawImageCover(
-                    sourceContext,
-                    image,
-                    width,
-                    height
-                )
-            ) {
-                return null;
-            }
-
-            const canvas =
-                document.createElement(
-                    'canvas'
-                );
-
-            canvas.width =
-                width;
-
-            canvas.height =
-                height;
-
-            const context =
-                canvas.getContext(
-                    '2d'
-                );
-
-            if (!context) {
-                return null;
-            }
-
-            context.imageSmoothingEnabled =
-                true;
-
-            if (
-                'imageSmoothingQuality'
-                in context
-            ) {
-                context.imageSmoothingQuality =
-                    'high';
-            }
-
-            const blurPx =
-                ATMOSPHERE_RASTER_BLUR_PX[
-                    state.performanceProfile
-                ]
-                || 18;
-
-            let method =
-                'multistage-soften';
-
-            /*
-             * Browsers that implement canvas filters get a true
-             * one-time prebaked blur. The draw is oversized so blur kernels do
-             * not expose transparent/dark edges.
-             */
-            if ('filter' in context) {
-                try {
-                    context.save();
-
-                    context.filter =
-                        `blur(${blurPx}px) `
-                        + 'saturate(1.24) '
-                        + 'brightness(0.62)';
-
-                    const overscan =
-                        Math.ceil(
-                            blurPx * 1.45
-                        );
-
-                    context.drawImage(
-                        sourceCanvas,
-                        -overscan,
-                        -overscan,
-                        width
-                            + overscan * 2,
-                        height
-                            + overscan * 2
-                    );
-
-                    context.restore();
-
-                    method =
-                        'canvas-prebaked-blur';
-                } catch {
-                    context.clearRect(
-                        0,
-                        0,
-                        width,
-                        height
-                    );
-                }
-            }
-
-            if (
-                method
-                !== 'canvas-prebaked-blur'
-            ) {
-                context.clearRect(
-                    0,
-                    0,
-                    width,
-                    height
-                );
-
-                const softened =
-                    makeFallbackSoftRaster(
-                        sourceCanvas,
-                        width,
-                        height
-                    );
-
-                if (!softened) {
-                    return null;
-                }
-
-                context.globalAlpha =
-                    0.80;
-
-                context.drawImage(
-                    softened,
-                    0,
-                    0,
-                    width,
-                    height
-                );
-
-                context.globalAlpha =
-                    1;
-            }
-
-            /*
-             * Very light baked darkening prevents a bright cover from flashing
-             * before the CSS vignette/crossfade fully settles.
-             */
-            context.fillStyle =
-                'rgba(3, 3, 7, 0.12)';
-
-            context.fillRect(
-                0,
-                0,
-                width,
-                height
-            );
-
-            const url =
-                canvas.toDataURL(
-                    'image/jpeg',
-                    state.performanceProfile
-                        === 'desktop'
-                        ? 0.82
-                        : 0.76
-                );
-
-            state.atmosphereRasterMethod =
-                method;
-
-            state.atmosphereRasterWidth =
-                width;
-
-            state.atmosphereRasterHeight =
-                height;
-
-            state.atmosphereRasterBlurPx =
-                blurPx;
-
-            return url;
+            const size = 24;
+            const canvas = document.createElement('canvas');
+            canvas.width = size; canvas.height = size;
+            const context = canvas.getContext && canvas.getContext('2d', { willReadFrequently: true });
+            if (!context) return null;
+            const iw = Number(image.naturalWidth || image.videoWidth || image.width || size);
+            const ih = Number(image.naturalHeight || image.videoHeight || image.height || size);
+            const scale = Math.max(size / Math.max(1, iw), size / Math.max(1, ih));
+            const dw = iw * scale, dh = ih * scale;
+            context.clearRect(0, 0, size, size);
+            context.drawImage(image, (size - dw) * 0.5, (size - dh) * 0.5, dw, dh);
+            const pixels = context.getImageData(0, 0, size, size);
+            return dynamicArtworkFingerprintFromPixels(pixels.data, size, size);
         } catch {
-            state.atmosphereRasterMethod =
-                'failed';
-
-            state.atmosphereRasterWidth =
-                0;
-
-            state.atmosphereRasterHeight =
-                0;
-
-            state.atmosphereRasterBlurPx =
-                0;
-
+            state.atmosphereDynamicFingerprintFailures += 1;
             return null;
         }
     }
 
-    function cssRgb(rgb) {
-        return rgb
-            .map(
-                value =>
-                    Math.round(value)
-            )
-            .join(', ');
+    function dynamicArtworkFingerprintsEquivalent(first, second) {
+        if (!first || !second || first.width !== second.width || first.height !== second.height) return false;
+        if (first.hash && second.hash && first.hash === second.hash) return true;
+        if (!first.rgb || !second.rgb || first.rgb.length !== second.rgb.length) return false;
+        if (!first.edges || !second.edges || first.edges.length !== second.edges.length) return false;
+        let colorDifference = 0;
+        for (let index = 0; index < first.rgb.length; index += 1) colorDifference += Math.abs(first.rgb[index] - second.rgb[index]);
+        const colorMad = colorDifference / first.rgb.length;
+        let meanDifference = 0;
+        for (let index = 0; index < 3; index += 1) meanDifference += Math.abs(first.mean[index] - second.mean[index]);
+        meanDifference /= 3;
+        let edgeDifference = 0;
+        for (let index = 0; index < first.edges.length; index += 1) edgeDifference += Math.abs(first.edges[index] - second.edges[index]);
+        const edgeMad = edgeDifference / Math.max(1, first.edges.length);
+        return colorMad <= 4.5 && meanDifference <= 4.0 && edgeMad <= 8.0;
     }
 
-    function mixAtmosphereRgb(
-        first,
-        second,
-        amount
-    ) {
-        return first.map(
-            (value, index) =>
-                Math.round(
-                    value
-                    + (
-                        second[index]
-                        - value
-                    )
-                    * amount
-                )
-        );
-    }
-
-    function atmosphereWashBackground(colors) {
-        const first =
-            colors[0];
-
-        const second =
-            colors[1];
-
-        const middle =
-            normalizeAtmosphereColor(
-                mixAtmosphereRgb(
-                    first,
-                    second,
-                    0.52
-                )
-            );
-
-        const primary =
-            cssRgb(first);
-
-        const secondary =
-            cssRgb(second);
-
-        const tertiary =
-            cssRgb(middle);
-
-        /*
-         * Large overlapping fields, not small "website gradient blobs".
-         * The cover texture supplies structure; these fields only reinforce
-         * its palette and depth.
-         */
-        return [
-            `radial-gradient(ellipse 78% 72% at 16% 24%, rgba(${primary}, 0.44) 0%, rgba(${primary}, 0.18) 38%, transparent 76%)`,
-            `radial-gradient(ellipse 82% 76% at 86% 74%, rgba(${secondary}, 0.40) 0%, rgba(${secondary}, 0.15) 40%, transparent 78%)`,
-            `radial-gradient(ellipse 58% 44% at 54% 6%, rgba(${tertiary}, 0.19) 0%, transparent 74%)`,
-            `linear-gradient(154deg, rgba(${primary}, 0.08) 0%, transparent 42%, rgba(${secondary}, 0.07) 100%)`
-        ].join(', ');
-    }
-
-    function activateAtmosphereScene(
-        artworkUrl,
-        colors,
-        source,
-        originalArtworkUrl = artworkUrl
-    ) {
-        const root =
-            ensureAtmosphereRoot();
-
-        if (!root) return;
-
-        root.dataset.akMode =
-            state.atmosphereMode;
-
-        const nextIndex =
-            state.atmosphereSceneIndex === 0
-                ? 1
-                : 0;
-
-        const nextScene =
-            root.querySelector(
-                `[data-ak-scene="${nextIndex}"]`
-            );
-
-        const oldScene =
-            root.querySelector(
-                `[data-ak-scene="${state.atmosphereSceneIndex}"]`
-            );
-
-        if (!nextScene) return;
-
-        const art =
-            nextScene.querySelector(
-                '.ak-atmosphere-art'
-            );
-
-        const wash =
-            nextScene.querySelector(
-                '.ak-atmosphere-wash'
-            );
-
-        if (art) {
-            art.style.backgroundImage =
-                artworkUrl
-                    ? `url(${JSON.stringify(artworkUrl)})`
-                    : 'none';
-        }
-
-        if (wash) {
-            wash.style.backgroundImage =
-                atmosphereWashBackground(
-                    colors
-                );
-        }
-
-        /*
-         * Let the browser commit the new image/gradient before starting the
-         * crossfade. This avoids the "new song background pops in" problem.
-         */
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                if (
-                    !isLyricsPage()
-                    || !root.isConnected
-                    || state.atmosphereRoot !== root
-                ) {
-                    return;
-                }
-
-                nextScene.classList.add(
-                    'ak-atmosphere-active'
-                );
-
-                if (oldScene) {
-                    oldScene.classList.remove(
-                        'ak-atmosphere-active'
-                    );
-
-                    window.setTimeout(() => {
-                        if (
-                            oldScene
-                            && !oldScene.classList.contains(
-                                'ak-atmosphere-active'
-                            )
-                        ) {
-                            const oldArt =
-                                oldScene.querySelector(
-                                    '.ak-atmosphere-art'
-                                );
-
-                            const oldWash =
-                                oldScene.querySelector(
-                                    '.ak-atmosphere-wash'
-                                );
-
-                            if (oldArt) {
-                                oldArt.style.backgroundImage =
-                                    'none';
-                            }
-
-                            if (oldWash) {
-                                oldWash.style.backgroundImage =
-                                    'none';
-                            }
-                        }
-                    }, ATMOSPHERE_CROSSFADE_MS + 250);
-                }
-            });
+    function preloadAtmosphereImage(url, timeoutMs = ATMOSPHERE_IMAGE_TIMEOUT_MS) {
+        return new Promise((resolve, reject) => {
+            const image = new Image();
+            let settled = false;
+            const finish = (callback, value) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                image.onload = null;
+                image.onerror = null;
+                callback(value);
+            };
+            const timeoutId = window.setTimeout(() => {
+                state.atmosphereTimeoutCount += 1;
+                finish(reject, new Error('Artwork image load timed out.'));
+            }, Math.max(1, Number(timeoutMs) || ATMOSPHERE_IMAGE_TIMEOUT_MS));
+            image.decoding = 'async';
+            image.onload = () => finish(resolve, image);
+            image.onerror = () => finish(reject, new Error('Artwork image load failed.'));
+            image.src = url;
+            if (image.complete && image.naturalWidth > 0) finish(resolve, image);
         });
-
-        state.atmosphereSceneIndex =
-            nextIndex;
-
-        state.atmosphereArtwork =
-            originalArtworkUrl || '';
-
-        state.atmosphereSource =
-            source || 'unknown';
-
-        state.atmosphereColors =
-            colors;
-
-        root.classList.add(
-            'ak-atmosphere-ready'
-        );
     }
 
-    async function refreshAtmosphere(
-        media,
-        force = false
-    ) {
-        if (
-            state.atmosphereMode === 'off'
-        ) {
-            const root =
-                ensureAtmosphereRoot();
-
-            if (root) {
-                root.dataset.akMode = 'off';
-            }
-
-            return;
-        }
+    function updateAtmospherePlaybackState(media) {
+        const renderer = state.atmosphereDynamicRenderer;
+        if (!renderer) return;
 
         if (
             !media
-            || !isLyricsPage()
+            || media.paused
+            || media.ended
+            || document.hidden
+            || prefersReducedMotion()
         ) {
+            renderer.stop();
             return;
         }
 
-        const key =
-            atmosphereMediaKey(media);
+        renderer.start();
+    }
 
+    function dynamicBackgroundRendererOptions() {
+        const mobile = state.performanceProfile === 'mobile';
+        return {
+            ...DYNAMIC_BACKGROUND_SETTINGS,
+            renderScale: mobile ? 0.80 : 0.96,
+            maxRenderLongEdge: mobile ? 1600 : 2560,
+            onContextLost: () => {
+                state.atmosphereDynamicContextLossCount += 1;
+                state.atmosphereDynamicFallbackReason = 'webgl-context-lost';
+                const root = state.atmosphereRoot;
+                if (root) root.classList.add('ak-dynamic-fallback-active');
+            },
+            onContextRestored: () => {
+                state.atmosphereDynamicFallbackReason = 'webgl-context-restored-rebuild';
+                rebuildDynamicBackgroundRenderer('context-restored');
+            },
+            onTransitionInterrupted: count => { state.atmosphereDynamicInterruptedTransitions = count; },
+            onTransitionComplete: count => { state.atmosphereDynamicTransitionCount = count; }
+        };
+    }
+
+    function ensureDynamicBackgroundRenderer() {
+        const root = state.atmosphereRoot && state.atmosphereRoot.isConnected ? state.atmosphereRoot : ensureAtmosphereRoot();
+        if (!root) return null;
+        const canvas = directChildByClass(root, 'ak-atmosphere-dynamic-canvas');
+        if (!canvas) return null;
+        if (state.atmosphereDynamicRenderer && state.atmosphereDynamicCanvas === canvas) return state.atmosphereDynamicRenderer;
+
+        const now = performance.now();
+        const previousCanvas = state.atmosphereDynamicCanvas;
+        if (previousCanvas && previousCanvas !== canvas) {
+            state.atmosphereDynamicWebglFailureCount = 0;
+            state.atmosphereDynamicWebglRetryAt = 0;
+        } else if (
+            previousCanvas === canvas
+            && state.atmosphereDynamicWebglAvailable === false
+            && now < state.atmosphereDynamicWebglRetryAt
+        ) {
+            return null;
+        }
+
+        disposeDynamicBackgroundRenderer('renderer-recreate');
+        state.atmosphereDynamicCanvas = canvas;
+        try {
+            const renderer = new DynamicBackgroundRenderer(canvas, dynamicBackgroundRendererOptions());
+            state.atmosphereDynamicRenderer = renderer;
+            state.atmosphereDynamicWebglAvailable = true;
+            state.atmosphereDynamicWebglFailureCount = 0;
+            state.atmosphereDynamicWebglRetryAt = 0;
+            state.atmosphereDynamicFallbackReason = '';
+            root.classList.add('ak-dynamic-webgl-ready');
+            root.classList.remove('ak-dynamic-fallback-active');
+            renderer.resizeToDisplaySize();
+            state.atmosphereDynamicResizeCount += 1;
+            return renderer;
+        } catch (error) {
+            state.atmosphereDynamicRenderer = null;
+            state.atmosphereDynamicWebglAvailable = false;
+            state.atmosphereDynamicWebglFailureCount += 1;
+            state.atmosphereDynamicWebglRetryAt = now + Math.min(
+                DYNAMIC_BACKGROUND_WEBGL_RETRY_MAX_MS,
+                DYNAMIC_BACKGROUND_WEBGL_RETRY_BASE_MS
+                    * Math.pow(2, Math.min(3, state.atmosphereDynamicWebglFailureCount - 1))
+            );
+            state.atmosphereDynamicFallbackReason = String(error && error.message || error || 'webgl-init-failed');
+            root.classList.remove('ak-dynamic-webgl-ready');
+            root.classList.add('ak-dynamic-fallback-active');
+            return null;
+        }
+    }
+
+    function startDynamicBackgroundRenderer() {
+        if (document.hidden || prefersReducedMotion()) return false;
+        const renderer = state.atmosphereDynamicRenderer || ensureDynamicBackgroundRenderer();
+        if (!renderer) return false;
+        renderer.start();
+        return true;
+    }
+
+    function stopDynamicBackgroundRenderer(source = 'stop') {
+        if (state.atmosphereDynamicRenderer) state.atmosphereDynamicRenderer.stop();
+        return source;
+    }
+
+    function disposeDynamicBackgroundRenderer(source = 'dispose') {
+        const renderer = state.atmosphereDynamicRenderer;
+        state.atmosphereDynamicRenderer = null;
+        if (renderer) {
+            try { renderer.dispose(); } catch { /* context can already be lost */ }
+        }
+        state.atmosphereDynamicCanvas = null;
+        return source;
+    }
+
+    function rebuildDynamicBackgroundRenderer(source = 'rebuild') {
+        const artwork = state.atmosphereDynamicCurrentArtwork;
+        const fingerprint = state.atmosphereDynamicCurrentFingerprint;
+        disposeDynamicBackgroundRenderer(source);
+        if (!isLyricsPage()) return null;
+        const renderer = ensureDynamicBackgroundRenderer();
+        if (!renderer || !artwork) return renderer;
+        const rebuildSeq = state.atmosphereLoadSeq;
+        preloadAtmosphereImage(artwork).then(image => {
+            if (!isLyricsPage() || rebuildSeq !== state.atmosphereLoadSeq || artwork !== state.atmosphereDynamicCurrentArtwork) return;
+            const current = state.atmosphereDynamicRenderer;
+            if (!current) return;
+            current.loadImageElement(image);
+            if (fingerprint) state.atmosphereDynamicCurrentFingerprint = fingerprint;
+            if (!document.hidden && !prefersReducedMotion()) current.start();
+            else current.renderFrame();
+        }).catch(() => { /* CSS fallback retains current art */ });
+        return renderer;
+    }
+
+    function resizeDynamicBackgroundRenderer() {
+        const renderer = state.atmosphereDynamicRenderer;
+        if (!renderer) return false;
+        try {
+            const changed = renderer.resizeToDisplaySize();
+            if (changed) {
+                state.atmosphereDynamicResizeCount += 1;
+                renderer.renderFrame();
+            }
+            return changed;
+        } catch {
+            return false;
+        }
+    }
+
+    function dynamicFallbackLayer(root, index) {
+        if (!root || !root.children) return null;
+        return Array.from(root.children).find(child => child && child.dataset && child.dataset.akDynamicFallback === String(index)) || null;
+    }
+
+    function updateDynamicFallbackSameVisual(artworkUrl) {
+        const root = state.atmosphereRoot;
+        const active = dynamicFallbackLayer(root, state.atmosphereDynamicBaseIndex);
+        if (active && artworkUrl) active.style.backgroundImage = `url(${JSON.stringify(artworkUrl)})`;
+    }
+
+    function setDynamicFallbackArtwork(artworkUrl) {
+        const root = state.atmosphereRoot;
+        if (!root) return;
+        if (!artworkUrl) {
+            for (const index of [0, 1]) {
+                const layer = dynamicFallbackLayer(root, index);
+                if (!layer) continue;
+                layer.classList.remove('ak-dynamic-fallback-active-layer');
+                layer.style.backgroundImage = 'none';
+            }
+            return;
+        }
+        const nextIndex = state.atmosphereDynamicBaseIndex === 0 ? 1 : 0;
+        const next = dynamicFallbackLayer(root, nextIndex);
+        const old = dynamicFallbackLayer(root, state.atmosphereDynamicBaseIndex);
+        if (!next) return;
+        next.style.backgroundImage = `url(${JSON.stringify(artworkUrl)})`;
+        next.classList.remove('ak-dynamic-fallback-active-layer');
+        void next.offsetWidth;
+        next.classList.add('ak-dynamic-fallback-active-layer');
+        if (old && old !== next) old.classList.remove('ak-dynamic-fallback-active-layer');
+        state.atmosphereDynamicBaseIndex = nextIndex;
+    }
+
+    function activateDynamicBackgroundAtmosphere(image, artworkUrl, source, artworkFingerprint = null) {
+        const root = ensureAtmosphereRoot();
+        if (!root) return false;
+        root.dataset.akMode = 'dynamic';
+        document.documentElement.classList.add('ak-atmosphere-dynamic-mode');
+
+        const sameUrl = !!artworkUrl && artworkUrl === state.atmosphereDynamicCurrentArtwork;
+        const comparable = !!artworkFingerprint && !!state.atmosphereDynamicCurrentFingerprint;
+        const sameVisual = comparable && dynamicArtworkFingerprintsEquivalent(artworkFingerprint, state.atmosphereDynamicCurrentFingerprint);
+        const sameArtwork = comparable ? sameVisual : sameUrl;
+        state.atmosphereDynamicIdentityMethod = sameVisual
+            ? (sameUrl ? 'url+visual-fingerprint' : 'visual-fingerprint')
+            : (comparable ? 'different-visual-fingerprint' : (sameUrl ? 'url-fallback' : 'new-artwork'));
+
+        if (!artworkUrl || !image) {
+            setDynamicFallbackArtwork('');
+            state.atmosphereDynamicCurrentArtwork = '';
+            state.atmosphereDynamicCurrentFingerprint = null;
+            state.atmosphereArtwork = '';
+            state.atmosphereSource = source || 'no-artwork';
+            const renderer = state.atmosphereDynamicRenderer;
+            if (renderer) renderer.stop();
+            root.classList.remove('ak-dynamic-webgl-ready');
+            root.classList.add('ak-dynamic-fallback-active');
+            root.classList.add('ak-atmosphere-ready');
+            return true;
+        }
+
+        if (sameArtwork) {
+            if (sameVisual && !sameUrl) state.atmosphereDynamicVisualDedupCount += 1;
+            /* Same album, different track-specific URL: update only recovery URL
+             * metadata. Do NOT touch GPU textures, animation time, opacity, or
+             * fallback layer classes. */
+            updateDynamicFallbackSameVisual(artworkUrl);
+            state.atmosphereDynamicCurrentArtwork = artworkUrl;
+            if (artworkFingerprint) state.atmosphereDynamicCurrentFingerprint = artworkFingerprint;
+            state.atmosphereArtwork = artworkUrl;
+            state.atmosphereSource = `${source || 'unknown'}+same-visual-reuse`;
+            root.classList.add('ak-atmosphere-ready');
+            const existing = state.atmosphereDynamicRenderer;
+            if (existing && existing.hasCurrent) {
+                root.classList.add('ak-dynamic-webgl-ready');
+                root.classList.remove('ak-dynamic-fallback-active');
+                if (!document.hidden && !prefersReducedMotion()) existing.start();
+            }
+            return false;
+        }
+
+        setDynamicFallbackArtwork(artworkUrl);
+        state.atmosphereDynamicCurrentArtwork = artworkUrl;
+        state.atmosphereDynamicCurrentFingerprint = artworkFingerprint || null;
+        const renderer = ensureDynamicBackgroundRenderer();
+        if (renderer) {
+            try {
+                renderer.loadImageElement(image);
+                root.classList.add('ak-dynamic-webgl-ready');
+                root.classList.remove('ak-dynamic-fallback-active');
+                if (prefersReducedMotion() || document.hidden) renderer.renderFrame();
+                else renderer.start();
+            } catch (error) {
+                state.atmosphereDynamicWebglAvailable = false;
+                state.atmosphereDynamicFallbackReason = String(error && error.message || error || 'webgl-image-upload-failed');
+                root.classList.remove('ak-dynamic-webgl-ready');
+                root.classList.add('ak-dynamic-fallback-active');
+            }
+        } else {
+            root.classList.add('ak-dynamic-fallback-active');
+        }
+
+        state.atmosphereArtwork = artworkUrl;
+        state.atmosphereSource = `${source || 'unknown'}+dynamic-background`;
+        state.atmosphereAnalysis = {
+            extractionModel: 'none-direct-artwork-webgl',
+            paletteSource: 'original-artwork-texture',
+            referenceSource: DYNAMIC_BACKGROUND_SOURCE,
+            engine: DYNAMIC_BACKGROUND_ENGINE,
+            shader: 'kawase-blur+simplex-domain-warp',
+            blurSize: DYNAMIC_BACKGROUND_SETTINGS.blurSize,
+            blurPasses: DYNAMIC_BACKGROUND_SETTINGS.blurPasses,
+            warpIntensity: DYNAMIC_BACKGROUND_SETTINGS.warpIntensity,
+            animationSpeed: DYNAMIC_BACKGROUND_SETTINGS.animationSpeed,
+            saturation: DYNAMIC_BACKGROUND_SETTINGS.saturation,
+            opacity: DYNAMIC_BACKGROUND_SETTINGS.opacity,
+            audioResponsive: false,
+            transitionDurationMs: DYNAMIC_BACKGROUND_TRANSITION_MS,
+            transitionFix: 'visible-dom-first+instant-inherited-art+direct-art-grace+latest-media-guard+per-url-stability+retrying-no-art+captured-interrupted-blend+visual-fingerprint-dedup',
+            fallback: 'dual-layer-css-direct-artwork'
+        };
+        root.classList.add('ak-atmosphere-ready');
+        return true;
+    }
+
+    function dynamicRequestStillCurrent(sequence, key) {
+        if (sequence !== state.atmosphereLoadSeq || !isLyricsPage()) {
+            state.atmosphereDynamicStaleCommitDrops += 1;
+            return false;
+        }
+        const live = getLocalMediaElement(true);
+        const liveKey = atmosphereMediaKey(live);
+        const expectedItemId = currentLyricsItemId();
+        const liveItemId = mediaItemId(live).toLowerCase();
         if (
-            !force
-            && key
-            && key === state.atmosphereMediaKey
-            && state.atmosphereArtwork
+            !live
+            || !liveKey
+            || liveKey !== key
+            || (
+                expectedItemId
+                && liveItemId
+                && liveItemId !== expectedItemId
+            )
         ) {
-            return;
+            state.atmosphereDynamicStaleCommitDrops += 1;
+            return false;
+        }
+        return true;
+    }
+
+    async function refreshAtmosphere(media, force = false) {
+        if (!media || !isLyricsPage()) return;
+        const key = atmosphereMediaKey(media);
+        if (!key) return;
+        const now = performance.now();
+        if (key !== state.atmosphereMediaKey) {
+            const previousKey = state.atmosphereMediaKey;
+            state.atmosphereDynamicDomBaseline = previousKey
+                ? new Set(domArtworkCandidates(media).map(candidate => candidate.url))
+                : new Set();
+            state.atmosphereMediaKey = key;
+            state.atmosphereDynamicResolvedKey = '';
+            state.atmosphereDynamicResolvedAt = 0;
+            state.atmosphereDynamicNoArtwork = false;
+            state.atmosphereDynamicNoArtFailures = 0;
+            state.atmosphereDynamicDirectRetryAt = 0;
+            state.atmosphereDynamicDomCandidateSinceByUrl.clear();
+            state.atmosphereDynamicMediaStableSince = now;
+            state.atmosphereDynamicWeakSource = false;
+            state.atmosphereFailedKey = '';
+            state.atmosphereFailedAt = 0;
         }
 
-        if (
-            !force
-            && key
-            && key === state.atmospherePendingKey
-        ) {
-            return;
-        }
-
-        /*
-         * Do not hammer a missing art endpoint every animation frame.
-         */
-        if (
-            !force
-            && key === state.atmosphereFailedKey
-            && performance.now()
-                - state.atmosphereFailedAt
-                < 8000
-        ) {
-            return;
-        }
-
-        state.atmosphereMediaKey =
-            key;
-        state.atmospherePendingKey =
-            key;
-        state.atmospherePendingSince =
-            performance.now();
-
-        const sequence =
-            ++state.atmosphereLoadSeq;
-
-        const finishPending = () => {
+        if (!force && key === state.atmosphereDynamicResolvedKey) {
+            const resolvedAge = now - state.atmosphereDynamicResolvedAt;
+            if (!state.atmosphereDynamicWeakSource && !state.atmosphereDynamicNoArtwork) return;
             if (
-                sequence === state.atmosphereLoadSeq
-                && state.atmospherePendingKey === key
+                state.atmosphereDynamicWeakSource
+                && resolvedAge < DYNAMIC_BACKGROUND_WEAK_RECHECK_MS
             ) {
+                return;
+            }
+            if (
+                state.atmosphereDynamicNoArtwork
+                && resolvedAge < DYNAMIC_BACKGROUND_NO_ART_RETRY_MS
+            ) {
+                return;
+            }
+        }
+        if (!force && key === state.atmospherePendingKey) return;
+        if (!force && key === state.atmosphereFailedKey && now - state.atmosphereFailedAt < 800) return;
+
+        state.atmospherePendingKey = key;
+        state.atmospherePendingSince = now;
+        const sequence = ++state.atmosphereLoadSeq;
+        const finishPending = () => {
+            if (sequence === state.atmosphereLoadSeq && state.atmospherePendingKey === key) {
                 state.atmospherePendingKey = '';
                 state.atmospherePendingSince = 0;
             }
         };
 
         try {
-            const candidates = [];
+            /* The visible now-playing artwork is the primary source. This is
+             * essential for music items that inherit Primary art from their
+             * album: waiting for a synthetic track-level /Images/Primary
+             * request to fail made those covers intrinsically slower. */
+            /* DOM fallback must protect rapid skips without penalizing normal
+             * album-inherited music art. Jellyfin often exposes several artwork
+             * URLs at once, so stability is tracked per URL rather than through
+             * one shared candidate timestamp. */
+            if (!dynamicRequestStillCurrent(sequence, key)) return;
 
-            const direct =
-                mediaItemArtworkCandidate(
-                    media
-                );
-
-            if (direct) {
-                candidates.push({
-                    url: direct,
-                    source: 'media-item-primary'
-                });
-            }
-
-            for (
-                const url
-                of domArtworkCandidates()
-            ) {
-                if (
-                    !candidates.some(
-                        candidate =>
-                            candidate.url === url
-                    )
-                ) {
-                    candidates.push({
-                        url,
-                        source: 'jellyfin-dom-artwork'
-                    });
+            const stableFor = performance.now() - state.atmosphereDynamicMediaStableSince;
+            const baseline = state.atmosphereDynamicDomBaseline || new Set();
+            const rawDomCandidates = domArtworkCandidates(media);
+            const domCandidates = rawDomCandidates.filter(candidate =>
+                dynamicDomArtworkCandidateAllowed(candidate, baseline)
+            );
+            const visibleArtworkStillPresent = rawDomCandidates.some(
+                dynamicDomArtworkSignalsPresence
+            );
+            const liveUrls = new Set(domCandidates.map(candidate => candidate.url));
+            for (const url of Array.from(state.atmosphereDynamicDomCandidateSinceByUrl.keys())) {
+                if (!liveUrls.has(url)) {
+                    state.atmosphereDynamicDomCandidateSinceByUrl.delete(url);
                 }
             }
 
-            for (const candidate of candidates) {
+            let sawUnboundCandidate = false;
+            for (const candidate of domCandidates) {
+                const { url, boundToCurrentItem } = candidate;
+                const timing = dynamicDomArtworkTiming(candidate);
+                const candidateNow = performance.now();
+
+                if (!boundToCurrentItem) {
+                    sawUnboundCandidate = true;
+                    if (!state.atmosphereDynamicDomCandidateSinceByUrl.has(url)) {
+                        state.atmosphereDynamicDomCandidateSinceByUrl.set(url, candidateNow);
+                    }
+                }
+
+                const candidateSince = boundToCurrentItem
+                    ? candidateNow
+                    : state.atmosphereDynamicDomCandidateSinceByUrl.get(url);
+                const candidateStableFor = Math.max(0, candidateNow - candidateSince);
+                if (stableFor < timing.mediaStableMs) continue;
+                if (!boundToCurrentItem && candidateStableFor < timing.confirmMs) continue;
+
                 try {
                     const image =
-                        await preloadAtmosphereImage(
-                            candidate.url
-                        );
+                        loadedDomArtworkImage(candidate)
+                        || await preloadAtmosphereImage(url);
+                    if (!dynamicRequestStillCurrent(sequence, key)) return;
 
+                    const liveCandidate = domArtworkCandidates(media)
+                        .find(item => item.url === url);
                     if (
-                        sequence
-                        !== state.atmosphereLoadSeq
-                        || !isLyricsPage()
-                        || key !== atmosphereMediaKey(media)
+                        !liveCandidate
+                        || liveCandidate.conflictsCurrentItem
+                        || !dynamicDomArtworkCandidateAllowed(liveCandidate, baseline)
                     ) {
-                        return;
+                        continue;
                     }
 
-                    const extracted =
-                        extractAtmosphereColors(
-                            image
-                        );
-
-                    const colors =
-                        extracted
-                        || fallbackAtmosphereColors();
-
-                    const raster =
-                        createAtmosphereRaster(
-                            image
-                        );
-
-                    activateAtmosphereScene(
-                        raster || null,
-                        colors,
-                        (
-                            extracted
-                                ? `${candidate.source}+canvas-colors`
-                                : `${candidate.source}+accent-colors`
+                    const liveTiming = dynamicDomArtworkTiming(liveCandidate);
+                    const liveNow = performance.now();
+                    const liveStableFor = liveNow - state.atmosphereDynamicMediaStableSince;
+                    const liveCandidateSince = liveCandidate.boundToCurrentItem
+                        ? liveNow
+                        : state.atmosphereDynamicDomCandidateSinceByUrl.get(url);
+                    if (liveStableFor < liveTiming.mediaStableMs) continue;
+                    if (
+                        !liveCandidate.boundToCurrentItem
+                        && (
+                            !Number.isFinite(liveCandidateSince)
+                            || liveNow - liveCandidateSince < liveTiming.confirmMs
                         )
-                        + (
-                            raster
-                                ? `+${state.atmosphereRasterMethod}`
-                                : '+premium-color-field'
-                        ),
-                        candidate.url
-                    );
+                    ) {
+                        continue;
+                    }
 
+                    const fingerprint = dynamicArtworkFingerprint(image);
+                    state.atmosphereDynamicWeakSource = true;
+                    state.atmosphereDynamicNoArtwork = false;
+                    state.atmosphereDynamicNoArtFailures = 0;
+                    state.atmosphereDynamicResolvedKey = key;
+                    state.atmosphereDynamicResolvedAt = performance.now();
+                    state.atmosphereDynamicDomCandidateSinceByUrl.clear();
+                    state.atmosphereDynamicDomFallbackCommits += 1;
+                    if (liveTiming.inheritedFastPath) {
+                        state.atmosphereDynamicFastInheritedCommits += 1;
+                    }
+                    activateDynamicBackgroundAtmosphere(
+                        image,
+                        url,
+                        liveTiming.inheritedFastPath
+                            ? 'jellyfin-dom-album-inherited-fast-fallback'
+                            : 'jellyfin-dom-artwork-identity-gated-fallback',
+                        fingerprint
+                    );
                     state.atmosphereFailedKey = '';
                     return;
                 } catch {
-                    // Try the next candidate.
+                    // Continue to the next identity-safe DOM candidate.
                 }
             }
+            if (!sawUnboundCandidate) {
+                state.atmosphereDynamicDomCandidateSinceByUrl.clear();
+            }
 
-            if (
-                sequence
-                !== state.atmosphereLoadSeq
-                || !isLyricsPage()
-                || key !== atmosphereMediaKey(media)
-            ) {
+            if (!dynamicRequestStillCurrent(sequence, key)) return;
+
+            /* Give Jellyfin's own now-playing DOM a short window to paint the
+             * new cover without holding atmospherePendingKey on a network
+             * request. Probe-burst and artwork mutations can therefore commit
+             * inherited album art on the first frame it becomes visible. */
+            const directAge =
+                performance.now() - state.atmosphereDynamicMediaStableSince;
+            if (!force && directAge < DYNAMIC_BACKGROUND_DIRECT_GRACE_MS) {
                 return;
             }
 
-            /*
-             * Even without readable artwork, retain a tasteful colored atmosphere
-             * based on the song's existing stable accent. Lyrics never depend on it.
-             */
-            activateAtmosphereScene(
-                null,
-                fallbackAtmosphereColors(),
-                'accent-fallback'
-            );
+            const direct = mediaItemArtworkCandidate(media);
+            if (
+                direct
+                && (force || performance.now() >= state.atmosphereDynamicDirectRetryAt)
+            ) {
+                try {
+                    const image = await preloadAtmosphereImage(
+                        direct,
+                        DYNAMIC_BACKGROUND_DIRECT_LOAD_TIMEOUT_MS
+                    );
+                    if (!dynamicRequestStillCurrent(sequence, key)) return;
+                    const fingerprint = dynamicArtworkFingerprint(image);
+                    state.atmosphereDynamicWeakSource = false;
+                    state.atmosphereDynamicNoArtwork = false;
+                    state.atmosphereDynamicNoArtFailures = 0;
+                    state.atmosphereDynamicDirectRetryAt = 0;
+                    activateDynamicBackgroundAtmosphere(
+                        image,
+                        direct,
+                        'media-item-primary-fallback',
+                        fingerprint
+                    );
+                    state.atmosphereDynamicResolvedKey = key;
+                    state.atmosphereDynamicResolvedAt = performance.now();
+                    state.atmosphereFailedKey = '';
+                    return;
+                } catch {
+                    state.atmosphereDynamicDirectLoadFailures += 1;
+                    state.atmosphereDynamicDirectRetryAt =
+                        performance.now() + DYNAMIC_BACKGROUND_DIRECT_RETRY_MS;
+                }
+            }
 
-            state.atmosphereFailedKey =
-                key;
+            if (!dynamicRequestStillCurrent(sequence, key)) return;
+            const failureNow = performance.now();
 
-            state.atmosphereFailedAt =
-                performance.now();
+            /* Never convert an identity-ambiguous but visibly present cover into
+             * a confirmed no-art state. This is crucial for album-inherited
+             * music artwork and same-album track changes. Keep the current
+             * background in place, throttle the retry, and wait for Jellyfin's
+             * DOM identity to settle instead of blanking the atmosphere. */
+            if (visibleArtworkStillPresent) {
+                state.atmosphereDynamicNoArtFailures = 0;
+                state.atmosphereDynamicNoArtwork = false;
+                state.atmosphereFailedKey = key;
+                state.atmosphereFailedAt = failureNow;
+                return;
+            }
+
+            state.atmosphereDynamicNoArtFailures += 1;
+            state.atmosphereFailedKey = key;
+            state.atmosphereFailedAt = failureNow;
+
+            if (
+                failureNow - state.atmosphereDynamicMediaStableSince
+                    >= DYNAMIC_BACKGROUND_NO_ART_CONFIRM_MS
+                && state.atmosphereDynamicNoArtFailures >= 2
+            ) {
+                activateDynamicBackgroundAtmosphere(null, '', 'confirmed-no-artwork');
+                state.atmosphereDynamicResolvedKey = key;
+                state.atmosphereDynamicResolvedAt = failureNow;
+                state.atmosphereDynamicWeakSource = false;
+                state.atmosphereDynamicNoArtwork = true;
+            }
         } finally {
             finishPending();
         }
     }
 
-    function maybeRefreshAtmosphere(
-        media,
-        frameNow
-    ) {
-        const interval =
-            (
-                state.performanceProfile === 'mobile'
-                || state.performanceProfile === 'eco'
-            )
-                ? 2000
-                : ATMOSPHERE_CHECK_INTERVAL_MS;
-
-        if (
-            frameNow
-            - state.atmosphereLastCheck
-            < interval
-        ) {
-            return;
-        }
-
-        state.atmosphereLastCheck =
-            frameNow;
-
-        const root =
-            ensureAtmosphereRoot();
-
-        if (root) {
-            root.dataset.akMode =
-                state.atmosphereMode;
-
-        }
-
-        refreshAtmosphere(
-            media,
-            false
-        ).catch(error => {
-            warn(
-                'Atmosphere refresh failed:',
-                error
-            );
-        });
+    function maybeRefreshAtmosphere(media, frameNow) {
+        if (frameNow - state.atmosphereLastCheck < 250) return;
+        state.atmosphereLastCheck = frameNow;
+        const root = ensureAtmosphereRoot();
+        if (root) root.dataset.akMode = 'dynamic';
+        refreshAtmosphere(media, false).catch(error => warn('Dynamic Background refresh failed:', error));
     }
 
     function mediaElementScore(element) {
@@ -7056,6 +8751,12 @@
 
         if ((Number(element.currentTime) || 0) > 0) {
             score += 2;
+        }
+
+        const expectedItemId = currentLyricsItemId();
+        const candidateItemId = mediaItemId(element).toLowerCase();
+        if (expectedItemId && candidateItemId) {
+            score += candidateItemId === expectedItemId ? 90 : -45;
         }
 
         if (element === state.mediaElement) {
@@ -7168,13 +8869,69 @@
             state.mediaStartOffsetSource = src;
             state.mediaStartOffsetTicks =
                 Number.isFinite(parsed)
-                    ? parsed
+                && parsed > 0
+                    ? Math.min(
+                        parsed,
+                        Number.MAX_SAFE_INTEGER
+                    )
                     : 0;
 
             return state.mediaStartOffsetTicks;
         } catch {
             return 0;
         }
+    }
+
+    function getJellyfinActiveLineIndex() {
+        const container =
+            getCurrentLyricsContainer(false);
+
+        if (!container) return -1;
+
+        let lines = [];
+
+        try {
+            lines = Array.from(
+                container.querySelectorAll('.lyricsLine')
+            );
+        } catch {
+            return -1;
+        }
+
+        if (!lines.length) return -1;
+
+        /*
+         * Jellyfin's lyric view has changed active-line markers across web
+         * releases and custom skins. This probe intentionally recognises only
+         * generic stock-style state markers and never our own `ak-current`
+         * class. If no trustworthy marker exists, chooseTimelineTicks() falls
+         * back to the StartTimeTicks-adjusted source timeline. That fallback is
+         * safer than guessing from layout position and, importantly, prevents
+         * the historical ReferenceError in this transcode-only branch.
+         */
+        const selectors = [
+            '[aria-current="true"]',
+            '[data-current="true"]',
+            '[data-active="true"]',
+            '.current',
+            '.active',
+            '.selected'
+        ];
+
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+            const line = lines[index];
+            if (!line || typeof line.matches !== 'function') continue;
+
+            try {
+                if (selectors.some(selector => line.matches(selector))) {
+                    return index;
+                }
+            } catch {
+                return -1;
+            }
+        }
+
+        return -1;
     }
 
     function findLineIndexAtTicks(ticks) {
@@ -7271,18 +9028,6 @@
         }
 
         return active;
-    }
-
-    function activeLineWordTicks(
-        lineIndex,
-        presentationLine,
-        presentationWordTicks,
-        timelineTicks
-    ) {
-        void lineIndex;
-        void presentationLine;
-        void presentationWordTicks;
-        return timelineTicks;
     }
 
     function resetPlaybackClock(
@@ -7453,16 +9198,16 @@
         return mediaSeconds * TICKS_PER_SECOND;
     }
 
-    function chooseTimelineTicks(
+    function sourceTimelineTicks(
         media,
-        frameNow
+        frameNow,
+        projectClock = true
     ) {
-        const rawTicks =
-            projectedMediaSeconds(
-                media,
-                frameNow
-            )
-            * TICKS_PER_SECOND;
+        if (!media) return null;
+        const seconds = projectClock
+            ? projectedMediaSeconds(media, frameNow)
+            : Math.max(0, Number(media.currentTime) || 0);
+        const rawTicks = seconds * TICKS_PER_SECOND;
         const startOffset = getStartTimeTicksFromUrl(media);
         let timelineTicks = rawTicks;
 
@@ -7491,12 +9236,29 @@
             }
         }
 
-        return applyUserTimingOffsetTicks(timelineTicks);
+        return timelineTicks;
+    }
+
+    function chooseTimelineTicks(
+        media,
+        frameNow
+    ) {
+        const timelineTicks = sourceTimelineTicks(media, frameNow, true);
+        return Number.isFinite(timelineTicks)
+            ? applyUserTimingOffsetTicks(timelineTicks)
+            : null;
     }
 
     function cueEndTicks(lineIndex, cueIndex, cue, cues) {
-        const explicitEnd = Number(cueValue(cue, 'End', 'end'));
-        if (Number.isFinite(explicitEnd) && explicitEnd > 0) return explicitEnd;
+        const start = nullableTick(
+            cueValue(cue, 'Start', 'start')
+        ) || 0;
+        const explicitEnd = nullableTick(
+            cueValue(cue, 'End', 'end')
+        );
+        if (explicitEnd !== null && explicitEnd > start) {
+            return explicitEnd;
+        }
 
         const nextEntry =
             cues[cueIndex + 1];
@@ -7507,14 +9269,18 @@
                 nextEntry.cue
                 || nextEntry
             );
-        const nextStart = Number(cueValue(nextCue, 'Start', 'start'));
-        if (Number.isFinite(nextStart)) return nextStart;
+        const nextStart = nullableTick(
+            cueValue(nextCue, 'Start', 'start')
+        );
+        if (nextStart !== null && nextStart > start) {
+            return nextStart;
+        }
 
         const currentLyric =
             state.lyrics
             && state.lyrics[lineIndex];
 
-        const explicitLineEnd = Number(
+        const explicitLineEnd = nullableTick(
             lyricValue(
                 currentLyric,
                 'End',
@@ -7523,17 +9289,20 @@
         );
 
         if (
-            Number.isFinite(explicitLineEnd)
-            && explicitLineEnd > 0
+            explicitLineEnd !== null
+            && explicitLineEnd > start
         ) {
             return explicitLineEnd;
         }
 
         const nextLine = state.lyrics && state.lyrics[lineIndex + 1];
-        const nextLineStart = Number(lyricValue(nextLine, 'Start', 'start'));
-        if (Number.isFinite(nextLineStart)) return nextLineStart;
+        const nextLineStart = nullableTick(
+            lyricValue(nextLine, 'Start', 'start')
+        );
+        if (nextLineStart !== null && nextLineStart > start) {
+            return nextLineStart;
+        }
 
-        const start = Number(cueValue(cue, 'Start', 'start')) || 0;
         return start + 7500000;
     }
 
@@ -7740,12 +9509,6 @@
     }
 
     function glowBucketSteps() {
-        if (
-            state.performanceProfile === 'eco'
-        ) {
-            return 48;
-        }
-
         return 64;
     }
 
@@ -7783,12 +9546,6 @@
         let halo = energy
             * (0.74 * bloom + 0.26 * afterglow)
             * (0.82 + 0.10 * sustain);
-
-        if (
-            state.performanceProfile === 'eco'
-        ) {
-            halo *= 0.92;
-        }
 
         const load = core + 0.62 * halo;
         const limiter = Math.min(
@@ -8058,11 +9815,6 @@
 
         word.element.style.transform = '';
         word.element.style.filter = '';
-        word.element.style.setProperty(
-            '--ak-motion-glow',
-            '0'
-        );
-
         (word.glowLayers || [])
             .forEach(layer => {
                 layer.style.opacity = '0';
@@ -8091,35 +9843,6 @@
         word,
         painted
     ) {
-        if (
-            state.performanceProfile === 'eco'
-        ) {
-            /*
-             * Eco mode updates at visible-pixel granularity to avoid repainting
-             * a text gradient for sub-pixel changes that cannot be perceived.
-             */
-            const width =
-                Math.max(
-                    72,
-                    Math.min(
-                        900,
-                        Number(word.renderWidth)
-                        || 180
-                    )
-                );
-
-            const percent =
-                Math.round(
-                    painted * width
-                )
-                / width
-                * 100;
-
-            return Math.round(
-                percent * 100
-            ) / 100;
-        }
-
         return Math.round(
             painted * 1000
         ) / 10;
@@ -8129,12 +9852,7 @@
         if (!word.element || !word.segments.length) return;
 
         const renderTicks =
-            timelineTicks
-            + (
-                state.performanceProfile === 'eco'
-                    ? 0
-                    : WORD_RENDER_LOOKAHEAD_TICKS
-            );
+            timelineTicks + WORD_RENDER_LOOKAHEAD_TICKS;
 
         const motionEnd =
             word.motionMode === 'grow'
@@ -8192,11 +9910,7 @@
 
             word.element.style.setProperty(
                 '--ak-word-progress',
-                `${progressBucket.toFixed(
-                    state.performanceProfile === 'eco'
-                        ? 2
-                        : 1
-                )}%`
+                `${progressBucket.toFixed(1)}%`
             );
         }
 
@@ -8340,121 +10054,6 @@
         }
     }
 
-    function finishEcoCompositorHandoff() {
-        const lineIndex =
-            state.ecoHandoffLineIndex;
-
-        if (
-            lineIndex < 0
-            || lineIndex
-                >= state.lineData.length
-        ) {
-            state.ecoHandoffLineIndex = -1;
-            state.ecoHandoffUntil = 0;
-            return;
-        }
-
-        const line =
-            state.lineData[lineIndex];
-
-        line.element.classList.remove(
-            'ak-motion-handoff'
-        );
-
-        (line.words || []).forEach(word => {
-            if (word.element) {
-                word.element.classList.remove(
-                    'ak-word-handoff'
-                );
-            }
-
-            resetWordMotion(word);
-        });
-
-        state.ecoHandoffLineIndex = -1;
-        state.ecoHandoffUntil = 0;
-    }
-
-    function beginEcoCompositorHandoff(
-        lineIndex,
-        ticks,
-        frameNow
-    ) {
-        if (state.ecoHandoffLineIndex >= 0) {
-            finishEcoCompositorHandoff();
-        }
-
-        if (
-            lineIndex < 0
-            || lineIndex
-                >= state.lineData.length
-        ) {
-            return;
-        }
-
-        const line =
-            state.lineData[lineIndex];
-
-        let retained = false;
-
-        (line.words || []).forEach(word => {
-            const keep =
-                motionHandoffActive(
-                    word,
-                    ticks
-                )
-                && !word._akMotionIsReset;
-
-            setStaticWordState(
-                word,
-                'past',
-                frameNow,
-                keep
-            );
-
-            if (!keep || !word.element) {
-                return;
-            }
-
-            retained = true;
-
-            word.element.classList.add(
-                'ak-word-handoff'
-            );
-
-            word.element.style.transform = '';
-            word.element.style.filter = 'none';
-
-            (word.glowLayers || [])
-                .forEach(layer => {
-                    layer.style.opacity = '0';
-                });
-
-            (word.motionGlyphs || [])
-                .forEach(glyph => {
-                    glyph.style.transform = '';
-
-                    (glyph.glowLayers || [])
-                        .forEach(layer => {
-                            layer.style.opacity = '0';
-                        });
-                });
-        });
-
-        if (!retained) return;
-
-        line.element.classList.add(
-            'ak-motion-handoff'
-        );
-
-        state.ecoHandoffLineIndex =
-            lineIndex;
-
-        state.ecoHandoffUntil =
-            frameNow
-            + ECO_COMPOSITOR_HANDOFF_MS;
-    }
-
     function distanceToActiveLines(
         lineIndex,
         activeLines
@@ -8498,31 +10097,45 @@
         activeLines,
         ticks,
         frameNow,
-        force
+        force,
+        instrumentalGap = null
     ) {
         const isActive =
-            activeLines.includes(lineIndex);
+            !instrumentalGap
+            && activeLines.includes(lineIndex);
 
         const overlapCurrent =
             isActive
             && activeLines.length > 1;
 
-        const phase =
-            isActive
-                ? 'current'
-                : lineIndex < activeLine
-                ? 'past'
-                : (
-                    lineIndex > activeLine
-                        ? 'future'
-                        : 'current'
-                );
+        const phase = instrumentalGap
+            ? (
+                lineIndex < instrumentalGap.nextLineIndex
+                    ? 'past'
+                    : 'future'
+            )
+            : (
+                isActive
+                    ? 'current'
+                    : lineIndex < activeLine
+                    ? 'past'
+                    : (
+                        lineIndex > activeLine
+                            ? 'future'
+                            : 'current'
+                    )
+            );
 
         const band =
-            overlapLineDistanceBand(
-                lineIndex,
-                activeLines
-            );
+            instrumentalGap
+                ? instrumentalGapDistanceBand(
+                    lineIndex,
+                    instrumentalGap.nextLineIndex
+                )
+                : overlapLineDistanceBand(
+                    lineIndex,
+                    activeLines
+                );
 
         const phaseChanged =
             force
@@ -8602,28 +10215,14 @@
         }
 
         if (phase === 'past') {
-            const ecoCarry =
-                lineIndex
-                    === state.ecoHandoffLineIndex
-                && frameNow
-                    < state.ecoHandoffUntil;
-
             const dynamicCarry =
-                state.performanceProfile !== 'eco'
-                && activeLines.some(
+                activeLines.some(
                     index => lineIndex === index - 1
                 );
 
             words.forEach(word => {
                 const keep =
                     (
-                        ecoCarry
-                        && word.element
-                        && word.element.classList.contains(
-                            'ak-word-handoff'
-                        )
-                    )
-                    || (
                         dynamicCarry
                         && motionHandoffActive(
                             word,
@@ -8656,49 +10255,18 @@
         activeLine,
         activeLines,
         ticks,
-        frameNow
+        frameNow,
+        instrumentalGap = null
     ) {
         const previous =
             state.lastActiveLine;
 
-        const sequential =
-            previous >= 0
-            && activeLine === previous + 1;
-
-        const ecoProfile =
-            state.performanceProfile === 'eco';
+        const instrumentalActive = !!instrumentalGap;
 
         const removedActiveLines =
             state.activeLineIndexes.filter(
                 index => !activeLines.includes(index)
             );
-
-        const naturalTransition =
-            previous >= 0
-            && activeLine >= 0
-            && Math.abs(activeLine - previous) <= 1;
-
-        if (
-            ecoProfile
-            && !sequential
-            && state.ecoHandoffLineIndex >= 0
-        ) {
-            finishEcoCompositorHandoff();
-        }
-
-        if (
-            ecoProfile
-            && naturalTransition
-            && removedActiveLines.length
-        ) {
-            beginEcoCompositorHandoff(
-                removedActiveLines[
-                    removedActiveLines.length - 1
-                ],
-                ticks,
-                frameNow
-            );
-        }
 
         const forceFull =
             previous < -1
@@ -8757,14 +10325,15 @@
                     activeLines,
                     ticks,
                     frameNow,
-                    forceFull
+                    forceFull,
+                    instrumentalGap
                 )
             ) {
                 mutationCount += 1;
             }
         });
 
-        if (!ecoProfile) {
+        if (!instrumentalActive) {
             const previousLine =
                 state.lineData[
                     activeLine - 1
@@ -8792,6 +10361,18 @@
                     preserve
                 );
             }
+        } else if (instrumentalActive) {
+            removedActiveLines.forEach(lineIndex => {
+                const removed = state.lineData[lineIndex];
+                if (!removed || !removed.element) return;
+                removed.element.classList.remove('ak-motion-handoff');
+                (removed.words || []).forEach(word => {
+                    if (word.element) {
+                        word.element.classList.remove('ak-word-handoff');
+                    }
+                    resetWordMotion(word);
+                });
+            });
         }
 
         state.lineTransitionCount += 1;
@@ -8809,12 +10390,6 @@
         activeLine,
         ticks
     ) {
-        if (
-            state.performanceProfile === 'eco'
-        ) {
-            return;
-        }
-
         const previousIndex =
             activeLine - 1;
 
@@ -9110,8 +10685,6 @@
                         true,
                         'replay'
                     );
-
-                    state.atmosphereMediaKey = '';
                 }
             }
 
@@ -9138,6 +10711,16 @@
                 || type === 'durationchange'
             ) {
                 state.mediaProbeAt = 0;
+            }
+
+            if (
+                type === 'loadedmetadata'
+                || type === 'playing'
+                || type === 'canplay'
+                || type === 'emptied'
+            ) {
+                state.atmosphereLastCheck = 0;
+                scheduleDynamicBackgroundProbeBurst(`media-${type}`);
             }
 
             const replayFromBeginning =
@@ -9201,176 +10784,249 @@
     }
 
     function renderFrame() {
-        state.rafId = 0;
+        try {
+            state.rafId = 0;
+    
+            if (!shouldRunAnimationLoop()) {
+                stopAnimationLoop('render-inactive');
+                return;
+            }
+    
+            const firstDecoratedLine =
+                state.lineData[0]
+                && state.lineData[0].element;
 
-        if (!shouldRunAnimationLoop()) {
-            stopAnimationLoop('render-inactive');
-            return;
-        }
-
-        const firstDecoratedLine =
-            state.lineData[0]
-            && state.lineData[0].element;
-
-        if (
-            !firstDecoratedLine
-            || !firstDecoratedLine.isConnected
-        ) {
-            state.decoratedGeneration = -1;
-            queueDecoration();
-            stopAnimationLoop('stale-lyric-dom');
-            return;
-        }
-
-        const media =
-            getLocalMediaElement();
-
-        if (!media) {
-            const now =
-                performance.now();
-
+            /*
+             * Full DOM ownership validation is mutation/watchdog driven so the
+             * 60 fps path stays O(1). The observer invalidates
+             * decoratedGeneration immediately when Jellyfin replaces children.
+             */
             if (
-                now
-                - state.lastMediaWarning
-                > 5000
+                state.decoratedGeneration !== state.generation
+                || !firstDecoratedLine
+                || !firstDecoratedLine.isConnected
             ) {
-                state.lastMediaWarning = now;
-
-                warn(
-                    'No local Jellyfin audio element found for karaoke timing.'
-                );
+                state.decoratedGeneration = -1;
+                queueDecoration();
+                stopAnimationLoop('stale-lyric-dom');
+                return;
             }
 
-            scheduleMediaDiscoveryFrame();
-            return;
-        }
-
-        ensureMediaWakeHooks(media);
-
-        const frameNow =
-            performance.now();
-
-        const targetInterval =
-            getTargetFrameInterval(
-                media
+            const media =
+                getLocalMediaElement();
+    
+            if (!media) {
+                const now =
+                    performance.now();
+    
+                if (
+                    now
+                    - state.lastMediaWarning
+                    > 5000
+                ) {
+                    state.lastMediaWarning = now;
+    
+                    warn(
+                        'No local Jellyfin audio element found for karaoke timing.'
+                    );
+                }
+    
+                scheduleMediaDiscoveryFrame();
+                return;
+            }
+    
+            ensureMediaWakeHooks(media);
+    
+            const frameNow =
+                performance.now();
+    
+            const targetInterval =
+                getTargetFrameInterval(
+                    media
+                );
+    
+            if (
+                !state.forceNextFrame
+                && targetInterval <= 19
+                && state.lastRenderedFrameAt
+                && frameNow
+                    - state.lastRenderedFrameAt
+                    < targetInterval - 1.25
+            ) {
+                state.skippedRafFrames += 1;
+    
+                scheduleNextFrame(
+                    media,
+                    false
+                );
+                return;
+            }
+    
+            state.forceNextFrame = false;
+            state.lastRenderedFrameAt = frameNow;
+    
+            const ticks =
+                chooseTimelineTicks(
+                    media,
+                    frameNow
+                );
+    
+            updateMeasuredFps(
+                frameNow
             );
+    
+            maybeRefreshAtmosphere(
+                media,
+                frameNow
+            );
+    
+            const timelineLine =
+                findLineIndexAtTicks(
+                    ticks
+                );
+    
+            const instrumentalGap =
+                findInstrumentalGapAtTicks(ticks);
+    
+            const instrumentalGapIndex =
+                instrumentalGap
+                    ? instrumentalGap.index
+                    : -1;
+    
+            /*
+             * During a real instrumental break no lyric line is "current". Use
+             * the upcoming line only as the neighborhood anchor so the completed
+             * lyric becomes past, the next lyric stays future and the synthetic
+             * note row owns the visual focus between them.
+             */
+            const activeLine = instrumentalGap
+                ? instrumentalGap.nextLineIndex
+                : timelineLine;
+    
+            let activeLines;
+    
+            if (instrumentalGap) {
+                activeLines =
+                    state.activeLineScratch
+                    || (state.activeLineScratch = []);
+                activeLines.length = 0;
+            } else {
+                activeLines =
+                    findActiveLineIndexesAtTicks(
+                        ticks,
+                        activeLine
+                    );
+            }
 
-        if (
-            !state.forceNextFrame
-            && targetInterval <= 19
-            && state.lastRenderedFrameAt
-            && frameNow
-                - state.lastRenderedFrameAt
-                < targetInterval - 1.25
-        ) {
-            state.skippedRafFrames += 1;
+            const activeLineChanged =
+                activeLine !== state.lastActiveLine;
 
+            const activeSetChanged =
+                activeLineChanged
+                || instrumentalGapIndex
+                    !== state.activeInstrumentalGapIndex
+                || !sameIndexList(
+                    activeLines,
+                    state.activeLineIndexes
+                );
+    
+            if (activeSetChanged) {
+                syncStaticLineStates(
+                    activeLine,
+                    activeLines,
+                    ticks,
+                    frameNow,
+                    instrumentalGap
+                );
+    
+                /* Diagnostics keep a human-readable signature, but build it only
+                 * when the active set changes instead of allocating every frame. */
+                state.lastActiveLineSignature =
+                    activeLines.join(',');
+                state.activeLineIndexes =
+                    activeLines.slice();
+
+                if (
+                    activeLineChanged
+                    && !instrumentalGap
+                    && activeLine >= 0
+                ) {
+                    focusLyricLineIndex(
+                        activeLine,
+                        {
+                            force: false,
+                            behavior: 'smooth',
+                            reason: 'playback-follow'
+                        }
+                    );
+                }
+            }
+
+            updateInstrumentalGapVisual(
+                instrumentalGap,
+                ticks
+            );
+    
+            updateAtmospherePlaybackState(media);
+    
+            if (activeLines.length > 1) {
+                state.overlapFrameCount += 1;
+            }
+    
+            state.maxSimultaneousLines =
+                Math.max(
+                    state.maxSimultaneousLines,
+                    activeLines.length
+                );
+    
+            activeLines.forEach(lineIndex => {
+                const current =
+                    state.lineData[lineIndex];
+    
+                if (!current) return;
+    
+                (current.words || [])
+                    .forEach(word => {
+                        updateWordVisual(
+                            word,
+                            ticks,
+                            frameNow
+                        );
+                    });
+            });
+    
+            if (!instrumentalGap && activeLine >= 0) {
+                updatePreviousLineHandoff(
+                    activeLine,
+                    ticks
+                );
+            }
+    
             scheduleNextFrame(
                 media,
                 false
             );
-            return;
+        } catch (error) {
+            state.rafId = 0;
+            state.animationLoopErrors += 1;
+            state.lastAnimationLoopError = String(
+                error && (error.stack || error.message || error) || 'unknown render error'
+            ).slice(0, 1200);
+            warn('Lyric visual frame failed; scheduling recovery:', error);
+
+            /* Background work must never be able to permanently kill ELRC
+             * sweep/glow or the instrumental liquid fill. One failed frame is
+             * isolated and the lyric loop is restarted on a short timer. */
+            if (shouldRunAnimationLoop() && !state.frameTimer) {
+                state.animationLoopRecoveries += 1;
+                state.frameTimer = window.setTimeout(() => {
+                    state.frameTimer = 0;
+                    wakeAnimationLoop();
+                }, LYRIC_FRAME_RECOVERY_MS);
+            } else if (!shouldRunAnimationLoop()) {
+                stopAnimationLoop('frame-error-inactive');
+            }
         }
-
-        state.forceNextFrame = false;
-        state.lastRenderedFrameAt = frameNow;
-
-        const ticks =
-            chooseTimelineTicks(
-                media,
-                frameNow
-            );
-
-        updateMeasuredFps(
-            frameNow
-        );
-
-        maybeRefreshAtmosphere(
-            media,
-            frameNow
-        );
-
-        const activeLine =
-            findLineIndexAtTicks(
-                ticks
-            );
-
-        const wordTicks = ticks;
-
-        const activeLines =
-            findActiveLineIndexesAtTicks(
-                ticks,
-                activeLine
-            );
-
-        const activeSetChanged =
-            activeLine !== state.lastActiveLine
-            || !sameIndexList(
-                activeLines,
-                state.activeLineIndexes
-            );
-
-        if (activeSetChanged) {
-            syncStaticLineStates(
-                activeLine,
-                activeLines,
-                ticks,
-                frameNow
-            );
-
-            /* Diagnostics keep a human-readable signature, but build it only
-             * when the active set changes instead of allocating every frame. */
-            state.lastActiveLineSignature =
-                activeLines.join(',');
-            state.activeLineIndexes =
-                activeLines.slice();
-        }
-
-        if (activeLines.length > 1) {
-            state.overlapFrameCount += 1;
-        }
-
-        state.maxSimultaneousLines =
-            Math.max(
-                state.maxSimultaneousLines,
-                activeLines.length
-            );
-
-        activeLines.forEach(lineIndex => {
-            const current =
-                state.lineData[lineIndex];
-
-            if (!current) return;
-
-            const lineWordTicks =
-                activeLineWordTicks(
-                    lineIndex,
-                    activeLine,
-                    wordTicks,
-                    ticks
-                );
-
-            (current.words || [])
-                .forEach(word => {
-                    updateWordVisual(
-                        word,
-                        lineWordTicks,
-                        frameNow
-                    );
-                });
-        });
-
-        if (activeLine >= 0) {
-            updatePreviousLineHandoff(
-                activeLine,
-                ticks
-            );
-        }
-
-        scheduleNextFrame(
-            media,
-            false
-        );
     }
 
     function ensureAnimationLoop() {
@@ -9387,63 +11043,162 @@
     }
 
 
+    function installLyricVisualWatchdog() {
+        if (state.animationWatchdogTimer) return;
+
+        state.animationWatchdogTimer = window.setInterval(() => {
+            if (document.hidden || !isLyricsPage() || !state.lyrics) return;
+
+            if (!lyricVisualDomHealthy()) {
+                state.decoratedGeneration = -1;
+                queueDecoration();
+                return;
+            }
+
+            if (
+                shouldRunAnimationLoop()
+                && !state.animationLoopRunning
+                && !state.rafId
+                && !state.frameTimer
+            ) {
+                state.animationWatchdogRecoveries += 1;
+                wakeAnimationLoop();
+            }
+        }, LYRIC_VISUAL_WATCHDOG_MS);
+    }
+
+
     function installDomObserver() {
         const lyricSelector =
             '.lyricPage, .lyricsContainer, .lyricsLine';
 
+        const touchesLyricDom = node => {
+            if (!node) return false;
+            let element = node.nodeType === 1
+                ? node
+                : (node.parentElement || node.parentNode);
+            if (!element) return false;
+
+            if (
+                typeof element.matches === 'function'
+                && element.matches(lyricSelector)
+            ) {
+                return true;
+            }
+
+            if (typeof element.closest === 'function') {
+                if (
+                    element.closest('.lyricsLine')
+                    || element.closest('.lyricsContainer')
+                    || element.closest('.lyricPage')
+                ) {
+                    return true;
+                }
+            }
+
+            return typeof element.querySelector === 'function'
+                && !!element.querySelector(lyricSelector);
+        };
+
+        const artworkSelector = [
+            '.nowPlayingBar img',
+            '.nowPlayingPage img',
+            '.nowPlayingInfoContainer img',
+            '.detailImageContainer img'
+        ].join(',');
+
+        const touchesArtworkDom = node => {
+            if (!node) return false;
+            const element = node.nodeType === 1
+                ? node
+                : (node.parentElement || node.parentNode);
+            if (!element) return false;
+            if (
+                typeof element.matches === 'function'
+                && element.matches(artworkSelector)
+            ) {
+                return true;
+            }
+            if (
+                String(element.tagName || '').toUpperCase() === 'IMG'
+                && typeof element.closest === 'function'
+                && element.closest(
+                    '.nowPlayingBar,.nowPlayingPage,.nowPlayingInfoContainer,.detailImageContainer'
+                )
+            ) {
+                return true;
+            }
+            return typeof element.querySelector === 'function'
+                && !!element.querySelector(artworkSelector);
+        };
+
         const observer = new MutationObserver(mutations => {
             if (document.hidden || !isLyricsPage() || !state.lyrics) return;
 
-            let shouldDecorate = false;
+            let shouldCheck = false;
+            let artworkChanged = false;
 
             for (const mutation of mutations) {
-                if (
-                    mutation.type !== 'childList'
-                    || !mutation.addedNodes.length
-                ) {
+                if (mutation.type === 'attributes') {
+                    if (touchesArtworkDom(mutation.target)) {
+                        artworkChanged = true;
+                    }
                     continue;
                 }
 
-                for (const node of mutation.addedNodes) {
-                    if (!node || node.nodeType !== 1) continue;
-
-                    const matches =
-                        typeof node.matches === 'function';
-                    const canQuery =
-                        typeof node.querySelector === 'function';
-
-                    if (
-                        (matches && node.matches(lyricSelector))
-                        || (canQuery && node.querySelector(lyricSelector))
-                    ) {
-                        shouldDecorate = true;
-                        break;
+                if (mutation.type === 'characterData') {
+                    if (touchesLyricDom(mutation.target)) {
+                        shouldCheck = true;
                     }
+                    continue;
                 }
 
-                if (shouldDecorate) break;
+                if (mutation.type !== 'childList') continue;
+                if (touchesLyricDom(mutation.target)) {
+                    shouldCheck = true;
+                }
+                if (touchesArtworkDom(mutation.target)) {
+                    artworkChanged = true;
+                }
+
+                const changedNodes = [
+                    ...Array.from(mutation.addedNodes || []),
+                    ...Array.from(mutation.removedNodes || [])
+                ];
+                if (changedNodes.some(touchesLyricDom)) {
+                    shouldCheck = true;
+                }
+                if (changedNodes.some(touchesArtworkDom)) {
+                    artworkChanged = true;
+                }
             }
 
-            if (!shouldDecorate) return;
+            if (shouldCheck && !lyricVisualDomHealthy()) {
+                state.decoratedGeneration = -1;
+                stopAnimationLoop('lyric-dom-mutated');
+                queueDecoration();
+            }
 
-            const container = getCurrentLyricsContainer(false);
-            const lines = container
-                ? container.querySelectorAll('.lyricsLine')
-                : [];
-
-            const needsDecoration =
-                state.decoratedGeneration !== state.generation
-                || Array.from(lines).some(line =>
-                    !line.classList.contains('ak-enhanced-line')
-                    || Number(line.dataset.akGeneration) !== state.generation
-                );
-
-            if (needsDecoration) queueDecoration();
+            if (artworkChanged) {
+                state.atmosphereLastCheck = 0;
+                const media = getLocalMediaElement(true);
+                if (media) {
+                    refreshAtmosphere(media, true).catch(error =>
+                        warn('Dynamic Background artwork mutation refresh failed:', error)
+                    );
+                }
+            }
         });
 
         const startObserver = () => observer.observe(
             document.documentElement,
-            { childList: true, subtree: true }
+            {
+                childList: true,
+                subtree: true,
+                characterData: true,
+                attributes: true,
+                attributeFilter: ['src', 'srcset']
+            }
         );
 
         if (document.documentElement) startObserver();
@@ -9491,6 +11246,8 @@
                 state.lastActiveLine = -999;
                 state.lastActiveLineSignature = '';
                 state.activeLineIndexes = [];
+                state.lyricAutoFollowSuspendedUntil = 0;
+                state.lyricAutoFollowLastIndex = -1;
                 wakeAnimationLoop();
             } else {
                 removeRomanizationToggle();
@@ -9512,6 +11269,9 @@
                 stopAnimationLoop(
                     'route-leave'
                 );
+                clearDynamicProbeTimers();
+                state.atmosphereDynamicProbeToken += 1;
+                removeAtmosphereRoot('route-leave');
             }
         });
 
@@ -9519,6 +11279,7 @@
             'resize',
             () => {
                 queueMotionGeometryRefresh();
+                resizeDynamicBackgroundRenderer();
                 wakeAnimationLoop();
             },
             { passive: true }
@@ -9528,6 +11289,7 @@
             'orientationchange',
             () => {
                 queueMotionGeometryRefresh();
+                resizeDynamicBackgroundRenderer();
                 wakeAnimationLoop();
             },
             { passive: true }
@@ -9538,6 +11300,7 @@
                 'resize',
                 () => {
                     queueMotionGeometryRefresh();
+                    resizeDynamicBackgroundRenderer();
                     wakeAnimationLoop();
                 },
                 { passive: true }
@@ -9551,21 +11314,14 @@
                     stopAnimationLoop(
                         'document-hidden'
                     );
+                    stopDynamicBackgroundRenderer('document-hidden');
                     return;
                 }
-
-                const firstLine =
-                    state.lineData[0]
-                    && state.lineData[0].element;
 
                 if (
                     state.lyrics
                     && isLyricsPage()
-                    && (
-                        state.decoratedGeneration !== state.generation
-                        || !firstLine
-                        || !firstLine.isConnected
-                    )
+                    && !lyricVisualDomHealthy()
                 ) {
                     queueDecoration();
                 }
@@ -9575,6 +11331,7 @@
                     performance.now()
                 );
                 wakeAnimationLoop();
+                if (state.atmosphereMode === 'dynamic') startDynamicBackgroundRenderer();
             },
             { passive: true }
         );
@@ -9584,7 +11341,10 @@
             () => {
                 cancelDecorationRetry(true);
                 invalidateAtmosphereLoads('pagehide');
+                clearDynamicProbeTimers();
+                state.atmosphereDynamicProbeToken += 1;
                 stopAnimationLoop('pagehide');
+                stopDynamicBackgroundRenderer('pagehide');
             },
             { passive: true }
         );
@@ -9595,6 +11355,7 @@
                 if (state.lyrics && isLyricsPage()) {
                     queueDecoration();
                     wakeAnimationLoop();
+                    if (state.atmosphereMode === 'dynamic') startDynamicBackgroundRenderer();
                 }
             },
             { passive: true }
@@ -9607,20 +11368,23 @@
      * in index.html. That lets it observe Jellyfin's lyrics API response before
      * the stock web client flattens each LyricLine to lyric.Text.
      */
-    state.atmosphereMode =
-        readAtmosphereMode();
+    state.atmosphereMode = readAtmosphereMode();
 
     state.performanceMode =
         readPerformanceMode();
+
 
     state.performanceProfile =
         detectPerformanceProfile();
 
     installFetchInterceptor();
     installXhrInterceptor();
+    installLyricSeekInteractionHooks();
+    installLyricAutoFollowHooks();
     installDomObserver();
     installRouteHooks();
     installFontGeometryHooks();
+    installLyricVisualWatchdog();
 
     function rendererFingerprint() {
         const words = [];
@@ -9655,18 +11419,8 @@
             }
         });
 
-        let reducedMotionRequested = false;
-
-        try {
-            reducedMotionRequested = !!(
-                window.matchMedia
-                && window.matchMedia(
-                    '(prefers-reduced-motion: reduce)'
-                ).matches
-            );
-        } catch {
-            // Old embedded browsers may not implement matchMedia fully.
-        }
+        const reducedMotionRequested =
+            prefersReducedMotion();
 
         const currentWords = [];
 
@@ -9715,9 +11469,7 @@
             glowRenderer:
                 'classic-bloom-prepainted-core+halo',
             segmentSafeMotion:
-                state.performanceProfile === 'eco'
-                    ? 'whole-word'
-                    : 'per-grapheme-with-measured-fallback',
+                'per-grapheme-with-measured-fallback',
             contextualScriptMotion:
                 'grapheme-safe-akshara-bloom+whole-joining-fallback',
             rtlSwipeDirection:
@@ -9725,14 +11477,10 @@
             cueTokenization:
                 'source-preserved-for-cjk-thai-lao-khmer-myanmar',
             atmosphere:
-                `${ATMOSPHERE_RASTER_LONG_EDGE[
-                    state.performanceProfile
-                ]}px/${ATMOSPHERE_RASTER_BLUR_PX[
-                    state.performanceProfile
-                ]}px`,
+                'kawarp-webgl:128px-preblur:domain-warp:260ms-godmode-transition',
             reducedMotionRequested,
             reducedMotionApplied:
-                state.performanceProfile === 'eco',
+                reducedMotionRequested,
             geometry,
             currentWords
         };
@@ -9748,7 +11496,9 @@
                 name: accent.name,
                 primaryRgb: accent.rgb,
                 secondaryRgb:
-                    accent.secondaryRgb
+                    accent.secondaryRgb,
+                tertiaryRgb:
+                    accent.tertiaryRgb
             }));
         },
         setAccent: setAccentMode,
@@ -9877,11 +11627,24 @@
                 maxSeconds: TIMING_OFFSET_MAX_SECONDS,
                 changeCount: state.timingOffsetChangeCount,
                 syncPickActive: state.timingPickActive,
+                correctedClickSeek: true,
+                autoFollow: {
+                    suspendedUntil: state.lyricAutoFollowSuspendedUntil,
+                    lastIndex: state.lyricAutoFollowLastIndex,
+                    lastAt: state.lyricAutoFollowLastAt,
+                    scrollCount: state.lyricAutoFollowScrollCount,
+                    manualScrollCount: state.lyricAutoFollowManualScrollCount,
+                    forceCount: state.lyricAutoFollowForceCount,
+                    lastReason: state.lyricAutoFollowLastReason
+                },
+                seekCount: state.lyricSeekCount,
+                lastSeekKind: state.lastLyricSeekKind,
                 timelineFingerprint: timingTimelineFingerprint(),
                 songKey: state.songPreferenceKey
             };
         },
         backgroundVocals: inspectBackgroundVocals,
+        instrumentalBreaks: inspectInstrumentalBreaks,
         rendererFingerprint,
         performance() {
             return {
@@ -9900,9 +11663,7 @@
                 timedCueCount:
                     state.timedCueCount,
                 perGlyphMotion:
-                    state.performanceProfile === 'eco'
-                        ? 'whole-word'
-                        : 'multiscript-grapheme+whole-shaped',
+                    'multiscript-grapheme+whole-shaped',
                 playbackClock:
                     'phase-locked-monotonic',
                 rafTargetGate: true,
@@ -9914,6 +11675,14 @@
                     state.animationLoopStarts,
                 animationLoopStops:
                     state.animationLoopStops,
+                animationLoopErrors:
+                    state.animationLoopErrors,
+                animationLoopRecoveries:
+                    state.animationLoopRecoveries,
+                animationWatchdogRecoveries:
+                    state.animationWatchdogRecoveries,
+                lastAnimationLoopError:
+                    state.lastAnimationLoopError,
                 mediaSwitchCount:
                     state.mediaSwitchCount,
                 staleMediaEventDrops:
@@ -9923,41 +11692,56 @@
         setAtmosphere: setAtmosphereMode,
         atmosphere() {
             return {
-                mode: state.atmosphereMode,
+                mode: 'dynamic',
                 artwork: state.atmosphereArtwork,
                 source: state.atmosphereSource,
-                colors: state.atmosphereColors,
                 pendingKey: state.atmospherePendingKey,
-                pendingMs:
-                    state.atmospherePendingSince > 0
-                        ? Number(
-                            Math.max(
-                                0,
-                                performance.now()
-                                    - state.atmospherePendingSince
-                            ).toFixed(1)
-                        )
-                        : 0,
-                timeoutCount:
-                    state.atmosphereTimeoutCount
+                pendingMs: state.atmospherePendingSince > 0
+                    ? Number(Math.max(0, performance.now() - state.atmospherePendingSince).toFixed(1))
+                    : 0,
+                timeoutCount: state.atmosphereTimeoutCount,
+                analysis: state.atmosphereAnalysis,
+                dynamicBackground: {
+                    reference: DYNAMIC_BACKGROUND_SOURCE,
+                    engine: DYNAMIC_BACKGROUND_ENGINE,
+                    webglAvailable: state.atmosphereDynamicWebglAvailable,
+                    fallbackReason: state.atmosphereDynamicFallbackReason,
+                    currentArtwork: state.atmosphereDynamicCurrentArtwork,
+                    identityMethod: state.atmosphereDynamicIdentityMethod,
+                    fingerprint: state.atmosphereDynamicCurrentFingerprint ? state.atmosphereDynamicCurrentFingerprint.hash : null,
+                    visualDedupCount: state.atmosphereDynamicVisualDedupCount,
+                    fingerprintFailures: state.atmosphereDynamicFingerprintFailures,
+                    staleCommitDrops: state.atmosphereDynamicStaleCommitDrops,
+                    directLoadFailures: state.atmosphereDynamicDirectLoadFailures,
+                    domFallbackCommits: state.atmosphereDynamicDomFallbackCommits,
+                    weakSource: state.atmosphereDynamicWeakSource,
+                    noArtwork: state.atmosphereDynamicNoArtwork,
+                    resolvedMediaKey: state.atmosphereDynamicResolvedKey,
+                    unboundDomConfirmMs: DYNAMIC_BACKGROUND_UNBOUND_DOM_CONFIRM_MS,
+                    inheritedDomStableMs: DYNAMIC_BACKGROUND_INHERITED_DOM_STABLE_MS,
+                    inheritedDomConfirmMs: DYNAMIC_BACKGROUND_INHERITED_DOM_CONFIRM_MS,
+                    directGraceMs: DYNAMIC_BACKGROUND_DIRECT_GRACE_MS,
+                    directLoadTimeoutMs: DYNAMIC_BACKGROUND_DIRECT_LOAD_TIMEOUT_MS,
+                    fastInheritedCommits: state.atmosphereDynamicFastInheritedCommits,
+                    noArtConfirmMs: DYNAMIC_BACKGROUND_NO_ART_CONFIRM_MS,
+                    noArtRetryMs: DYNAMIC_BACKGROUND_NO_ART_RETRY_MS,
+                    webglFailureCount: state.atmosphereDynamicWebglFailureCount,
+                    webglRetryInMs: Math.max(0, state.atmosphereDynamicWebglRetryAt - performance.now()),
+                    transitionMs: DYNAMIC_BACKGROUND_TRANSITION_MS,
+                    contextLossCount: state.atmosphereDynamicContextLossCount,
+                    transitionCount: state.atmosphereDynamicTransitionCount,
+                    interruptedTransitions: state.atmosphereDynamicInterruptedTransitions,
+                    resizeCount: state.atmosphereDynamicResizeCount,
+                    renderer: state.atmosphereDynamicRenderer ? state.atmosphereDynamicRenderer.diagnostics() : null,
+                    audioResponsive: false,
+                    lyricReactive: false
+                }
             };
         },
         refreshAtmosphere() {
-            const media =
-                getLocalMediaElement();
-
-            state.atmosphereMediaKey = '';
-
-            if (media) {
-                refreshAtmosphere(
-                    media,
-                    true
-                );
-            }
-
-            return {
-                requested: !!media
-            };
+            const media = getLocalMediaElement(true);
+            if (media) refreshAtmosphere(media, true);
+            return { requested: !!media };
         },
         diagnostics() {
             const media =
@@ -10017,6 +11801,14 @@
                     state.animationLoopStarts,
                 animationLoopStops:
                     state.animationLoopStops,
+                animationLoopErrors:
+                    state.animationLoopErrors,
+                animationLoopRecoveries:
+                    state.animationLoopRecoveries,
+                animationWatchdogRecoveries:
+                    state.animationWatchdogRecoveries,
+                lastAnimationLoopError:
+                    state.lastAnimationLoopError,
                 mediaFound: !!media,
                 mediaSwitchCount:
                     state.mediaSwitchCount,
@@ -10034,6 +11826,26 @@
                 timingOffsetSeconds: state.timingOffsetSeconds,
                 timingOffsetDisplay: formatTimingOffset(),
                 timingOffsetChangeCount: state.timingOffsetChangeCount,
+                correctedLyricClickSeek: true,
+                instrumentalClickSeek: true,
+                lyricSeekCount: state.lyricSeekCount,
+                instrumentalSeekCount: state.instrumentalSeekCount,
+                lastLyricSeekKind: state.lastLyricSeekKind,
+                lastLyricSeekSourceSeconds:
+                    Number.isFinite(state.lastLyricSeekSourceTicks)
+                        ? Number(
+                            (
+                                state.lastLyricSeekSourceTicks
+                                / TICKS_PER_SECOND
+                            ).toFixed(3)
+                        )
+                        : null,
+                lastLyricSeekMediaSeconds:
+                    Number.isFinite(state.lastLyricSeekMediaSeconds)
+                        ? Number(
+                            state.lastLyricSeekMediaSeconds.toFixed(3)
+                        )
+                        : null,
                 mediaCurrentTime:
                     media ? media.currentTime : null,
                 mode:
@@ -10069,17 +11881,16 @@
                     'center+inset-end+center+inset-start',
                 backgroundVocalInspection:
                     inspectBackgroundVocals(),
+                instrumentalBreaks:
+                    inspectInstrumentalBreaks(),
                 crossPlatformQuality:
                     'pc-mobile-multilingual-preview4-renderer',
-                platformVisualOverrides:
-                    state.performanceProfile === 'eco'
-                        ? 'eco-opt-in'
-                        : 'none',
+                platformVisualOverrides: 'none',
                 tvPolicy:
                     'stock-jellyfin-bootstrap-bypass',
                 rendererFingerprint:
                     rendererFingerprint(),
-                effectModel: 'phase-locked-motion+classic-bloom-v3.1-multiscript-unified',
+                effectModel: 'phase-locked-motion+classic-bloom-v3.2+dynamic-background-godmode-v3.2.5+instrumental-wave',
                 coloredGlow: true,
                 coloredGlowOnlyOnMotionGlyphs: false,
                 complexScriptShapedGlow: true,
@@ -10098,6 +11909,9 @@
                 accentSecondaryRgb:
                     state.accent
                     && state.accent.secondaryRgb,
+                accentTertiaryRgb:
+                    state.accent
+                    && state.accent.tertiaryRgb,
                 accentSelectionReason:
                     state.accentSelectionReason,
                 accentPaletteSize:
@@ -10154,55 +11968,74 @@
                 rafTargetGate: true,
                 skippedRafFrames:
                     state.skippedRafFrames,
+                animationLoopRunning:
+                    state.animationLoopRunning,
+                animationLoopErrors:
+                    state.animationLoopErrors,
+                animationLoopRecoveries:
+                    state.animationLoopRecoveries,
+                animationWatchdogRecoveries:
+                    state.animationWatchdogRecoveries,
+                lastAnimationLoopError:
+                    state.lastAnimationLoopError,
+                lyricVisualWatchdogMs:
+                    LYRIC_VISUAL_WATCHDOG_MS,
+                lyricFrameRecoveryMs:
+                    LYRIC_FRAME_RECOVERY_MS,
+                instrumentalSvg:
+                    'single-path-liquid-clip-v2',
                 lineTransitionCount:
                     state.lineTransitionCount,
                 lastLineSyncCount:
                     state.lastLineSyncCount,
                 maxLineSyncCount:
                     state.maxLineSyncCount,
-                ecoCompositorHandoffMs:
-                    ECO_COMPOSITOR_HANDOFF_MS,
                 activeLineOnlyRendering: false,
                 activeSetOnlyRendering: true,
                 staticLinesUpdateOnlyOnLineChange: true,
                 normalLrcTargetFps: LRC_TARGET_FPS,
                 pausedTargetFps: PAUSED_TARGET_FPS,
                 adaptiveAlbumAtmosphere: true,
-                atmosphereMode: state.atmosphereMode,
+                atmosphereMode: 'dynamic-only',
                 atmosphereArtwork: state.atmosphereArtwork,
                 atmosphereSource: state.atmosphereSource,
-                atmosphereColors: state.atmosphereColors,
-                atmospherePendingKey:
-                    state.atmospherePendingKey,
-                atmospherePendingMs:
-                    state.atmospherePendingSince > 0
-                        ? Number(
-                            Math.max(
-                                0,
-                                performance.now()
-                                    - state.atmospherePendingSince
-                            ).toFixed(1)
-                        )
-                        : 0,
-                atmosphereTimeoutCount:
-                    state.atmosphereTimeoutCount,
-                atmosphereCrossfade: true,
-                atmosphereColorExtraction: 'canvas-with-accent-fallback',
-                atmosphereRasterized: true,
-                atmospherePrebakedBlur: true,
+                atmospherePendingKey: state.atmospherePendingKey,
+                atmospherePendingMs: state.atmospherePendingSince > 0
+                    ? Number(Math.max(0, performance.now() - state.atmospherePendingSince).toFixed(1))
+                    : 0,
+                atmosphereTimeoutCount: state.atmosphereTimeoutCount,
+                atmosphereDynamicPort: 'chengggit-dynamic-background+kawarp-hardened+godmode-state-machine',
+                atmosphereDynamicSource: DYNAMIC_BACKGROUND_SOURCE,
+                atmosphereDynamicEngine: DYNAMIC_BACKGROUND_ENGINE,
+                atmosphereDynamicTransitionMs: DYNAMIC_BACKGROUND_TRANSITION_MS,
+                atmosphereColorExtraction: 'none-direct-artwork-texture',
+                atmosphereVisualIdentity: '24x24-rgb+edge-perceptual-fingerprint',
+                atmosphereSameAlbumContinuity: true,
+                atmosphereLyricLifecycleIndependent: true,
+                atmosphereLatestMediaCommitOnly: true,
+                atmosphereDomFallbackStabilityDelayMs: DYNAMIC_BACKGROUND_DOM_STABLE_MS,
+                atmosphereUnboundDomConfirmMs: DYNAMIC_BACKGROUND_UNBOUND_DOM_CONFIRM_MS,
+                atmosphereInheritedDomStableMs: DYNAMIC_BACKGROUND_INHERITED_DOM_STABLE_MS,
+                atmosphereInheritedDomConfirmMs: DYNAMIC_BACKGROUND_INHERITED_DOM_CONFIRM_MS,
+                atmosphereDirectGraceMs: DYNAMIC_BACKGROUND_DIRECT_GRACE_MS,
+                atmosphereDirectLoadTimeoutMs: DYNAMIC_BACKGROUND_DIRECT_LOAD_TIMEOUT_MS,
+                atmosphereFastInheritedCommits: state.atmosphereDynamicFastInheritedCommits,
+                atmosphereWeakRecheckMs: DYNAMIC_BACKGROUND_WEAK_RECHECK_MS,
+                atmosphereNoArtConfirmMs: DYNAMIC_BACKGROUND_NO_ART_CONFIRM_MS,
+                atmosphereNoArtRetryMs: DYNAMIC_BACKGROUND_NO_ART_RETRY_MS,
+                atmosphereNoArtwork: state.atmosphereDynamicNoArtwork,
+                atmosphereWebglFailureCount: state.atmosphereDynamicWebglFailureCount,
+                atmosphereWebglRetryInMs: Math.max(0, state.atmosphereDynamicWebglRetryAt - performance.now()),
+                atmosphereAudioCoupled: false,
+                atmosphereLyricReactive: false,
                 atmosphereLiveCssBlur: false,
-                atmosphereRasterMethod:
-                    state.atmosphereRasterMethod,
-                atmosphereRasterDimensions:
-                    [
-                        state.atmosphereRasterWidth,
-                        state.atmosphereRasterHeight
-                    ],
-                atmosphereRasterBlurPx:
-                    state.atmosphereRasterBlurPx,
-                atmosphereSharpArtFallback: false,
-                atmosphereCrossfadeMs:
-                    ATMOSPHERE_CROSSFADE_MS,
+                atmospherePrebakedBlur: true,
+                atmosphereStaleCommitDrops: state.atmosphereDynamicStaleCommitDrops,
+                atmosphereVisualDedupCount: state.atmosphereDynamicVisualDedupCount,
+                atmosphereFingerprintFailures: state.atmosphereDynamicFingerprintFailures,
+                atmosphereDirectLoadFailures: state.atmosphereDynamicDirectLoadFailures,
+                atmosphereDomFallbackCommits: state.atmosphereDynamicDomFallbackCommits,
+                atmosphereCrossfadeMs: DYNAMIC_BACKGROUND_TRANSITION_MS,
                 geometryAwareSwipe: true,
                 connectedScriptPaint:
                     'shaped-spatial-wipe',

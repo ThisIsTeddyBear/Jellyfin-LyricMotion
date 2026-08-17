@@ -46,7 +46,7 @@ function storageStub() {
     };
 }
 
-function makeContext({ userAgent = 'Mozilla/5.0 desktop', romanizer = null } = {}) {
+function makeContext({ userAgent = 'Mozilla/5.0 desktop', romanizer = null, maxTouchPoints = 1, remoteOnlyPointer = false } = {}) {
     const body = new MockElement('body');
     const head = new MockElement('head');
     const documentElement = new MockElement('html');
@@ -86,7 +86,7 @@ function makeContext({ userAgent = 'Mozilla/5.0 desktop', romanizer = null } = {
     const context = {
         console: { log: noop, info: noop, warn: noop, error: noop, debug: noop },
         document,
-        navigator: { userAgent, platform: 'Linux x86_64', maxTouchPoints: 1 },
+        navigator: { userAgent, platform: 'Linux x86_64', maxTouchPoints },
         location: { hash: '', href: 'http://localhost/web/index.html' },
         localStorage,
         sessionStorage,
@@ -130,7 +130,7 @@ function makeContext({ userAgent = 'Mozilla/5.0 desktop', romanizer = null } = {
         Element: MockElement,
         Node: MockElement,
         getComputedStyle: () => ({ getPropertyValue: () => '', display: 'none', visibility: 'hidden' }),
-        matchMedia: () => ({ matches: false, addEventListener: noop, removeEventListener: noop, addListener: noop, removeListener: noop })
+        matchMedia: query => ({ matches: remoteOnlyPointer && String(query).includes('(hover: none)'), addEventListener: noop, removeEventListener: noop, addListener: noop, removeListener: noop })
     };
     context.window = context;
     context.globalThis = context;
@@ -151,9 +151,33 @@ function runRuntime(context) {
     const context = makeContext();
     const api = runRuntime(context);
     assert(api, 'desktop runtime should install');
-    assert.strictEqual(api.version, '3.2.0');
+    assert.strictEqual(api.version, '3.2.5');
     assert.strictEqual(api.romanization().requiredRomanizerVersion, '6.5.1');
     assert.strictEqual(api.romanization().romanizerVersion, null);
+    const instrumental = api.instrumentalBreaks();
+    assert.strictEqual(instrumental.symbol, '♪');
+    assert.strictEqual(instrumental.visualRenderer, 'inline-svg-liquid-wave-v3');
+    assert.strictEqual(instrumental.liquidSurface, 'media-time-wave+progressive-flattening');
+    assert.strictEqual(instrumental.reducedMotionSurface, 'flat');
+    assert.strictEqual(instrumental.transitionModel, 'future-active-past');
+    assert.strictEqual(instrumental.rectangularTextClipArtifact, false);
+    assert.strictEqual(instrumental.minimumGapSeconds, 2);
+    assert.strictEqual(instrumental.detected, 0);
+    const accents = api.accents();
+    assert.strictEqual(accents.length, 5);
+    assert(accents.every(accent => accent.primaryRgb && accent.secondaryRgb && accent.tertiaryRgb),
+        'every Classic Bloom palette must expose all three color layers');
+}
+
+{
+    const context = makeContext();
+    const api = runRuntime(context);
+    const seen = new Set();
+    for (let index = 0; index < 5; index += 1) {
+        seen.add(api.nextAccent().accent);
+    }
+    assert.strictEqual(seen.size, 5,
+        'shuffle bag must expose every accent before repeating a palette');
 }
 
 {
@@ -190,3 +214,64 @@ function runRuntime(context) {
 }
 
 console.log('LyricMotion runtime smoke: desktop, stale-G2P rejection, duplicate-load guard and TV bypass passed.');
+
+// TV policy matrix: identified ten-foot clients must never install the runtime,
+// while ordinary mobile/tablet browsers remain enhanced.
+for (const [userAgent, family] of [
+    ['Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit', 'lg-webos'],
+    ['Mozilla/5.0 (SMART-TV; LINUX; Tizen 7.0)', 'samsung-tizen'],
+    ['Mozilla/5.0 (Linux; Android 9; AFTMM Build/PS7273)', 'fire-tv'],
+    ['Mozilla/5.0 (Linux; Android 12; SHIELD Android TV)', 'android-tv'],
+    ['Mozilla/5.0 (PlayStation 5 3.20)', 'game-console-tv']
+]) {
+    const context = makeContext({ userAgent });
+    const api = runRuntime(context);
+    assert.strictEqual(api.enabled, false, `${family} must use stock Jellyfin`);
+    assert.strictEqual(api.reason, 'tv-stock-bypass');
+    assert.strictEqual(api.tvFamily, family);
+}
+
+for (const userAgent of [
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit Mobile',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit Mobile',
+    'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit Mobile'
+]) {
+    const context = makeContext({ userAgent });
+    const api = runRuntime(context);
+    assert(api && api.enabled !== false, 'ordinary phones/tablets must not be false-positive TV bypasses');
+}
+
+{
+    const context = makeContext({
+        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit kiosk-shell',
+        maxTouchPoints: 0,
+        remoteOnlyPointer: true
+    });
+    const api = runRuntime(context);
+    assert(api && api.enabled !== false,
+        'coarse/no-pointer desktop or kiosk shells must not be false-positive TV bypasses');
+}
+
+
+{
+    const context = makeContext();
+    vm.runInContext(romanizerSource, context, { filename: 'jellyfin-lyric-romanizer.public-api-test.js' });
+    const api = runRuntime(context);
+    assert.doesNotThrow(() => api.romanization());
+    assert.doesNotThrow(() => api.explainRomanization('മലയാളം'));
+    assert.doesNotThrow(() => api.segmentRomanization('Hello മലയാളം'));
+    assert.doesNotThrow(() => api.detectRomanizationLanguages('माझं प्रेम आहे'));
+    assert.doesNotThrow(() => api.romanizationIR('ਪੰਜਾਬੀ'));
+    assert.doesNotThrow(() => api.romanizationVariants('தமிழ்', 3));
+    assert.doesNotThrow(() => api.exportRomanizationCase('प्यार', 'pyaar'));
+    assert.doesNotThrow(() => api.rankRomanizationCandidates('अदरक', [{ text: 'adrak', confidence: 0.97, language: 'hi' }]));
+    assert.doesNotThrow(() => api.selectRomanizationCandidate('अदरक', [{ text: 'adrak', confidence: 0.97, language: 'hi' }]));
+    assert.doesNotThrow(() => api.timing());
+    assert.doesNotThrow(() => api.backgroundVocals());
+    assert.doesNotThrow(() => api.instrumentalBreaks());
+    assert.doesNotThrow(() => api.rendererFingerprint());
+    assert.doesNotThrow(() => api.performance());
+    assert.doesNotThrow(() => api.atmosphere());
+    assert.doesNotThrow(() => api.refreshAtmosphere());
+    assert.doesNotThrow(() => api.diagnostics());
+}

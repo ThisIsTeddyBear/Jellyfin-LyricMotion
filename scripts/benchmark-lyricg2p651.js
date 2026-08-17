@@ -8,6 +8,10 @@ const { performance } = require('perf_hooks');
 
 const context = { window: {}, console };
 vm.createContext(context);
+const productVersion = fs.readFileSync(
+  path.join(__dirname, '..', 'VERSION'),
+  'utf8'
+).trim();
 const source = path.join(__dirname, '..', 'src', 'jellyfin-lyric-romanizer.js');
 const loadStart = performance.now();
 vm.runInContext(fs.readFileSync(source, 'utf8'), context, { filename: source });
@@ -78,7 +82,7 @@ const candidateCases = [
 ];
 
 const report = {
-  product: 'Jellyfin LyricMotion 3.2.0',
+  product: `Jellyfin LyricMotion ${productVersion}`,
   engine: r.version,
   node: process.version,
   platform: `${process.platform}/${process.arch}`,

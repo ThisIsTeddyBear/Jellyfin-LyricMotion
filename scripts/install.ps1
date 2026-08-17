@@ -204,19 +204,71 @@ while (Test-Path -LiteralPath $BackupPath) {
 }
 Copy-Item $IndexPath $BackupPath -Force
 
-# Stage all three assets before replacing any live file. A copy/disk failure
-# therefore leaves an existing installation untouched. Each final commit is a
-# same-directory atomic replacement.
+# Stage all three assets before replacing any live file. The complete previous
+# asset set is snapshotted as same-directory rollback files before commit. If
+# any asset or index replacement fails, every live file is restored so Jellyfin
+# never remains in a mixed-version LyricMotion state.
 $JsDestination = Join-Path $WebDir "jellyfin-lyric-motion.js"
 $CssDestination = Join-Path $WebDir "jellyfin-lyric-motion.css"
 $RomanizerDestination = Join-Path $WebDir "jellyfin-lyric-romanizer.js"
 $JsTemporary = $null
 $CssTemporary = $null
 $RomanizerTemporary = $null
+$RollbackEntries = @()
+
+function New-RollbackEntry([string]$Destination) {
+    if (-not (Test-Path -LiteralPath $Destination)) {
+        return [pscustomobject]@{
+            Destination = $Destination
+            Existed = $false
+            Backup = $null
+        }
+    }
+
+    $directory = Split-Path -Parent $Destination
+    $leaf = Split-Path -Leaf $Destination
+    $backup = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.rollback')
+    Copy-Item -LiteralPath $Destination -Destination $backup -Force
+    return [pscustomobject]@{
+        Destination = $Destination
+        Existed = $true
+        Backup = $backup
+    }
+}
+
+function Restore-RollbackEntries([object[]]$Entries) {
+    for ($index = $Entries.Count - 1; $index -ge 0; $index--) {
+        $entry = $Entries[$index]
+        try {
+            if ($entry.Existed -and $entry.Backup -and (Test-Path -LiteralPath $entry.Backup)) {
+                Copy-Item -LiteralPath $entry.Backup -Destination $entry.Destination -Force
+            } else {
+                Remove-Item -LiteralPath $entry.Destination -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Warning ("Could not restore " + $entry.Destination + ": " + $_.Exception.Message)
+        }
+    }
+}
+
+function Remove-RollbackEntries([object[]]$Entries) {
+    foreach ($entry in $Entries) {
+        if ($entry.Backup) {
+            Remove-Item -LiteralPath $entry.Backup -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 try {
     $JsTemporary = Stage-AtomicFile $JsSource $JsDestination
     $CssTemporary = Stage-AtomicFile $CssSource $CssDestination
     $RomanizerTemporary = Stage-AtomicFile $RomanizerSource $RomanizerDestination
+
+    $RollbackEntries = @(
+        (New-RollbackEntry $JsDestination),
+        (New-RollbackEntry $CssDestination),
+        (New-RollbackEntry $RomanizerDestination)
+    )
 
     Commit-AtomicReplacement $JsTemporary $JsDestination
     $JsTemporary = $null
@@ -224,17 +276,28 @@ try {
     $CssTemporary = $null
     Commit-AtomicReplacement $RomanizerTemporary $RomanizerDestination
     $RomanizerTemporary = $null
+
+    # Commit the HTML injection last. Restoring the persistent index backup is
+    # part of the same transaction if this final step fails.
+    Write-AtomicUtf8 $IndexPath $content
+} catch {
+    $failure = $_
+    Restore-RollbackEntries $RollbackEntries
+    try {
+        Copy-Item -LiteralPath $BackupPath -Destination $IndexPath -Force
+    } catch {
+        Write-Warning ("Could not restore index.html from " + $BackupPath + ": " + $_.Exception.Message)
+    }
+    throw $failure
 } finally {
     foreach ($temporary in @($JsTemporary, $CssTemporary, $RomanizerTemporary)) {
         if ($temporary -and (Test-Path -LiteralPath $temporary)) {
             Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         }
     }
+    Remove-RollbackEntries $RollbackEntries
 }
 
-# Commit the HTML injection last using a same-directory atomic replacement so
-# an interrupted write cannot leave Jellyfin's index.html half-written.
-Write-AtomicUtf8 $IndexPath $content
 Remove-Item (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
 

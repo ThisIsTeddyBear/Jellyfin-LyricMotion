@@ -1,6 +1,6 @@
 # Offline LyricG2P Romanization
 
-Release: `3.2.0`
+Release: `3.2.5`
 Romanizer: `6.5.1`
 
 ## Goal
@@ -33,15 +33,15 @@ The design was informed by publicly documented Indian-language transliteration w
 - **Dakshina** is particularly relevant to the product goal because it contains attested Romanization lexicons and full-sentence native/Latin parallel data for major South Asian languages.
 - Published Hindi/Punjabi G2P work identifies schwa deletion as a central pronunciation problem that naive Devanagari transliterators get wrong.
 
-No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P 6 keeps deterministic production output and adds a local corpus/evaluation pipeline, mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. A learned model is eligible only after it demonstrates held-out improvement and acceptable browser cost. See `LYRICG2P-6.md` and `ROMANIZATION-RESEARCH.md`.
+No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P 6 keeps deterministic production output and adds a local corpus/evaluation pipeline, mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. A learned model is eligible only after it demonstrates held-out improvement and acceptable browser cost. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
 
-## v3.2.0 / LyricG2P 6.5.1 implementation
+## v3.2.4 / LyricG2P 6.5.1 implementation
 
 LyricG2P 6.5 makes several pieces that were diagnostic scaffolding in 6.0 materially useful to production: conservative shared-script language evidence, structured phonological tokens, known-stem morphology, transform-carried provenance, n-best style variants and a richer candidate ranker. It also fixes legacy Malayalam chillu sequences whose joiners were previously discarded before final-short-u handling.
 
 The public confidence field remains an engineering evidence score, not a calibrated probability. The release includes calibration tooling so future independent corpora can fit those scores from observations rather than by renaming constants.
 
-No learned model is bundled. `research/train_tiny_transformer.py` and the dataset/evaluation scripts exist to make model experiments reproducible and benchmark-gated. See [LyricG2P 6.5](LYRICG2P-6.5.md) and [Romanization Research](ROMANIZATION-RESEARCH.md).
+No learned model is bundled. `research/train_tiny_transformer.py` and the dataset/evaluation scripts exist to make model experiments reproducible and benchmark-gated. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
 
 ### Historical 6.0 foundation
 
@@ -246,8 +246,8 @@ The offline stress suite repeatedly converts a multilingual Indian corpus and al
 
 There is no source-policy UI. The lyrics page exposes only:
 
-1. **Romanize / Romanized**
-2. the existing **lyrics timing offset** controls
+1. an icon-only **Romanization** toggle using the speech glyph
+2. the compact **lyrics timing** chip
 
 There is no Smart/Offline button, provider selector or hidden online Romanization mode.
 

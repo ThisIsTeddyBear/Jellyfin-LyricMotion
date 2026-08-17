@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 import zipfile
 
-EXCLUDED_DIRS = {'.git', '.github', '__pycache__', '.pytest_cache', '.mypy_cache', 'node_modules'}
+EXCLUDED_DIRS = {'.git', '.github', '__pycache__', '.pytest_cache', '.mypy_cache', 'node_modules', 'dist', 'build', '.venv', 'venv', '.tox'}
 EXCLUDED_SUFFIXES = {'.pyc', '.pyo', '.tmp'}
 FORBIDDEN_RELEASE_SUFFIXES = {'.onnx', '.pt', '.pth', '.bin'}
-FIXED_TIME = (2026, 8, 15, 0, 0, 0)
+FIXED_TIME = (2026, 8, 16, 0, 0, 0)
 REPO_ONLY_FILES = {'.gitignore', 'GITHUB-RELEASE.md', 'REPO-UPDATE-INSTRUCTIONS.md', 'REPO-BUNDLE-MANIFEST.txt'}
 REPO_ONLY_PATHS = {'docs/RELEASING.md'}
 
@@ -25,6 +25,11 @@ def should_include(path: Path, root: Path, output: Path) -> bool:
     if path.suffix.lower() in EXCLUDED_SUFFIXES:
         return False
     if path.name in {'.DS_Store'}:
+        return False
+    # Development/visual-QA scratch files are never release payload. Keep this
+    # limited to repository-root tmp-* files so legitimate docs/assets inside
+    # subdirectories are not filtered by a broad filename heuristic.
+    if len(rel.parts) == 1 and path.name.startswith('tmp-'):
         return False
     return path.is_file() and not path.is_symlink()
 
