@@ -25,6 +25,7 @@ if ! is_webdir "$WEB_DIR"; then
     WEB_DIR=$JELLYFIN_WEB_DIR
   else
     for candidate in \
+      /Applications/Jellyfin.app/Contents/Resources/jellyfin-web \
       /usr/share/jellyfin/web \
       /usr/lib/jellyfin/bin/jellyfin-web \
       /opt/jellyfin/jellyfin-web \

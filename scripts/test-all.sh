@@ -30,13 +30,15 @@ python3 -m py_compile \
 sh -n scripts/install.sh
 sh -n scripts/uninstall.sh
 
-test "$(cat VERSION)" = "3.2.5"
-test "$(cat LYRICG2P_VERSION)" = "6.5.1"
-grep -q "const VERSION = '3.2.5'" src/jellyfin-lyric-motion.js
-grep -q "const LYRICG2P_VERSION = '6.5.1'" src/jellyfin-lyric-motion.js
+APP_VERSION=$(tr -d '\r\n' < VERSION)
+G2P_VERSION=$(tr -d '\r\n' < LYRICG2P_VERSION)
+test -n "$APP_VERSION"
+test -n "$G2P_VERSION"
+grep -q "const VERSION = '$APP_VERSION'" src/jellyfin-lyric-motion.js
+grep -q "const LYRICG2P_VERSION = '$G2P_VERSION'" src/jellyfin-lyric-motion.js
 grep -q "COPY LYRICG2P_VERSION /tmp/jellyfin-lyricg2p-version" docker/Dockerfile
 grep -q 'g2p=${LYRICG2P_VERSION}' docker/Dockerfile
-grep -q "const VERSION = '6.5.1'" src/jellyfin-lyric-romanizer.js
+grep -q "const VERSION = '$G2P_VERSION'" src/jellyfin-lyric-romanizer.js
 
 # Production/regression and hybrid/model/Unicode suites.
 node tests/lyricg2p65.test.js
@@ -47,16 +49,14 @@ node tests/instrumental-breaks.test.js
 python3 tests/ttml_converter_test.py
 python3 tests/research_pipeline_test.py
 python3 tests/release_static_test.py
-
 node scripts/evaluate-lyricg2p65.js \
   research/lyricg2p65-regression-seed.tsv /tmp/lyricg2p651-regression-report.json >/dev/null
 node scripts/calibrate-lyricg2p65-confidence.js \
   research/lyricg2p65-regression-seed.tsv /tmp/lyricg2p651-confidence-report.json >/dev/null
 node scripts/benchmark-lyricg2p651.js >/tmp/lyricg2p651-benchmark.json
-
-grep -q '"engine": "6.5.1"' /tmp/lyricg2p651-regression-report.json
-grep -q '"engine": "6.5.1"' /tmp/lyricg2p651-confidence-report.json
-grep -q '"engine": "6.5.1"' /tmp/lyricg2p651-benchmark.json
+grep -q "\"engine\": \"$G2P_VERSION\"" /tmp/lyricg2p651-regression-report.json
+grep -q "\"engine\": \"$G2P_VERSION\"" /tmp/lyricg2p651-confidence-report.json
+grep -q "\"engine\": \"$G2P_VERSION\"" /tmp/lyricg2p651-benchmark.json
 
 # Synthetic Jellyfin Web install/uninstall, including engine-specific cache busting.
 TMP_WEB=$(mktemp -d)
@@ -71,7 +71,7 @@ grep -q "jellyfin-lyric-motion.css?v=$(cat VERSION)" "$TMP_WEB/index.html"
 test -s "$TMP_WEB/jellyfin-lyric-motion.js"
 test -s "$TMP_WEB/jellyfin-lyric-motion.css"
 test -s "$TMP_WEB/jellyfin-lyric-romanizer.js"
-grep -q "const VERSION = '6.5.1'" "$TMP_WEB/jellyfin-lyric-romanizer.js"
+grep -q "const VERSION = '$G2P_VERSION'" "$TMP_WEB/jellyfin-lyric-romanizer.js"
 sh scripts/uninstall.sh --webdir "$TMP_WEB" >/dev/null
 ! grep -q 'jellyfin-lyric-motion.js' "$TMP_WEB/index.html"
 
@@ -88,7 +88,7 @@ printf 'old-css\n' > "$TMP_ROLLBACK_WEB/jellyfin-lyric-motion.css"
 printf 'old-g2p\n' > "$TMP_ROLLBACK_WEB/jellyfin-lyric-romanizer.js"
 cp "$TMP_ROLLBACK_WEB/index.html" "$TMP_ROLLBACK_WEB/index.expected.html"
 REAL_MV=$(command -v mv)
-cat > "$TMP_FAKE_BIN/mv" <<'SH'
+cat > "$TMP_FAKE_BIN/mv" <<'MVSH'
 #!/usr/bin/env sh
 set -eu
 count=$(cat "$LYRICMOTION_TEST_MV_COUNT")
@@ -98,7 +98,7 @@ if [ "$count" -eq 2 ]; then
   exit 74
 fi
 exec "$LYRICMOTION_REAL_MV" "$@"
-SH
+MVSH
 chmod +x "$TMP_FAKE_BIN/mv"
 if PATH="$TMP_FAKE_BIN:$PATH" \
   LYRICMOTION_TEST_MV_COUNT="$ROLLBACK_MV_COUNT" \
@@ -113,42 +113,73 @@ test "$(cat "$TMP_ROLLBACK_WEB/jellyfin-lyric-romanizer.js")" = 'old-g2p'
 cmp "$TMP_ROLLBACK_WEB/index.html" "$TMP_ROLLBACK_WEB/index.expected.html"
 rm -rf "$TMP_ROLLBACK_WEB" "$TMP_FAKE_BIN" "$ROLLBACK_MV_COUNT"
 
-# Deterministic release packaging and automatic checksum sidecar. Build-output
-# directories must never recurse stale release files back into a new archive.
-mkdir -p dist
-printf 'stale-release-artifact\n' > dist/stale-release.zip.sha256
-python3 scripts/package_release.py --version "$(cat VERSION)" --output /tmp/lyricmotion-package-a.zip >/dev/null
-python3 scripts/package_release.py --version "$(cat VERSION)" --output /tmp/lyricmotion-package-b.zip >/dev/null
-cmp /tmp/lyricmotion-package-a.zip /tmp/lyricmotion-package-b.zip
-test -s /tmp/lyricmotion-package-a.zip.sha256
-python3 - <<'PY'
+# Deterministic platform release packaging. The packager is allowlist-only, so
+# repository development material can never leak into a platform archive.
+PKG_A=/tmp/lyricmotion-release-a
+PKG_B=/tmp/lyricmotion-release-b
+rm -rf "$PKG_A" "$PKG_B"
+python3 scripts/package_release.py \
+  --version "$(cat VERSION)" --platform all --output-dir "$PKG_A" >/dev/null
+python3 scripts/package_release.py \
+  --version "$(cat VERSION)" --platform all --output-dir "$PKG_B" >/dev/null
+
+for platform in windows linux macos docker; do
+  A="$PKG_A/jellyfin-lyric-motion-v$(cat VERSION)-${platform}.zip"
+  B="$PKG_B/jellyfin-lyric-motion-v$(cat VERSION)-${platform}.zip"
+  cmp "$A" "$B"
+  test -s "$A.sha256"
+  unzip -t "$A" >/dev/null
+done
+
+python3 - "$PKG_A" "$(cat VERSION)" <<'PY'
+from pathlib import Path
+import sys
 import zipfile
-for path in ('/tmp/lyricmotion-package-a.zip', '/tmp/lyricmotion-package-b.zip'):
-    with zipfile.ZipFile(path) as archive:
+
+root = Path(sys.argv[1])
+version = sys.argv[2]
+common = {
+    'VERSION', 'LYRICG2P_VERSION', 'README.md', 'LICENSE',
+    'THIRD_PARTY_NOTICES.md',
+    'licenses/DYNAMIC-BACKGROUND-MIT.txt', 'licenses/KAWARP-MIT.txt',
+    'src/jellyfin-lyric-motion.js', 'src/jellyfin-lyric-motion.css',
+    'src/jellyfin-lyric-romanizer.js',
+}
+extra = {
+    'windows': {'INSTALL-WINDOWS.cmd', 'UNINSTALL-WINDOWS.cmd',
+                'scripts/install.ps1', 'scripts/uninstall.ps1'},
+    'linux': {'scripts/install.sh', 'scripts/uninstall.sh'},
+    'macos': {'scripts/install.sh', 'scripts/uninstall.sh'},
+    'docker': {'docker/Dockerfile'},
+}
+for platform in ('windows', 'linux', 'macos', 'docker'):
+    package = f'jellyfin-lyric-motion-v{version}-{platform}'
+    archive_path = root / f'{package}.zip'
+    with zipfile.ZipFile(archive_path) as archive:
         bad = archive.testzip()
         if bad is not None:
-            raise SystemExit(f'Corrupt release archive member: {bad}')
-        names = archive.namelist()
-        forbidden = (
-            '/.github/', '/.gitignore', '/GITHUB-RELEASE.md',
-            '/REPO-UPDATE-INSTRUCTIONS.md', '/REPO-BUNDLE-MANIFEST.txt',
-            '/docs/RELEASING.md',
+            raise SystemExit(f'{platform}: corrupt release archive member: {bad}')
+        actual = {
+            name.removeprefix(package + '/')
+            for name in archive.namelist()
+        }
+    expected = common | extra[platform]
+    if actual != expected:
+        missing = sorted(expected - actual)
+        leaked = sorted(actual - expected)
+        raise SystemExit(
+            f'{platform}: wrong release manifest; missing={missing}, leaked={leaked}'
         )
-        leaked = [name for name in names if any(marker in name for marker in forbidden)]
-        leaked += [name for name in names if '/dist/' in name or '/build/' in name]
-        if leaked:
-            raise SystemExit('Repository/build-only metadata leaked into release ZIP: ' + ', '.join(leaked))
 PY
-rm -rf dist
-rm -f /tmp/lyricmotion-package-a.zip /tmp/lyricmotion-package-b.zip \
-      /tmp/lyricmotion-package-a.zip.sha256 /tmp/lyricmotion-package-b.zip.sha256
+rm -rf "$PKG_A" "$PKG_B"
 
-# py_compile is only a syntax gate; remove its cache output before release hygiene checks.
+# py_compile is only a syntax gate; remove its cache output before repository hygiene checks.
 rm -rf scripts/__pycache__ research/__pycache__ tests/__pycache__
 
-# Release tree hygiene. Targeted sparse coefficients are source text, not external checkpoints.
+# Repository tree hygiene. Targeted sparse coefficients are source text, not external checkpoints.
 if find . -type f \( -name '*.onnx' -o -name '*.pt' -o -name '*.pth' -o -name '*.bin' -o -name '*.pyc' -o -name '*.pyo' \) | grep -q .; then
-  echo 'Unexpected compiled/model artifact in release tree' >&2
+  echo 'Unexpected compiled/model artifact in repository tree' >&2
   exit 1
 fi
+
 echo "Jellyfin LyricMotion $(cat VERSION) / LyricG2P $(cat LYRICG2P_VERSION): validation passed"

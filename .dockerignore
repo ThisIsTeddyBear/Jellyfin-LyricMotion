@@ -1,0 +1,12 @@
+**
+
+!VERSION
+!LYRICG2P_VERSION
+
+!src/
+!src/jellyfin-lyric-motion.js
+!src/jellyfin-lyric-motion.css
+!src/jellyfin-lyric-romanizer.js
+
+!docker/
+!docker/Dockerfile
