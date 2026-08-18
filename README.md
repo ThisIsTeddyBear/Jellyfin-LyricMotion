@@ -68,7 +68,14 @@ LyricMotion does not download lyrics. It enhances lyric data already available t
 
 ## Install
 
-Download `jellyfin-lyric-motion-v3.2.5.zip` from GitHub Releases, extract it, then run the installer from the extracted folder.
+Download the platform-specific archive from GitHub Releases, then extract it:
+
+- **Windows:** `jellyfin-lyric-motion-v3.2.5-windows.zip`
+- **Linux:** `jellyfin-lyric-motion-v3.2.5-linux.zip`
+- **macOS:** `jellyfin-lyric-motion-v3.2.5-macos.zip`
+- **Docker build context:** `jellyfin-lyric-motion-v3.2.5-docker.zip`
+
+The release archives are strict allowlists. Tests, research, benchmarks, repository documentation, examples, CI metadata, and release tooling are not bundled.
 
 ### Windows
 
@@ -165,6 +172,8 @@ LyricMotion no longer treats non-Latin text as a second-class visual path. Malay
 Arabic-family joining and unknown complex runs use a whole-shaped-run bloom so contextual glyph connections remain correct. RTL direction and original ELRC timing are preserved. See [Multilingual Rendering](docs/MULTILINGUAL-RENDERING.md).
 
 ## Convert TTML to ELRC
+
+The TTML converter is a repository/developer utility and is intentionally not bundled in the minimal platform installer archives. From a source checkout:
 
 ```bash
 python scripts/ttml_to_elrc.py "/music/Artist/Album/01 - Song.ttml"
@@ -308,14 +317,17 @@ The PowerShell entry point locates Git Bash and runs the same canonical release 
 
 Or run individual contracts; see [Contributing](CONTRIBUTING.md).
 
-Build the deterministic release package:
+Build the deterministic platform release packages:
 
 ```bash
-mkdir -p dist
+rm -rf dist
 python3 scripts/package_release.py \
   --version "$(cat VERSION)" \
-  --output "dist/jellyfin-lyric-motion-v$(cat VERSION).zip"
+  --platform all \
+  --output-dir dist
 ```
+
+This produces separate Windows, Linux, macOS, and Docker ZIPs, each with a matching `.sha256` file.
 
 The complete tagging/GitHub Release procedure lives in the repository-only `docs/RELEASING.md`; it is intentionally excluded from public release ZIPs.
 
