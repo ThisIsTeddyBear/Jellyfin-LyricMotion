@@ -17,7 +17,6 @@ From the repository root:
 git status --short
 cat VERSION
 cat LYRICG2P_VERSION
-sh scripts/test-all.sh
 ```
 
 For v3.2.5 the version files must be:

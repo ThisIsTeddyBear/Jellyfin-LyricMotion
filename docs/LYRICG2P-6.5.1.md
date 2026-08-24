@@ -185,12 +185,7 @@ These changes are about timing safety, not pretending malformed strings have a l
 
 The player uses `romanize()`, not `romanizeDetailed()`.
 
-The learned advisors and expanded diagnostics are therefore off the rendering hot path. A local Node 22 cross-build benchmark recorded the 6.5.1 normal Punjabi path close to the previous deterministic 6.5.0 base and substantially faster than the alternate build that evaluated learned schwa on the normal path. The exact machine-readable development measurements are in:
-
-- `research/lyricg2p651-benchmark-node.json`
-- `research/lyricg2p651-cross-build-benchmark.json`
-
-Those values are not browser, Android TV or WebView guarantees.
+The learned advisors and expanded diagnostics are off the rendering hot path. Browser, Android TV, and WebView performance can still vary by device and font availability.
 
 ## Confidence semantics
 

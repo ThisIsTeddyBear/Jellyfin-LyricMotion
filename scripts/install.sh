@@ -59,8 +59,9 @@ if ! is_webdir "$WEB_DIR"; then
   exit 1
 fi
 
-command -v python3 >/dev/null 2>&1 || {
-  echo "python3 is required by this installer."
+PYTHON_BIN=${LYRICMOTION_PYTHON:-python3}
+"$PYTHON_BIN" --version >/dev/null 2>&1 || {
+  echo "Python 3 is required by this installer. Set LYRICMOTION_PYTHON when python3 is not on PATH."
   exit 1
 }
 
@@ -190,7 +191,7 @@ JS_ROLLBACK=$(stage_existing_backup "$JS_DEST")
 CSS_ROLLBACK=$(stage_existing_backup "$CSS_DEST")
 ROMANIZER_ROLLBACK=$(stage_existing_backup "$ROMANIZER_DEST")
 
-python3 - "$INDEX_TEMP" "$VERSION" "$LYRICG2P_VERSION" <<'PY'
+"$PYTHON_BIN" - "$INDEX_TEMP" "$VERSION" "$LYRICG2P_VERSION" <<'PY'
 from pathlib import Path
 import os, re, sys
 

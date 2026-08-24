@@ -41,7 +41,7 @@ LyricG2P 6.5 makes several pieces that were diagnostic scaffolding in 6.0 materi
 
 The public confidence field remains an engineering evidence score, not a calibrated probability. The release includes calibration tooling so future independent corpora can fit those scores from observations rather than by renaming constants.
 
-No learned model is bundled. `research/train_tiny_transformer.py` and the dataset/evaluation scripts exist to make model experiments reproducible and benchmark-gated. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
+No learned model or training pipeline is bundled. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
 
 ### Historical 6.0 foundation
 

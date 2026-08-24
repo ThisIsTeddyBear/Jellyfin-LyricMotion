@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Convert Apple-style timed TTML lyrics to Jellyfin-compatible ELRC.
+"""Unified TTML/QRC-to-LRC/ELRC converter.
 
 Unlike a shallow ``p/span`` converter, this converter walks nested spans and
 extracts ``ttm:role="x-bg"`` content as its own timed lyric line.  This keeps
 background vocals such as ``(Brazil)`` visible without appending them to the
 end of the main line.
 
-ELRC has no standard background-vocal role.  Consequently, background vocals
-are represented as separate, fully timed ELRC lines.  The TTML should still be
-kept as the lossless master file.
+Line-synchronised sources become standard ``.lrc`` files. Only sources with
+meaningful intra-line timing become ``.elrc``, preventing a whole line from
+being rendered as one glowing karaoke word. TTML/QRC should still be kept as
+the lossless master file.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import re
 import os
 import sys
@@ -35,6 +37,7 @@ SPACE_ATTRIBUTE = f"{{{XML_NS}}}space"
 BACKGROUND_ROLES = {"x-bg", "background", "bg"}
 AUXILIARY_ROLES = {"x-roman", "roman", "romanization", "x-translation", "translation"}
 MAX_TTML_BYTES = 64 * 1024 * 1024
+SUPPORTED_INPUT_SUFFIXES = {".ttml", ".dfxp", ".qrc"}
 
 # ELRC has no standard per-line role field. Jellyfin strips Unicode format
 # controls on some server/web combinations, so use a deliberately visible,
@@ -47,6 +50,12 @@ WHITESPACE_RE = re.compile(r"\s+")
 OFFSET_TIME_RE = re.compile(
     r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(h|m|s|ms|f|t)$",
     re.IGNORECASE,
+)
+QRC_LINE_RE = re.compile(r"^\s*\[\s*(-?\d+)\s*,\s*(\d+)\s*\](.*)$")
+QRC_WORD_RE = re.compile(r"\(\s*(-?\d+)\s*,\s*(\d+)\s*\)")
+QRC_META_RE = re.compile(r"^\s*\[([A-Za-z][\w-]*):(.*)\]\s*$")
+QRC_CONTENT_RE = re.compile(
+    r"LyricContent\s*=\s*\"(.*?)\"\s*/\s*>", re.IGNORECASE | re.DOTALL
 )
 
 
@@ -81,6 +90,10 @@ class ConversionResult:
     lines: tuple[LyricLine, ...]
     paragraph_count: int
     background_line_count: int
+    source_format: str = "ttml"
+    timing_mode: str = "elrc"
+    word_synced_line_count: int = 0
+    qrc_timing_mode: str | None = None
 
 
 def local_name(tag: str) -> str:
@@ -480,6 +493,35 @@ def make_line(
     return LyricLine(start, end, compacted, kind, source_order, lane_order)
 
 
+def line_is_word_synced(line: LyricLine) -> bool:
+    """Return True only when a line has meaningful intra-line cue movement.
+
+    TTML frequently wraps a complete line in one or many spans that all inherit
+    the paragraph's begin time. Serializing those inherited duplicates as ELRC
+    makes Jellyfin expose the entire lyric as one animated word. At least two
+    distinct timed text starts are required before emitting enhanced cues.
+    """
+
+    starts = {
+        token.begin_ms
+        for token in line.tokens
+        if token.timed
+        and token.begin_ms is not None
+        and token.text.strip()
+    }
+    return len(starts) >= 2
+
+
+def timing_mode_for(lines: Sequence[LyricLine]) -> tuple[str, int]:
+    vocal_lines = [line for line in lines if line.text]
+    word_synced_count = sum(line_is_word_synced(line) for line in vocal_lines)
+    if word_synced_count == 0:
+        return "lrc", 0
+    if word_synced_count == len(vocal_lines):
+        return "elrc", word_synced_count
+    return "mixed", word_synced_count
+
+
 def convert_tree(
     root: ET.Element,
     *,
@@ -568,9 +610,11 @@ def convert_tree(
         if main_line is not None and not is_background(paragraph):
             lines.append(main_line)
 
-    # Background lines sort before their owning main line at an identical
-    # timestamp. Jellyfin's flat active-line model then leaves the main line as
-    # the last/current line while the short backing vocal remains visible above.
+    # Equal-start backing lines sort before their owning main line, so the
+    # renderer can attach them immediately before that lead. Later backing
+    # lines retain chronological order and therefore attach after the closest
+    # preceding lead. Jellyfin's flat active-line model still leaves the main
+    # line as the last/current line for equal-start overlaps.
     lines.sort(
         key=lambda line: (
             line.start_ms,
@@ -579,13 +623,34 @@ def convert_tree(
             line.lane_order,
         )
     )
-    return ConversionResult(tuple(lines), paragraph_count, background_count)
+    timing_mode, word_synced_count = timing_mode_for(lines)
+    return ConversionResult(
+        tuple(lines),
+        paragraph_count,
+        background_count,
+        source_format="ttml",
+        timing_mode=timing_mode,
+        word_synced_line_count=word_synced_count,
+    )
 
 
-def serialize_line(line: LyricLine, *, mark_background: bool = True) -> str:
+def serialize_line(
+    line: LyricLine,
+    *,
+    mark_background: bool = True,
+    enhanced: bool | None = None,
+) -> str:
     parts = [f"[{elrc_time(line.start_ms)}]"]
     if line.kind == "background" and mark_background:
         parts.append(BACKGROUND_SENTINEL)
+
+    if enhanced is None:
+        enhanced = line_is_word_synced(line)
+
+    if not enhanced:
+        parts.append(line.text)
+        return "".join(parts).strip()
+
     last_cue: int | None = None
 
     for token in line.tokens:
@@ -599,15 +664,260 @@ def serialize_line(line: LyricLine, *, mark_background: bool = True) -> str:
     return "".join(parts).strip()
 
 
+# ---------------------------------------------------------------------------
+# QRC
+# ---------------------------------------------------------------------------
+
+def extract_qrc_content(raw: str) -> str:
+    """Read XML-wrapped or raw QRC without rejecting common malformed XML."""
+
+    match = QRC_CONTENT_RE.search(raw)
+    if match:
+        return html.unescape(match.group(1)).replace("&#10;", "\n")
+
+    element_match = re.search(
+        r"<LyricContent[^>]*>(.*?)</LyricContent>", raw, re.IGNORECASE | re.DOTALL
+    )
+    if element_match:
+        return html.unescape(element_match.group(1))
+
+    if any(QRC_LINE_RE.match(line) for line in raw.splitlines()):
+        return raw
+
+    raise ConversionError("No readable QRC LyricContent or timed [start,duration] lines were found")
+
+
+def parse_qrc_metadata(content: str) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for line in content.splitlines():
+        match = QRC_META_RE.match(line)
+        if match:
+            metadata[match.group(1).casefold()] = match.group(2).strip()
+    return metadata
+
+
+def qrc_word_timing_mode(line_start: int, starts: Sequence[int]) -> str:
+    """Distinguish absolute QRC word times from line-relative exports."""
+
+    if not starts or line_start <= 0:
+        return "absolute"
+
+    absolute_distance = min(abs(start - line_start) for start in starts)
+    relative_distance = min(abs(start) for start in starts)
+    if (
+        relative_distance + 250 < absolute_distance
+        and max(starts) <= max(20_000, line_start // 2)
+    ):
+        return "relative"
+    return "absolute"
+
+
+def parse_qrc_timed_line(
+    raw_line: str,
+    *,
+    source_order: int,
+    offset_ms: int,
+) -> tuple[LyricLine | None, str | None]:
+    header = QRC_LINE_RE.match(raw_line)
+    if not header:
+        return None, None
+
+    line_start = int(header.group(1))
+    line_duration = int(header.group(2))
+    payload = header.group(3)
+    matches = list(QRC_WORD_RE.finditer(payload))
+    header_start = max(0, line_start + offset_ms)
+    header_end = max(header_start, line_start + line_duration + offset_ms)
+
+    if not matches:
+        text = payload.strip()
+        if not text:
+            return None, None
+        return (
+            LyricLine(
+                header_start,
+                header_end,
+                (TimedText(text, header_start, header_end),),
+                "main",
+                source_order,
+                0,
+            ),
+            None,
+        )
+
+    starts = [int(match.group(1)) for match in matches]
+    timing_mode = qrc_word_timing_mode(line_start, starts)
+    tokens: list[TimedText] = []
+    cursor = 0
+    for match in matches:
+        text = payload[cursor:match.start()]
+        raw_start = int(match.group(1))
+        duration = int(match.group(2))
+        absolute_start = raw_start + (
+            line_start if timing_mode == "relative" else 0
+        )
+        begin = max(0, absolute_start + offset_ms)
+        end = max(begin, absolute_start + duration + offset_ms)
+        if text:
+            tokens.append(TimedText(text, begin, end, timed=True))
+        cursor = match.end()
+
+    if payload[cursor:]:
+        tokens.append(TimedText(payload[cursor:], None, None, timed=False))
+
+    tokens = list(compact_tokens(tokens))
+    if not tokens or not "".join(token.text for token in tokens).strip():
+        return None, timing_mode
+
+    token_starts = [token.begin_ms for token in tokens if token.begin_ms is not None]
+    token_ends = [token.end_ms for token in tokens if token.end_ms is not None]
+    return (
+        LyricLine(
+            min([header_start, *token_starts]) if token_starts else header_start,
+            max([header_end, *token_ends]) if token_ends else header_end,
+            tuple(tokens),
+            "main",
+            source_order,
+            0,
+        ),
+        timing_mode,
+    )
+
+
+def parse_qrc_file(path: Path) -> ConversionResult:
+    try:
+        if path.stat().st_size > MAX_TTML_BYTES:
+            raise ConversionError(
+                f"QRC input is too large ({path.stat().st_size} bytes; limit {MAX_TTML_BYTES})"
+            )
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")
+    except ConversionError:
+        raise
+    except OSError as exc:
+        raise ConversionError(f"Could not read QRC file {path}: {exc}") from exc
+
+    content = extract_qrc_content(raw)
+    metadata = parse_qrc_metadata(content)
+    try:
+        offset_ms = int(metadata.get("offset", "0") or "0")
+    except ValueError:
+        offset_ms = 0
+
+    lines: list[LyricLine] = []
+    timing_modes: list[str] = []
+    source_line_count = 0
+    for raw_line in content.splitlines():
+        if not QRC_LINE_RE.match(raw_line):
+            continue
+        source_line_count += 1
+        line, timing_mode = parse_qrc_timed_line(
+            raw_line,
+            source_order=source_line_count - 1,
+            offset_ms=offset_ms,
+        )
+        if line:
+            lines.append(line)
+        if timing_mode:
+            timing_modes.append(timing_mode)
+
+    if not lines:
+        raise ConversionError("No timed QRC lyric lines were found")
+
+    lines.sort(key=lambda line: (line.start_ms, line.source_order))
+    mode, word_synced_count = timing_mode_for(lines)
+    absolute_count = timing_modes.count("absolute")
+    relative_count = timing_modes.count("relative")
+    qrc_timing_mode = (
+        "line-only"
+        if not timing_modes
+        else "absolute"
+        if relative_count == 0
+        else "relative"
+        if absolute_count == 0
+        else f"mixed ({absolute_count} absolute, {relative_count} relative)"
+    )
+    return ConversionResult(
+        tuple(lines),
+        source_line_count,
+        0,
+        source_format="qrc",
+        timing_mode=mode,
+        word_synced_line_count=word_synced_count,
+        qrc_timing_mode=qrc_timing_mode,
+    )
+
+
+def detect_format(path: Path) -> str:
+    suffix = path.suffix.casefold()
+    if suffix == ".qrc":
+        return "qrc"
+    if suffix in {".ttml", ".dfxp"}:
+        return "ttml"
+
+    try:
+        sample = path.read_text(encoding="utf-8-sig", errors="replace")[:16_384]
+    except OSError as exc:
+        raise ConversionError(f"Could not read {path}: {exc}") from exc
+    if "LyricContent" in sample or any(QRC_LINE_RE.match(line) for line in sample.splitlines()):
+        return "qrc"
+    if re.search(r"<\s*(?:\w+:)?tt\b", sample, re.IGNORECASE):
+        return "ttml"
+    raise ConversionError(f"Could not detect lyric format for {path}")
+
+
 def convert_file(
     input_path: Path,
     output_path: Path | None = None,
     *,
+    source_format: str = "auto",
     include_background: bool = True,
     mark_background: bool = True,
 ) -> tuple[Path, ConversionResult]:
+    if not input_path.exists():
+        raise ConversionError(f"Input file does not exist: {input_path}")
+
+    source_format = (
+        detect_format(input_path)
+        if source_format == "auto"
+        else source_format
+    )
+
+    if source_format == "ttml":
+        try:
+            size = input_path.stat().st_size
+            if size > MAX_TTML_BYTES:
+                raise ConversionError(
+                    f"TTML input is too large ({size} bytes; limit {MAX_TTML_BYTES})"
+                )
+            payload = input_path.read_bytes()
+            if len(payload) > MAX_TTML_BYTES:
+                raise ConversionError(
+                    f"TTML input is too large ({len(payload)} bytes; limit {MAX_TTML_BYTES})"
+                )
+            upper_payload = payload.upper()
+            if b"<!DOCTYPE" in upper_payload or b"<!ENTITY" in upper_payload:
+                raise ConversionError(
+                    "TTML documents containing DTD/entity declarations are not supported"
+                )
+            root = ET.fromstring(payload)
+        except ConversionError:
+            raise
+        except (ET.ParseError, OSError) as exc:
+            raise ConversionError(f"Could not read TTML file {input_path}: {exc}") from exc
+
+        result = convert_tree(root, include_background=include_background)
+    elif source_format == "qrc":
+        result = parse_qrc_file(input_path)
+    else:
+        raise ConversionError(f"Unsupported source format: {source_format}")
+
+    if not result.lines:
+        raise ConversionError("No timed lyric lines were found")
+
     if output_path is None:
-        output_path = input_path.with_suffix(".elrc")
+        output_path = input_path.with_suffix(
+            ".lrc" if result.timing_mode == "lrc" else ".elrc"
+        )
 
     try:
         same_path = input_path.resolve() == output_path.resolve()
@@ -616,38 +926,16 @@ def convert_file(
 
     if same_path:
         raise ConversionError(
-            "Input and output paths must be different; refusing to overwrite the TTML source"
+            "Input and output paths must be different; refusing to overwrite the lyric source"
         )
-
-    try:
-        size = input_path.stat().st_size
-        if size > MAX_TTML_BYTES:
-            raise ConversionError(
-                f"TTML input is too large ({size} bytes; limit {MAX_TTML_BYTES})"
-            )
-        payload = input_path.read_bytes()
-        if len(payload) > MAX_TTML_BYTES:
-            raise ConversionError(
-                f"TTML input is too large ({len(payload)} bytes; limit {MAX_TTML_BYTES})"
-            )
-        upper_payload = payload.upper()
-        if b"<!DOCTYPE" in upper_payload or b"<!ENTITY" in upper_payload:
-            raise ConversionError(
-                "TTML documents containing DTD/entity declarations are not supported"
-            )
-        root = ET.fromstring(payload)
-    except ConversionError:
-        raise
-    except (ET.ParseError, OSError) as exc:
-        raise ConversionError(f"Could not read TTML file {input_path}: {exc}") from exc
-
-    result = convert_tree(root, include_background=include_background)
-    if not result.lines:
-        raise ConversionError("No timed TTML lyric lines were found")
 
     rendered = (
         "\n".join(
-            serialize_line(line, mark_background=mark_background)
+            serialize_line(
+                line,
+                mark_background=mark_background,
+                enhanced=line_is_word_synced(line),
+            )
             for line in result.lines
         )
         + "\n"
@@ -689,13 +977,39 @@ def convert_file(
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert timed TTML to enhanced LRC while preserving nested "
-            "word/syllable timings and x-bg vocals as separate lines."
+            "Convert timed TTML or QRC to LRC/ELRC. Line-synced sources become "
+            ".lrc; word-synced sources become .elrc."
         )
     )
-    parser.add_argument("input", type=Path, help="input .ttml file")
     parser.add_argument(
-        "-o", "--output", type=Path, help="output .elrc path (default: beside input)"
+        "input",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        help=(
+            "input .ttml, .dfxp, or .qrc file; omit it to batch-convert "
+            "the current folder"
+        ),
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path,
+        help="output path (default: .lrc for line timing, .elrc for word timing)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("auto", "ttml", "qrc"),
+        default="auto",
+        help="force a source format instead of auto-detecting it",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="directory mode: also convert supported files in subdirectories",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="directory mode: skip a source when its .lrc or .elrc output exists",
     )
     parser.add_argument(
         "--no-background",
@@ -713,12 +1027,103 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def iter_source_files(directory: Path, *, recursive: bool) -> list[Path]:
+    iterator = directory.rglob("*") if recursive else directory.iterdir()
+    return sorted(
+        (
+            path
+            for path in iterator
+            if path.is_file() and path.suffix.casefold() in SUPPORTED_INPUT_SUFFIXES
+        ),
+        key=lambda path: str(path.relative_to(directory)).casefold(),
+    )
+
+
+def run_batch(directory: Path, args: argparse.Namespace) -> int:
+    if args.output is not None:
+        print(
+            "error: -o/--output is only supported for a single input file",
+            file=sys.stderr,
+        )
+        return 1
+
+    files = iter_source_files(directory, recursive=args.recursive)
+    if not files:
+        scope = " recursively" if args.recursive else ""
+        print(f"No .ttml, .dfxp, or .qrc files found{scope} in {directory.resolve()}")
+        return 0
+
+    stem_counts: dict[str, int] = {}
+    for source in files:
+        key = str(source.relative_to(directory).with_suffix("")).casefold()
+        stem_counts[key] = stem_counts.get(key, 0) + 1
+
+    print(f"Batch mode: found {len(files)} source lyric file(s) in {directory.resolve()}")
+    converted = 0
+    skipped = 0
+    failed = 0
+
+    for index, source in enumerate(files, start=1):
+        relative = source.relative_to(directory)
+        collision_key = str(relative.with_suffix("")).casefold()
+        label = f"[{index}/{len(files)}] {relative}"
+
+        if stem_counts[collision_key] > 1:
+            print(
+                f"{label} -> ERROR: another source has the same basename; "
+                "convert these files individually with -o to avoid overwriting",
+                file=sys.stderr,
+            )
+            failed += 1
+            continue
+
+        lrc_path = source.with_suffix(".lrc")
+        elrc_path = source.with_suffix(".elrc")
+        if args.skip_existing and (lrc_path.exists() or elrc_path.exists()):
+            print(f"{label} -> skipped (an LRC/ELRC output already exists)")
+            skipped += 1
+            continue
+
+        try:
+            output_path, result = convert_file(
+                source,
+                source_format=args.format,
+                include_background=not args.no_background,
+                mark_background=not args.plain_background,
+            )
+        except ConversionError as exc:
+            print(f"{label} -> ERROR: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+
+        print(
+            f"{label} -> {output_path.name} "
+            f"({result.source_format.upper()} {result.timing_mode.upper()})"
+        )
+        converted += 1
+
+    print(f"Done: {converted} converted, {skipped} skipped, {failed} failed.")
+    return 1 if failed else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
+
+    if args.input.is_dir():
+        return run_batch(args.input, args)
+
+    if args.recursive or args.skip_existing:
+        print(
+            "error: --recursive and --skip-existing require a directory input",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         output_path, result = convert_file(
             args.input,
             args.output,
+            source_format=args.format,
             include_background=not args.no_background,
             mark_background=not args.plain_background,
         )
@@ -728,10 +1133,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"Created: {output_path}")
     print(
-        f"Converted {result.paragraph_count} TTML paragraphs into "
-        f"{len(result.lines)} ELRC lines; preserved "
+        f"Detected {result.source_format.upper()}; converted "
+        f"{result.paragraph_count} source line(s) into {len(result.lines)} "
+        f"{result.timing_mode.upper()} line(s); preserved "
         f"{result.background_line_count} background-vocal line(s)."
     )
+    if result.qrc_timing_mode:
+        print(f"QRC word timing mode: {result.qrc_timing_mode}.")
     return 0
 
 

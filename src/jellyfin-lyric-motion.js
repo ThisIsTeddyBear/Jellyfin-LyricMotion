@@ -174,8 +174,6 @@
     // Display-only lyric wipe smoothing.
     const WORD_PROGRESS_SMOOTH_TAU_MS = 20;
     const WORD_PROGRESS_SNAP_DELTA = 0.42;
-    const WORD_RENDER_LOOKAHEAD_TICKS = 140000; // 14 ms
-
     // Behaviour adapted from the current am-lyrics renderer.
     const BASE_WIPE_GRADIENT_EM = 0.75;
     const LONG_WORD_WIPE_EXTRA_EM = 0.45;
@@ -999,17 +997,6 @@
     });
 
     /*
-     * Background responses follow a stable visual rhythm across the library.
-     * Logical start/end lanes are mirrored by CSS for RTL interfaces.
-     */
-    const BACKGROUND_VOCAL_LANE_PATTERN = Object.freeze([
-        'center',
-        'inset-end',
-        'center',
-        'inset-start'
-    ]);
-
-    /*
      * Normal LRC only changes at line boundaries, so 20 fps is still very
      * cheap with the active-line-only renderer while cutting worst-case visual
      * line-transition latency from ~100 ms to ~50 ms.
@@ -1105,6 +1092,7 @@
         mediaSwitchCount: 0,
         staleMediaEventDrops: 0,
         timedCueCount: 0,
+        lyricTimingMode: 'none',
         backgroundVocalCount: 0,
         overlapFrameCount: 0,
         maxSimultaneousLines: 1,
@@ -1396,6 +1384,81 @@
         const lyrics = payload.Lyrics || payload.lyrics;
         if (!Array.isArray(lyrics) || lyrics.length === 0) return null;
         return lyrics;
+    }
+
+    /*
+     * Jellyfin can return a lyric array for plain text too. Those entries often
+     * have every Start field defaulted to zero, which used to make every row
+     * look simultaneously current and caused LyricMotion to replace otherwise
+     * healthy native lyrics. Require an observable timeline before taking DOM
+     * ownership: a real line timestamp, an explicit duration, or a cue whose
+     * timing advances beyond zero.
+     */
+    function lyricTimingMode(lyrics) {
+        if (!Array.isArray(lyrics) || !lyrics.length) return 'plain';
+
+        const lineStarts = new Set();
+        let hasExplicitDuration = false;
+        let hasAdvancingCueTiming = false;
+
+        lyrics.forEach(lyric => {
+            const start = finiteTick(
+                lyricValue(lyric, 'Start', 'start')
+            );
+            const end = finiteTick(
+                lyricValue(lyric, 'End', 'end')
+            );
+
+            if (start !== null) lineStarts.add(start);
+            if (
+                end !== null
+                && (start === null || end > start)
+            ) {
+                hasExplicitDuration = true;
+            }
+
+            const cues = lyricValue(lyric, 'Cues', 'cues');
+            (Array.isArray(cues) ? cues : []).forEach(cue => {
+                const cueStart = finiteTick(
+                    cueValue(cue, 'Start', 'start')
+                );
+                const cueEnd = finiteTick(
+                    cueValue(cue, 'End', 'end')
+                );
+
+                if (
+                    (cueStart !== null && cueStart > 0)
+                    || (cueEnd !== null && cueEnd > 0)
+                    || (
+                        cueStart !== null
+                        && cueEnd !== null
+                        && cueEnd > cueStart
+                    )
+                ) {
+                    hasAdvancingCueTiming = true;
+                }
+            });
+        });
+
+        if (hasAdvancingCueTiming) return 'enhanced';
+        if (
+            hasExplicitDuration
+            || lineStarts.size > 1
+            || Array.from(lineStarts).some(start => start > 0)
+        ) {
+            return 'line';
+        }
+
+        return 'plain';
+    }
+
+    function usableEnhancedCueCount(lyrics) {
+        if (lyricTimingMode(lyrics) !== 'enhanced') return 0;
+
+        return lyrics.reduce((total, lyric) => {
+            const cues = lyricValue(lyric, 'Cues', 'cues');
+            return total + (Array.isArray(cues) ? cues.length : 0);
+        }, 0);
     }
 
     function cueValue(cue, pascal, camel) {
@@ -2810,6 +2873,8 @@
         state.lineData.forEach(line => {
             (line.words || []).forEach(prepareWordGeometry);
         });
+
+        alignBackgroundVocalAnchors();
     }
 
     function queueMotionGeometryRefresh() {
@@ -3426,8 +3491,9 @@
                 delete element.dataset.akTimingLineIndex;
                 delete element.dataset.akVocalRole;
                 delete element.dataset.akVocalRoleSource;
-                delete element.dataset.akBackgroundLane;
-                delete element.dataset.akBackgroundEntry;
+                delete element.dataset.akBackgroundAttachment;
+                delete element.dataset.akBackgroundAnchorLine;
+                element.style.removeProperty('--ak-bg-anchor-offset');
 
                 /*
                  * Jellyfin may replace/reuse this node on the next SPA task.
@@ -3485,6 +3551,7 @@
         state.decoratedGeneration = -1;
         state.lineData = [];
         state.timedCueCount = 0;
+        state.lyricTimingMode = 'none';
         state.backgroundVocalCount = 0;
         state.romanizationAvailable = false;
         state.romanizationCandidate = false;
@@ -3669,6 +3736,7 @@
         state.lyrics = lyrics;
         state.generation += 1;
         state.decoratedGeneration = -1;
+        state.lyricTimingMode = lyricTimingMode(lyrics);
         selectSongAccent(lyrics);
 
         /* Lyrics and background are independent state machines. Keep the current
@@ -3680,10 +3748,7 @@
         state.atmosphereLastCheck = 0;
         scheduleDynamicBackgroundProbeBurst('lyrics-accepted');
 
-        const cueCount = lyrics.reduce((total, lyric) => {
-            const cues = lyricValue(lyric, 'Cues', 'cues');
-            return total + (Array.isArray(cues) ? cues.length : 0);
-        }, 0);
+        const cueCount = usableEnhancedCueCount(lyrics);
 
         state.timedCueCount = cueCount;
         state.lastActiveLine = -999;
@@ -3704,14 +3769,19 @@
         resetPlaybackClock();
         applySongPreferences(lyrics);
 
-        log(`captured ${lyrics.length} lyric lines / ${cueCount} cues from ${source}`);
+        log(
+            `captured ${lyrics.length} lyric lines / ${cueCount} usable cues `
+            + `(${state.lyricTimingMode}) from ${source}`
+        );
         if (typeof prepareRomanizationForLyrics === 'function') {
             prepareRomanizationForLyrics();
         }
         queueDecoration();
         scheduleLyricVisualRecoveryBurst(state.generation, 'lyrics-accepted');
 
-        if (cueCount === 0) {
+        if (state.lyricTimingMode === 'plain') {
+            log('Plain unsynced lyrics detected; leaving Jellyfin lyric DOM untouched.');
+        } else if (cueCount === 0) {
             warn('Lyrics loaded without enhanced ELRC cue data.');
         }
 
@@ -6901,6 +6971,7 @@
             : [];
 
         lineElement.style.removeProperty('visibility');
+        lineElement.style.removeProperty('--ak-bg-anchor-offset');
         lineElement.removeAttribute('aria-hidden');
         lineElement.classList.add('ak-enhanced-line');
         lineElement.dataset.akTimingLineIndex = String(lineIndex);
@@ -6910,14 +6981,12 @@
             isBackgroundVocal
         );
         lineElement.classList.remove(
-            'ak-bg-lane-center',
-            'ak-bg-lane-inset-start',
-            'ak-bg-lane-inset-end',
-            'ak-bg-enter-from-start',
-            'ak-bg-enter-from-end'
+            'ak-bg-attached-before',
+            'ak-bg-attached-after',
+            'ak-bg-standalone'
         );
-        delete lineElement.dataset.akBackgroundLane;
-        delete lineElement.dataset.akBackgroundEntry;
+        delete lineElement.dataset.akBackgroundAttachment;
+        delete lineElement.dataset.akBackgroundAnchorLine;
         lineElement.classList.remove(
             'ak-has-shaped-script'
         );
@@ -6998,14 +7067,14 @@
             );
 
             const start =
-                Number(
+                nullableTick(
                     cueValue(
                         cue,
                         'Start',
                         'start'
                     )
                 )
-                || 0;
+                ?? 0;
 
             const end = cueEndTicks(
                 lineIndex,
@@ -7129,21 +7198,128 @@
         };
     }
 
-    function backgroundVocalLaneForOrdinal(ordinal) {
-        const safeOrdinal = Math.max(
-            0,
-            Math.floor(Number(ordinal) || 0)
-        );
+    function backgroundVocalAttachmentFor(
+        lineRecord,
+        lineRecords
+    ) {
+        if (
+            !lineRecord
+            || !lineRecord.isBackgroundVocal
+        ) {
+            return {
+                placement: 'standalone',
+                anchorLineIndex: null
+            };
+        }
 
-        return BACKGROUND_VOCAL_LANE_PATTERN[
-            safeOrdinal
-                % BACKGROUND_VOCAL_LANE_PATTERN.length
-        ];
+        const records = Array.isArray(lineRecords)
+            ? lineRecords
+            : [];
+        const currentIndex = records.indexOf(lineRecord);
+
+        if (currentIndex < 0) {
+            return {
+                placement: 'standalone',
+                anchorLineIndex: null
+            };
+        }
+
+        let previousLead = null;
+        let nextLead = null;
+
+        for (let index = currentIndex - 1; index >= 0; index -= 1) {
+            if (!records[index].isBackgroundVocal) {
+                previousLead = records[index];
+                break;
+            }
+        }
+
+        for (
+            let index = currentIndex + 1;
+            index < records.length;
+            index += 1
+        ) {
+            if (!records[index].isBackgroundVocal) {
+                nextLead = records[index];
+                break;
+            }
+        }
+
+        if (!previousLead && !nextLead) {
+            return {
+                placement: 'standalone',
+                anchorLineIndex: null
+            };
+        }
+
+        const backgroundStart = Number(lineRecord.startTicks);
+        const backgroundEnd = Number(lineRecord.endTicks);
+        const previousEnd = previousLead
+            ? Number(previousLead.endTicks)
+            : NaN;
+        const nextStart = nextLead
+            ? Number(nextLead.startTicks)
+            : NaN;
+
+        /*
+         * A backing line that overlaps the next lead belongs immediately
+         * before it. This is the common converter ordering for a same-start
+         * call/response. When it follows a lead instead, attach it after the
+         * closest completed line. Gap distance resolves the rare silent-gap
+         * case and keeps manually-authored ELRC deterministic.
+         */
+        if (
+            nextLead
+            && Number.isFinite(backgroundStart)
+            && Number.isFinite(backgroundEnd)
+            && Number.isFinite(nextStart)
+            && nextStart <= backgroundEnd
+        ) {
+            return {
+                placement: 'before',
+                anchorLineIndex: nextLead.lineIndex
+            };
+        }
+
+        if (!previousLead) {
+            return {
+                placement: 'before',
+                anchorLineIndex: nextLead.lineIndex
+            };
+        }
+
+        if (!nextLead) {
+            return {
+                placement: 'after',
+                anchorLineIndex: previousLead.lineIndex
+            };
+        }
+
+        const previousGap =
+            Number.isFinite(backgroundStart)
+            && Number.isFinite(previousEnd)
+                ? Math.max(0, backgroundStart - previousEnd)
+                : Infinity;
+        const nextGap =
+            Number.isFinite(backgroundEnd)
+            && Number.isFinite(nextStart)
+                ? Math.max(0, nextStart - backgroundEnd)
+                : Infinity;
+
+        return previousGap <= nextGap
+            ? {
+                placement: 'after',
+                anchorLineIndex: previousLead.lineIndex
+            }
+            : {
+                placement: 'before',
+                anchorLineIndex: nextLead.lineIndex
+            };
     }
 
-    function applyBackgroundVocalLane(
+    function applyBackgroundVocalAttachment(
         lineRecord,
-        ordinal
+        lineRecords
     ) {
         if (
             !lineRecord
@@ -7153,40 +7329,105 @@
             return null;
         }
 
-        const lane =
-            backgroundVocalLaneForOrdinal(
-                ordinal
-            );
-
-        lineRecord.backgroundVocalLane = lane;
-        const entryDirection =
-            safeBackgroundVocalEntryDirection(
-                ordinal
-            );
-        lineRecord.backgroundVocalEntryDirection =
-            entryDirection;
-        lineRecord.element.dataset.akBackgroundLane = lane;
-        lineRecord.element.dataset.akBackgroundEntry =
-            entryDirection;
-        lineRecord.element.classList.add(
-            `ak-bg-lane-${lane}`,
-            `ak-bg-enter-from-${entryDirection}`
+        const attachment = backgroundVocalAttachmentFor(
+            lineRecord,
+            lineRecords
         );
 
-        return lane;
+        lineRecord.backgroundVocalAttachment =
+            attachment.placement;
+        lineRecord.backgroundVocalAnchorLineIndex =
+            attachment.anchorLineIndex;
+        lineRecord.element.dataset.akBackgroundAttachment =
+            attachment.placement;
+
+        if (attachment.anchorLineIndex === null) {
+            delete lineRecord.element.dataset.akBackgroundAnchorLine;
+        } else {
+            lineRecord.element.dataset.akBackgroundAnchorLine =
+                String(attachment.anchorLineIndex);
+        }
+
+        lineRecord.element.classList.add(
+            `ak-bg-attached-${attachment.placement}`
+        );
+
+        return attachment;
     }
 
-    function safeBackgroundVocalEntryDirection(
-        ordinal
+    function backgroundVocalAnchorOffset(
+        backgroundElement,
+        anchorElement
     ) {
-        const safeOrdinal = Math.max(
-            0,
-            Math.floor(Number(ordinal) || 0)
+        if (
+            !backgroundElement
+            || !anchorElement
+            || typeof backgroundElement.getBoundingClientRect !== 'function'
+            || typeof anchorElement.getBoundingClientRect !== 'function'
+        ) {
+            return null;
+        }
+
+        const backgroundLeft = Number(
+            backgroundElement.getBoundingClientRect().left
+        );
+        const anchorLeft = Number(
+            anchorElement.getBoundingClientRect().left
         );
 
-        return safeOrdinal % 4 < 2
-            ? 'start'
-            : 'end';
+        if (!Number.isFinite(backgroundLeft) || !Number.isFinite(anchorLeft)) {
+            return null;
+        }
+
+        const appliedOffset = Number.parseFloat(
+            backgroundElement.style
+            && typeof backgroundElement.style.getPropertyValue === 'function'
+                ? backgroundElement.style.getPropertyValue(
+                    '--ak-bg-anchor-offset'
+                )
+                : ''
+        );
+
+        /* Rects already include the current CSS `left` value. Add the delta to
+         * that value so repeated font/resize refreshes converge instead of
+         * alternating between the original and aligned positions. */
+        return Math.round(
+            (
+                (Number.isFinite(appliedOffset) ? appliedOffset : 0)
+                + anchorLeft
+                - backgroundLeft
+            ) * 100
+        ) / 100;
+    }
+
+    function alignBackgroundVocalAnchors() {
+        const records = state.lineData || [];
+
+        records.forEach(lineRecord => {
+            if (!lineRecord || !lineRecord.isBackgroundVocal) return;
+
+            const anchor = records.find(candidate =>
+                candidate
+                && candidate.lineIndex
+                    === lineRecord.backgroundVocalAnchorLineIndex
+            );
+            const offset = backgroundVocalAnchorOffset(
+                lineRecord.element,
+                anchor && anchor.element
+            );
+
+            if (offset === null) {
+                lineRecord.element.style.removeProperty(
+                    '--ak-bg-anchor-offset'
+                );
+                return;
+            }
+
+            lineRecord.element.style.setProperty(
+                '--ak-bg-anchor-offset',
+                `${offset.toFixed(2)}px`
+            );
+        });
     }
 
     function inspectBackgroundVocals() {
@@ -7195,9 +7436,9 @@
             .map(line => ({
                 lineIndex: line.lineIndex,
                 text: line.text,
-                lane: line.backgroundVocalLane,
-                entryFrom:
-                    line.backgroundVocalEntryDirection,
+                attachment: line.backgroundVocalAttachment,
+                anchorLineIndex:
+                    line.backgroundVocalAnchorLineIndex,
                 roleSource:
                     line.backgroundVocalRoleSource,
                 startSeconds:
@@ -7220,9 +7461,8 @@
             detected: lines.length,
             marker:
                 '[ak:bg] (legacy U+2063 U+2060 accepted)',
-            sequence:
-                BACKGROUND_VOCAL_LANE_PATTERN
-                    .slice(),
+            placement:
+                'left-aligned + closest-lead-before-or-after',
             lines,
             cacheHint:
                 lines.length
@@ -7289,6 +7529,71 @@
         return true;
     }
 
+    function restorePlainLyricsDom(lines, lyrics, container) {
+        removeInstrumentalGapRows(container);
+
+        lines.forEach((line, index) => {
+            if (!line || !line.classList) return;
+
+            const wasEnhanced =
+                line.classList.contains('ak-enhanced-line')
+                || !!(line.dataset && line.dataset.akGeneration);
+
+            Array.from(line.classList)
+                .filter(name => name.indexOf('ak-') === 0)
+                .forEach(name => line.classList.remove(name));
+
+            [
+                'akGeneration',
+                'akLyricIdentity',
+                'akTimingLineIndex',
+                'akVocalRole',
+                'akVocalRoleSource',
+                'akBackgroundAttachment',
+                'akBackgroundAnchorLine'
+            ].forEach(key => {
+                if (line.dataset) delete line.dataset[key];
+            });
+
+            line.style.removeProperty('visibility');
+            line.style.removeProperty('--ak-bg-anchor-offset');
+            line.removeAttribute('aria-hidden');
+
+            if (!wasEnhanced || !lyrics[index]) return;
+
+            /* A same-text song transition can reuse our old enhanced node.
+             * Restore a single native text node rather than leaving stale word
+             * spans and their sweep/glow styles inside Jellyfin's plain view. */
+            line.removeAttribute('aria-label');
+            line.removeAttribute('dir');
+            replaceChildrenCompat(line);
+            line.appendChild(
+                document.createTextNode(
+                    lyricTextProfile(lyrics[index]).text
+                )
+            );
+        });
+
+        container.classList.remove('ak-karaoke-container');
+        state.lineData = [];
+        state.lineEndPrefix = [];
+        state.instrumentalGaps = [];
+        state.activeLineIndexes = [];
+        state.lastActiveLine = -999;
+        state.lastActiveLineSignature = '';
+        state.activeInstrumentalGapIndex = -1;
+        state.decoratedGeneration = state.generation;
+
+        if (typeof removeRomanizationToggle === 'function') {
+            removeRomanizationToggle();
+        }
+        if (typeof removeTimingControls === 'function') {
+            removeTimingControls();
+        }
+
+        stopAnimationLoop('plain-unsynced-lyrics');
+    }
+
     function lineRecordHealthy(lineRecord) {
         const element = lineRecord && lineRecord.element;
         if (
@@ -7327,6 +7632,11 @@
     }
 
     function lyricVisualDomHealthy() {
+        if (state.lyricTimingMode === 'plain') {
+            return state.decoratedGeneration === state.generation
+                && state.lineData.length === 0;
+        }
+
         return state.decoratedGeneration === state.generation
             && state.lineData.length > 0
             && state.lineData.every(lineRecordHealthy)
@@ -7343,6 +7653,11 @@
 
         if (!lyricsDomReadyForPayload(lines, state.lyrics)) {
             return false;
+        }
+
+        if (state.lyricTimingMode === 'plain') {
+            restorePlainLyricsDom(lines, state.lyrics, container);
+            return true;
         }
 
         removeInstrumentalGapRows(container);
@@ -7365,10 +7680,6 @@
             state.lineData.push(lineRecord);
 
             if (lineRecord.isBackgroundVocal) {
-                applyBackgroundVocalLane(
-                    lineRecord,
-                    state.backgroundVocalCount
-                );
                 state.backgroundVocalCount += 1;
             }
 
@@ -7392,6 +7703,15 @@
                     }
                 });
         }
+
+        state.lineData.forEach(lineRecord => {
+            if (lineRecord.isBackgroundVocal) {
+                applyBackgroundVocalAttachment(
+                    lineRecord,
+                    state.lineData
+                );
+            }
+        });
 
         let prefixEnd = -Infinity;
         state.lineEndPrefix = state.lineData.map(
@@ -9308,7 +9628,9 @@
 
 
     function smoothWordProgress(word, target, frameNow) {
-        target = Math.max(0, Math.min(1, target));
+        target = Number.isFinite(target)
+            ? Math.max(0, Math.min(1, target))
+            : 0;
 
         if (!Number.isFinite(word.visualProgress)) {
             word.visualProgress = target;
@@ -9348,7 +9670,14 @@
     }
 
     function wordTargetProgress(word, timelineTicks) {
-        if (!word.segments.length || !Number.isFinite(word.start)) {
+        if (
+            !word
+            || !Array.isArray(word.segments)
+            || !word.segments.length
+            || !Number.isFinite(word.start)
+            || !Number.isFinite(word.end)
+            || !Number.isFinite(timelineTicks)
+        ) {
             return 0;
         }
 
@@ -9360,17 +9689,35 @@
 
         let completed =
             0;
+        const wordLength = Math.max(
+            1,
+            Number(word.length) || 1
+        );
 
         for (const segment of word.segments) {
+            if (
+                !segment
+                || !Number.isFinite(segment.start)
+                || !Number.isFinite(segment.end)
+            ) {
+                continue;
+            }
+
             const visualStart =
                 Number.isFinite(segment.visualStart)
-                    ? segment.visualStart
-                    : segment.startPos / word.length;
+                    ? clamp01(segment.visualStart)
+                    : clamp01(
+                        (Number(segment.startPos) || 0)
+                        / wordLength
+                    );
 
             const visualEnd =
                 Number.isFinite(segment.visualEnd)
-                    ? segment.visualEnd
-                    : segment.endPos / word.length;
+                    ? clamp01(segment.visualEnd)
+                    : clamp01(
+                        (Number(segment.endPos) || 0)
+                        / wordLength
+                    );
 
             if (timelineTicks < segment.start) {
                 return completed;
@@ -9519,6 +9866,14 @@
         word
     ) {
         const accent = currentAccent();
+        const motionTime = Number.isFinite(t) ? t : 0;
+        const continuity = Number.isFinite(continuityGain)
+            ? clamp01(continuityGain)
+            : 0;
+        const shadowIntensity = Math.max(
+            0,
+            Number(metrics && metrics.shadowIntensity) || 0
+        );
         const durationMs = Math.max(
             1,
             Number(word && word.motionDurationMs) || 1
@@ -9530,17 +9885,17 @@
         );
         const rawEnergy = Math.max(
             0,
-            metrics.shadowIntensity
+            shadowIntensity
             * accent.gain
             * (0.94 + 0.06 * sustain)
-            * clamp01(continuityGain)
+            * continuity
         );
 
         /* Soft knee keeps the highlight luminous without an OLED-white shelf. */
         const energy = 1 - Math.exp(-1.50 * rawEnergy);
-        const spark = glowPulse(t, 0, 0.10, 0.28, 0.56);
-        const bloom = glowPulse(t, 0.025, 0.19, 0.44, 0.80);
-        const afterglow = glowPulse(t, 0.11, 0.32, 0.60, 0.98);
+        const spark = glowPulse(motionTime, 0, 0.10, 0.28, 0.56);
+        const bloom = glowPulse(motionTime, 0.025, 0.19, 0.44, 0.80);
+        const afterglow = glowPulse(motionTime, 0.11, 0.32, 0.60, 0.98);
 
         let core = energy * (0.88 * spark + 0.12 * bloom);
         let halo = energy
@@ -9849,10 +10204,23 @@
     }
 
     function updateWordVisual(word, timelineTicks, frameNow) {
-        if (!word.element || !word.segments.length) return;
+        if (
+            !word
+            || !word.element
+            || !Array.isArray(word.segments)
+            || !word.segments.length
+            || !Number.isFinite(timelineTicks)
+        ) {
+            return;
+        }
 
-        const renderTicks =
-            timelineTicks + WORD_RENDER_LOOKAHEAD_TICKS;
+        if (
+            !Number.isFinite(word.start)
+            || !Number.isFinite(word.end)
+        ) {
+            setStaticWordState(word, 'future', frameNow, false);
+            return;
+        }
 
         const motionEnd =
             word.motionMode === 'grow'
@@ -9860,7 +10228,7 @@
                     + MOTION_HANDOFF_TICKS
                 : word.end;
 
-        if (renderTicks <= word.start) {
+        if (timelineTicks <= word.start) {
             setStaticWordState(
                 word,
                 'future',
@@ -9885,7 +10253,7 @@
         const rawTarget =
             wordTargetProgress(
                 word,
-                renderTicks
+                timelineTicks
             );
 
         const painted =
@@ -9983,7 +10351,9 @@
         preserveMotion = false
     ) {
         if (
-            !word.element
+            !word
+            || !word.element
+            || !Array.isArray(word.segments)
             || !word.segments.length
         ) {
             return;
@@ -10938,7 +11308,11 @@
                     frameNow,
                     instrumentalGap
                 );
-    
+                /* Current/future scaling can change a line's measured edge.
+                 * Re-anchor attached backing vocals only at line transitions,
+                 * never on the steady-state frame path. */
+                alignBackgroundVocalAnchors();
+
                 /* Diagnostics keep a human-readable signature, but build it only
                  * when the active set changes instead of allocating every frame. */
                 state.lastActiveLineSignature =
@@ -11878,7 +12252,7 @@
                 backgroundVocalTransport:
                     'ascii-elrc-role-token+legacy+parenthetical-recovery',
                 backgroundVocalLayout:
-                    'center+inset-end+center+inset-start',
+                    'left-aligned+closest-lead-before-or-after',
                 backgroundVocalInspection:
                     inspectBackgroundVocals(),
                 instrumentalBreaks:

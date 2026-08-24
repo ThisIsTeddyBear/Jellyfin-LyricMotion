@@ -107,7 +107,6 @@ All notable public changes are documented here. The project follows Semantic Ver
 - Bottom-to-top media-time-derived note fill with a restrained neutral glow, intro support and one continuous symbol for long instrumental sections.
 - `JellyfinLyricMotion.instrumentalBreaks()` diagnostics for threshold, planned gaps, active gap and progress.
 - Dedicated instrumental-break regression suite with 5,000 deterministic randomized timing/overlap fuzz timelines, plus an extended 20,000-case acceptance run.
-- Native Windows PowerShell `scripts/test-all.ps1` entry point that locates Git Bash and runs the same canonical release gate as CI.
 
 ### Changed
 - During a qualifying instrumental break, completed lyrics become past and upcoming lyrics remain future; no lyric line is visually current until vocals resume.
@@ -271,7 +270,7 @@ All notable public changes are documented here. The project follows Semantic Ver
 
 - Independent active-set rendering for genuinely overlapping lyric lines.
 - Background-vocal transport and presentation for converted TTML `x-bg` spans.
-- Recursive `scripts/ttml_to_elrc.py` converter with clock, offset, frame, and tick timing support.
+- Recursive `scripts/ttml_qrc_to_elrc.py` converter with clock, offset, frame, and tick timing support.
 - Classic Bloom v3.1 dual-stage core/halo glow with 24 shuffled color themes.
 - Adaptive, once-per-song album atmosphere.
 - Runtime diagnostics for overlap, background vocals, glow, atmosphere, performance and script handling.

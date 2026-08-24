@@ -12,22 +12,6 @@ Do not attach copyrighted commercial audio or full lyric files unless you have p
 
 LyricMotion should remain a rendering enhancement. Keep playback ownership inside Jellyfin.
 
-Before submitting, run the complete canonical validation gate from the repository root.
-
-Linux, macOS, or Git Bash:
-
-```bash
-sh scripts/test-all.sh
-```
-
-Windows PowerShell:
-
-```powershell
-.\scripts\test-all.ps1
-```
-
-The release gate covers JavaScript/Python syntax, runtime and Romanization regressions, Unicode fuzzing, instrumental timelines, TTML conversion, installer rollback behavior, static contracts, and deterministic platform packaging.
-
 ## Release packaging
 
 Release archives are generated from strict platform allowlists and must never be edited by hand.

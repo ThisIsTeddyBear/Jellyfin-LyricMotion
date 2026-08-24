@@ -99,9 +99,9 @@ The same data is included under:
 JellyfinLyricMotion.diagnostics().instrumentalBreaks
 ```
 
-## Testing
+## Behavioural safeguards
 
-`tests/instrumental-breaks.test.js` covers:
+The renderer accounts for:
 
 - 2.0-second threshold behavior;
 - suppression at 1.99 seconds;
@@ -126,4 +126,4 @@ JellyfinLyricMotion.diagnostics().instrumentalBreaks
 
 Final 3.2.4 acceptance is also run with `INSTRUMENTAL_FUZZ_CASES=20000` to extend randomized timing/overlap coverage without making every normal CI run unnecessarily expensive.
 
-The feature is also covered by the repository-wide `scripts/test-all.sh` release gate.
+These safeguards keep the note row derived from the lyric timeline rather than an independent animation clock.

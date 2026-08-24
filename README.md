@@ -49,11 +49,11 @@ For a trustworthy vocal gap of at least two seconds, the completed lyric becomes
 
 The fill and wave phase are derived from media time rather than a standalone CSS timer, so pause, seek and playback-rate changes stay locked to the song. Standard LRC without a real line-end timestamp remains conservative and does not synthesize breaks. Reduced-motion keeps the timing fill with decorative wave motion disabled.
 
-### Concurrent lines and background vocals
+### Concurrent lines and left-anchored background vocals
 
-![Two lead lines and a compact background-vocal lane active simultaneously](docs/screenshots/overlap-background-vocals.png)
+![Two lead lines with compact left-anchored background vocals attached to their nearest lead lines](docs/screenshots/overlap-background-vocals.png)
 
-LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content can be converted into separately timed ELRC background lanes.
+LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content is rendered in a slightly smaller, always-left-aligned backing-vocal line. When it overlaps a following lead it is attached immediately before that line; when it follows a lead it stays immediately after the closest preceding line.
 
 ## Supported lyric inputs
 
@@ -171,21 +171,24 @@ LyricMotion no longer treats non-Latin text as a second-class visual path. Malay
 
 Arabic-family joining and unknown complex runs use a whole-shaped-run bloom so contextual glyph connections remain correct. RTL direction and original ELRC timing are preserved. See [Multilingual Rendering](docs/MULTILINGUAL-RENDERING.md).
 
-## Convert TTML to ELRC
+## Convert TTML or QRC to LRC/ELRC
 
-The TTML converter is a repository/developer utility and is intentionally not bundled in the minimal platform installer archives. From a source checkout:
+The unified TTML/QRC converter is a repository/developer utility and is intentionally not bundled in the minimal platform installer archives. From a source checkout:
 
 ```bash
-python scripts/ttml_to_elrc.py "/music/Artist/Album/01 - Song.ttml"
+python scripts/ttml_qrc_to_elrc.py "/music/Artist/Album/01 - Song.ttml"
 ```
 
-It writes `01 - Song.elrc` beside the TTML. Keep TTML as the lossless master and make the ELRC basename match the audio basename.
+It auto-detects `.ttml`, `.dfxp`, and `.qrc`. Line-synchronised lyrics write `01 - Song.lrc`; only lyrics with distinct word/syllable timestamps write `01 - Song.elrc`. This prevents line-synchronised tracks from appearing as one fully glowing ELRC word. Keep the original source as the lossless master and make the output basename match the audio basename.
+
+Run the command with no input to batch-convert every supported lyric source in the current folder. Use `--recursive` for subfolders and `--skip-existing` to retain existing `.lrc`/`.elrc` output.
 
 Options:
 
 ```text
 --no-background     omit background-vocal content
---plain-background  keep background lines without LyricMotion's role token
+--format FORMAT      force auto, ttml, or qrc detection
+--plain-background   keep background lines without LyricMotion's role token
 -o PATH             choose the output path
 ```
 
@@ -280,42 +283,19 @@ The uninstaller surgically removes LyricMotion loader tags/assets and normally d
 
 The 3.2.5 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients are validated as a hard stock-Jellyfin bypass.
 
-The bundled regression suite covers Romanization, Indic language quality, source-to-Roman cue mapping, timing controls, instrumental-break planning/progress, request races/interception, overlapping/background vocals, script safety, multilingual glow, TTML parsing, and installer/uninstaller behavior.
-
 Real behavior can still vary by Jellyfin build, browser/WebView, available fonts and source lyric quality.
 
 ## Repository layout
 
 ```text
 src/                 browser runtime, offline Romanizer, CSS
-scripts/             installers, converter, dataset/evaluation tools, release packager
-tests/               G2P, runtime, TTML, research-pipeline and static safety gates
-research/            regression seeds, benchmark outputs and model experiments
+scripts/             installers, unified TTML/QRC converter, release packager
 docs/                current architecture and feature documentation
 examples/            ELRC examples
 docker/              derived Jellyfin image
-.github/workflows/   validation and tag-driven release automation
 ```
 
 ## Development
-
-Run the complete local suite:
-
-Linux/macOS/Git Bash:
-
-```bash
-sh scripts/test-all.sh
-```
-
-Windows PowerShell:
-
-```powershell
-.\scripts\test-all.ps1
-```
-
-The PowerShell entry point locates Git Bash and runs the same canonical release gate used by CI.
-
-Or run individual contracts; see [Contributing](CONTRIBUTING.md).
 
 Build the deterministic platform release packages:
 

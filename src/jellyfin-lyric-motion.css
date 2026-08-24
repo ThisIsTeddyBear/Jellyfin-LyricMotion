@@ -400,34 +400,34 @@
 
 /*
  * Background vocals are emitted by the companion converter with a parser-safe
- * ASCII role token, then rendered as a compact response lane. The word wipe and
- * exact syllable timing stay intact, while hierarchy remains visibly distinct
- * from the lead line on desktop and Android/mobile.
+ * ASCII role token, then rendered as a compact, left-aligned response. The
+ * runtime attaches it to the closest sensible lead line; the word wipe and
+ * exact syllable timing remain intact.
  */
 .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal {
-    max-width: min(58rem, calc(100vw - 7rem));
-    min-height: 1.18em;
-    margin-top: -0.035em;
-    margin-bottom: -0.035em;
-    margin-left: clamp(1.3rem, 4.5vw, 4.8rem);
-    margin-inline-start: clamp(1.3rem, 4.5vw, 4.8rem);
+    max-width: min(58rem, calc(100vw - 6rem));
+    min-height: 1.14em;
+    margin-top: -0.09em;
+    margin-right: auto;
+    margin-bottom: -0.12em;
+    /* The runtime measures the attached lead's real rendered left edge and
+     * offsets this compact line to the same anchor. `left`, rather than a
+     * transform, keeps the shared edge stable through future/current scaling. */
+    margin-left: 0;
+    left: var(--ak-bg-anchor-offset, 0px);
     padding-top: 0.08em;
-    padding-bottom: 0.12em;
+    padding-bottom: 0.08em;
 
-    font-size: clamp(1.7rem, 3vw, 3.35rem);
-    font-weight: 650;
+    font-size: clamp(1.65rem, 3.1vw, 3.45rem);
+    font-weight: 625;
     line-height: 1.12;
     letter-spacing: -0.018em;
+    text-align: left !important;
+    transform-origin: left center;
 
     --ak-primary: rgba(255, 255, 255, 0.94);
     --ak-secondary: rgba(255, 255, 255, 0.38);
     --ak-past-text: rgba(255, 255, 255, 0.48);
-}
-
-[dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal[dir="rtl"] {
-    margin-left: 0;
-    margin-right: clamp(1.3rem, 4.5vw, 4.8rem);
 }
 
 .lyricPage .lyricsLine.ak-background-vocal.ak-current,
@@ -450,75 +450,23 @@
 }
 
 /*
- * Background-vocal choreography. The converter marks vocal role; the runtime
- * assigns this repeating lane pattern across every song in the library:
- * center -> inset end -> center -> inset start. Positions are logical and
- * therefore mirror correctly for RTL interfaces without touching cue timing.
+ * A same-start/overlapping backing line is attached before the closest next
+ * lead. A backing line that follows a lead stays attached after it. These
+ * compact negative margins preserve the source DOM order and avoid moving
+ * Jellyfin-owned line nodes while still reading as one lyric unit.
  */
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-center {
-    max-width: min(54rem, calc(100vw - 6rem));
-    margin-left: auto;
-    margin-right: auto;
-    margin-inline-start: auto;
-    margin-inline-end: auto;
-    text-align: center !important;
+.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-attached-before {
+    margin-top: -0.16em;
+    margin-bottom: -0.16em;
 }
 
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-start {
-    max-width: min(56rem, calc(100vw - 7rem));
-    margin-left: clamp(1.4rem, 6vw, 6.5rem);
-    margin-right: auto;
-    margin-inline-start: clamp(1.4rem, 6vw, 6.5rem);
-    margin-inline-end: auto;
-    text-align: left !important;
+.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-attached-after {
+    margin-top: -0.14em;
+    margin-bottom: -0.10em;
 }
-
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-end {
-    max-width: min(56rem, calc(100vw - 7rem));
-    margin-left: auto;
-    margin-right: clamp(1.4rem, 6vw, 6.5rem);
-    margin-inline-start: auto;
-    margin-inline-end: clamp(1.4rem, 6vw, 6.5rem);
-    text-align: right !important;
-}
-
-[dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-start,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-start[dir="rtl"] {
-    margin-left: auto;
-    margin-right: clamp(1.4rem, 6vw, 6.5rem);
-    text-align: right !important;
-}
-
-[dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-end,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-end[dir="rtl"] {
-    margin-left: clamp(1.4rem, 6vw, 6.5rem);
-    margin-right: auto;
-    text-align: left !important;
-}
-
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-enter-from-start {
-    --ak-bg-entry-x: -0.28em;
-}
-
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-enter-from-end {
-    --ak-bg-entry-x: 0.28em;
-}
-
-[dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-enter-from-start,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-enter-from-start[dir="rtl"] {
-    --ak-bg-entry-x: 0.28em;
-}
-
-[dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-enter-from-end,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-enter-from-end[dir="rtl"] {
-    --ak-bg-entry-x: -0.28em;
-}
-
 
 .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-future {
-    transform:
-        translate3d(var(--ak-bg-entry-x, 0), 0.035em, 0)
-        scale(0.986);
+    transform: translate3d(0, 0.035em, 0) scale(0.986);
 }
 
 .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-current,
@@ -1004,52 +952,11 @@
     }
 
     .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal {
-        max-width: calc(100vw - 4rem);
-        margin-left: 1.15rem;
-        margin-inline-start: 1.15rem;
-        font-size: clamp(1.45rem, 6.2vw, 2.45rem);
-        line-height: 1.14;
-    }
-
-
-    [dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal[dir="rtl"] {
+        max-width: calc(100vw - 3rem);
         margin-left: 0;
-        margin-right: 1.15rem;
-    }
-
-    .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-center {
-        max-width: calc(100vw - 2.4rem);
-        margin-left: auto;
         margin-right: auto;
-    }
-
-    .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-start {
-        max-width: calc(100vw - 3rem);
-        margin-left: 0.75rem;
-        margin-right: auto;
-        margin-inline-start: 0.75rem;
-        margin-inline-end: auto;
-    }
-
-    .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-end {
-        max-width: calc(100vw - 3rem);
-        margin-left: auto;
-        margin-right: 0.75rem;
-        margin-inline-start: auto;
-        margin-inline-end: 0.75rem;
-    }
-
-    [dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-start,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-start[dir="rtl"] {
-        margin-left: auto;
-        margin-right: 0.75rem;
-    }
-
-    [dir="rtl"] .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-end,
-.lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal.ak-bg-lane-inset-end[dir="rtl"] {
-        margin-left: 0.75rem;
-        margin-right: auto;
+        font-size: clamp(1.5rem, 6.25vw, 2.6rem);
+        line-height: 1.14;
     }
 }
 
@@ -1369,4 +1276,3 @@
         font-size: 0.74rem;
     }
 }
-

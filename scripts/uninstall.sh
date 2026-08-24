@@ -41,8 +41,9 @@ if ! is_webdir "$WEB_DIR"; then
   exit 1
 fi
 
-command -v python3 >/dev/null 2>&1 || {
-  echo "python3 is required by this uninstaller."
+PYTHON_BIN=${LYRICMOTION_PYTHON:-python3}
+"$PYTHON_BIN" --version >/dev/null 2>&1 || {
+  echo "Python 3 is required by this uninstaller. Set LYRICMOTION_PYTHON when python3 is not on PATH."
   exit 1
 }
 
@@ -53,7 +54,7 @@ if [ ! -w "$WEB_DIR" ] || [ ! -w "$INDEX" ]; then
   exit 1
 fi
 
-python3 - "$INDEX" <<'PY'
+"$PYTHON_BIN" - "$INDEX" <<'PY'
 from pathlib import Path
 import os, re, stat, sys, tempfile
 
