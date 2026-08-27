@@ -82,17 +82,17 @@ LyricG2P 6.5.1 contains two compact sparse logistic schwa keep/delete coefficien
 - Copyright: Copyright (c) 2019 Aryaman Arora
 - Related paper: https://aclanthology.org/2020.acl-main.696/
 
-The coefficient tables are used as **lazy advisory evidence** in `romanizeDetailed()` and hybrid candidate research. Normal playback Romanization remains deterministic; there is no network inference and no general-purpose neural transliteration checkpoint. Recorded held-out metrics attached to the coefficient tables are retained as provenance metadata and are explicitly marked as not independently reproduced by this release.
+The coefficient tables are used as **lazy advisory evidence** in `romanizeDetailed()` and hybrid candidate selection. Normal playback Romanization remains deterministic; there is no network inference and no general-purpose neural transliteration checkpoint. Recorded held-out metrics attached to the coefficient tables are retained as provenance metadata and are explicitly marked as not independently reproduced by this release.
 
 ## Transliteration research references (not bundled dependencies)
 
 LyricG2P 6/6.5/6.5.1 was designed after reviewing public transliteration/G2P literature and project documentation including AI4Bharat Aksharantar/IndicXlit and Google Research's Dakshina dataset documentation. No model weights, dataset records, training code, service code, or runtime dependency from those projects is bundled in LyricMotion. They are research references only.
 
-The repository contains development-only corpus collection/evaluation helpers. Public datasets and third-party/provider Romanizations referenced by those tools are **not bundled** in the runtime or release ZIP. Their own licenses, terms and redistribution restrictions apply independently.
+Public datasets and third-party/provider Romanizations referenced by these research materials are **not bundled** in the runtime or release ZIP. Their own licenses, terms and redistribution restrictions apply independently.
 
 - IndicXlit: https://github.com/AI4Bharat/IndicXlit
 - Aksharantar paper: https://aclanthology.org/2023.findings-emnlp.4/
 - Dakshina dataset: https://github.com/google-research-datasets/dakshina
 - Hindi/Punjabi G2P schwa work: https://aclanthology.org/2020.acl-main.696/
 
-Romanization in release 3.2.4 / LyricG2P 6.5.1 is fully local/on-device and does not call these projects or any third-party Romanization service at runtime.
+LyricG2P 6.5.1 Romanization is fully local/on-device and does not call these projects or any third-party Romanization service at runtime.

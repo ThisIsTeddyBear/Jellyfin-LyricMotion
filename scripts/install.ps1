@@ -50,10 +50,10 @@ if ($EnsureAdministrator -and -not (Test-IsAdministrator)) {
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Here
 $VersionPath = Join-Path $Root "VERSION"
-if (-not (Test-Path $VersionPath)) { throw "Missing $VersionPath" }
+if (-not (Test-Path -LiteralPath $VersionPath -PathType Leaf)) { throw "Missing $VersionPath" }
 $Version = ([IO.File]::ReadAllText($VersionPath)).Trim()
 $LyricG2PVersionPath = Join-Path $Root "LYRICG2P_VERSION"
-if (-not (Test-Path $LyricG2PVersionPath)) { throw "Missing $LyricG2PVersionPath" }
+if (-not (Test-Path -LiteralPath $LyricG2PVersionPath -PathType Leaf)) { throw "Missing $LyricG2PVersionPath" }
 $LyricG2PVersion = ([IO.File]::ReadAllText($LyricG2PVersionPath)).Trim()
 if ([string]::IsNullOrWhiteSpace($Version)) { throw "VERSION is empty" }
 if ($Version -notmatch '^[A-Za-z0-9._+\-]+$') { throw "VERSION contains unsafe characters" }
@@ -65,12 +65,15 @@ $RomanizerSource = Join-Path $Root "src\jellyfin-lyric-romanizer.js"
 
 function Test-WebDir([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    return Test-Path (Join-Path $Path "index.html")
+    return Test-Path -LiteralPath (Join-Path $Path "index.html") -PathType Leaf
 }
 
 function Find-JellyfinWebDir([string]$Requested) {
-    if (Test-WebDir $Requested) { return (Resolve-Path $Requested).Path }
-    if (Test-WebDir $env:JELLYFIN_WEB_DIR) { return (Resolve-Path $env:JELLYFIN_WEB_DIR).Path }
+    if (-not [string]::IsNullOrWhiteSpace($Requested)) {
+        if (Test-WebDir $Requested) { return (Resolve-Path -LiteralPath $Requested).Path }
+        throw "The supplied -WebDir is not a Jellyfin Web directory: $Requested"
+    }
+    if (Test-WebDir $env:JELLYFIN_WEB_DIR) { return (Resolve-Path -LiteralPath $env:JELLYFIN_WEB_DIR).Path }
 
     foreach ($registryPath in @(
         "HKLM:\SOFTWARE\WOW6432Node\Jellyfin\Server",
@@ -80,7 +83,7 @@ function Find-JellyfinWebDir([string]$Requested) {
             $props = Get-ItemProperty -Path $registryPath -ErrorAction Stop
             if ($props.InstallFolder) {
                 $candidate = Join-Path $props.InstallFolder "jellyfin-web"
-                if (Test-WebDir $candidate) { return (Resolve-Path $candidate).Path }
+                if (Test-WebDir $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
             }
         } catch {}
     }
@@ -89,7 +92,7 @@ function Find-JellyfinWebDir([string]$Requested) {
         "$env:ProgramFiles\Jellyfin\Server\jellyfin-web",
         "${env:ProgramFiles(x86)}\Jellyfin\Server\jellyfin-web"
     )) {
-        if (Test-WebDir $candidate) { return (Resolve-Path $candidate).Path }
+        if (Test-WebDir $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
     }
 
     throw @"
@@ -114,20 +117,10 @@ function Commit-AtomicReplacement([string]$Temporary, [string]$Destination) {
     $replaceBackup = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.replace.bak')
 
     try {
-        try {
-            # Windows PowerShell 5.1/.NET Framework can reject $null here with
-            # "The path is not of a legal form." Use a real transient backup.
-            [IO.File]::Replace($Temporary, $Destination, $replaceBackup, $true)
-        } catch [System.ArgumentException] {
-            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
-            Remove-Item -LiteralPath $Temporary -Force
-        } catch [System.IO.IOException] {
-            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
-            Remove-Item -LiteralPath $Temporary -Force
-        } catch [System.NotSupportedException] {
-            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
-            Remove-Item -LiteralPath $Temporary -Force
-        }
+        # Keep failure atomic. Copying directly over a live index can truncate
+        # it on a full disk or interrupted write; callers retain the staged
+        # source and rollback data when File.Replace is unavailable.
+        [IO.File]::Replace($Temporary, $Destination, $replaceBackup, $true)
     } finally {
         Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
     }
@@ -174,9 +167,21 @@ function Remove-LyricMotionTags([string]$Content) {
 $WebDir = Find-JellyfinWebDir $WebDir
 $IndexPath = Join-Path $WebDir "index.html"
 
-if (-not (Test-Path $JsSource)) { throw "Missing $JsSource" }
-if (-not (Test-Path $CssSource)) { throw "Missing $CssSource" }
-if (-not (Test-Path $RomanizerSource)) { throw "Missing $RomanizerSource" }
+if (-not (Test-Path -LiteralPath $JsSource -PathType Leaf)) { throw "Missing $JsSource" }
+if (-not (Test-Path -LiteralPath $CssSource -PathType Leaf)) { throw "Missing $CssSource" }
+if (-not (Test-Path -LiteralPath $RomanizerSource -PathType Leaf)) { throw "Missing $RomanizerSource" }
+if (-not [regex]::IsMatch(
+    [IO.File]::ReadAllText($JsSource),
+    "const\s+VERSION\s*=\s*'" + [regex]::Escape($Version) + "'\s*;"
+)) {
+    throw "Runtime JavaScript VERSION does not match VERSION; refusing to install a mismatched release."
+}
+if (-not [regex]::IsMatch(
+    [IO.File]::ReadAllText($RomanizerSource),
+    "const\s+VERSION\s*=\s*'" + [regex]::Escape($LyricG2PVersion) + "'\s*;"
+)) {
+    throw "Romanizer JavaScript VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
+}
 
 Write-Host ""
 Write-Host "Jellyfin LyricMotion v$Version / LyricG2P $LyricG2PVersion" -ForegroundColor Cyan
@@ -202,7 +207,7 @@ while (Test-Path -LiteralPath $BackupPath) {
     $BackupPath = Join-Path $WebDir ($BackupName + "-" + $BackupSuffix)
     $BackupSuffix++
 }
-Copy-Item $IndexPath $BackupPath -Force
+Copy-Item -LiteralPath $IndexPath -Destination $BackupPath -Force
 
 # Stage all three assets before replacing any live file. The complete previous
 # asset set is snapshotted as same-directory rollback files before commit. If
@@ -298,8 +303,8 @@ try {
     Remove-RollbackEntries $RollbackEntries
 }
 
-Remove-Item (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "Installed successfully." -ForegroundColor Green

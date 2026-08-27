@@ -1,7 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Keep this POSIX-only: BSD/macOS ``dirname`` and ``basename`` do not
+# consistently accept GNU's ``--`` option terminator.  Parameter expansion is
+# also safe for a web directory whose name contains shell wildcard characters.
+case "$0" in
+  */*) SCRIPT_PATH=$0 ;;
+  *) SCRIPT_PATH=./$0 ;;
+esac
+SCRIPT_DIR=$(CDPATH= cd -P "${SCRIPT_PATH%/*}" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 VERSION_FILE="$ROOT_DIR/VERSION"
 [ -f "$VERSION_FILE" ] || { echo "Missing $VERSION_FILE"; exit 1; }
@@ -21,6 +28,7 @@ JS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.js"
 CSS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.css"
 ROMANIZER_SOURCE="$ROOT_DIR/src/jellyfin-lyric-romanizer.js"
 WEB_DIR=""
+WEB_DIR_EXPLICIT=0
 
 usage() {
   echo "Usage: $0 [--webdir /path/to/jellyfin-web]"
@@ -29,13 +37,18 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --webdir) [ "$#" -ge 2 ] || usage; WEB_DIR=$2; shift 2 ;;
+    --webdir) [ "$#" -ge 2 ] || usage; WEB_DIR=$2; WEB_DIR_EXPLICIT=1; shift 2 ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
 done
 
 is_webdir() { [ -n "${1:-}" ] && [ -f "$1/index.html" ]; }
+
+if [ "$WEB_DIR_EXPLICIT" -eq 1 ] && ! is_webdir "$WEB_DIR"; then
+  echo "The supplied --webdir is not a Jellyfin Web directory: $WEB_DIR"
+  exit 1
+fi
 
 if ! is_webdir "$WEB_DIR"; then
   if is_webdir "${JELLYFIN_WEB_DIR:-}"; then
@@ -61,7 +74,11 @@ fi
 
 PYTHON_BIN=${LYRICMOTION_PYTHON:-python3}
 "$PYTHON_BIN" --version >/dev/null 2>&1 || {
-  echo "Python 3 is required by this installer. Set LYRICMOTION_PYTHON when python3 is not on PATH."
+    echo "Python 3 is required by this installer. Set LYRICMOTION_PYTHON when python3 is not on PATH."
+    exit 1
+}
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 8))' || {
+  echo "Python 3.8 or newer is required by this installer."
   exit 1
 }
 
@@ -75,6 +92,14 @@ PYTHON_BIN=${LYRICMOTION_PYTHON:-python3}
 }
 [ -f "$ROMANIZER_SOURCE" ] || {
   echo "Missing $ROMANIZER_SOURCE"
+  exit 1
+}
+grep -Fq "const VERSION = '$VERSION';" "$JS_SOURCE" || {
+  echo "Runtime JavaScript VERSION does not match VERSION; refusing to install a mismatched release."
+  exit 1
+}
+grep -Fq "const VERSION = '$LYRICG2P_VERSION';" "$ROMANIZER_SOURCE" || {
+  echo "Romanizer JavaScript VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
   exit 1
 }
 
@@ -97,14 +122,24 @@ cp "$INDEX" "$BACKUP"
 stage_copy() {
   source_path=$1
   destination_path=$2
-  destination_name=$(basename -- "$destination_path")
-  temporary_path=$(mktemp "$WEB_DIR/.${destination_name}.XXXXXX.tmp")
-  if cp "$source_path" "$temporary_path"; then
+  destination_name=${destination_path##*/}
+  # BSD/macOS mktemp requires Xs at the very end of the template.  mktemp also
+  # creates mode 0600 files; Jellyfin's service account must be able to read
+  # every asset after the atomic rename.
+  temporary_path=$(mktemp "$WEB_DIR/.${destination_name}.tmp.XXXXXX")
+  if cp "$source_path" "$temporary_path" && chmod 0644 "$temporary_path"; then
     printf '%s\n' "$temporary_path"
     return 0
   fi
   rm -f "$temporary_path"
   return 1
+}
+
+file_mode() {
+  # GNU and BSD/macOS ``stat`` use different option spellings.  We need the
+  # numeric mode even when ``cp -p`` cannot retain ownership under sudo or a
+  # constrained service account.
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 stage_existing_backup() {
@@ -113,11 +148,17 @@ stage_existing_backup() {
     printf '%s\n' ''
     return 0
   fi
-  live_name=$(basename -- "$live_path")
-  backup_path=$(mktemp "$WEB_DIR/.${live_name}.XXXXXX.rollback")
+  live_name=${live_path##*/}
+  backup_path=$(mktemp "$WEB_DIR/.${live_name}.rollback.XXXXXX")
+  if ! live_mode=$(file_mode "$live_path"); then
+    rm -f "$backup_path"
+    return 1
+  fi
   if cp -p "$live_path" "$backup_path" 2>/dev/null || cp "$live_path" "$backup_path"; then
-    printf '%s\n' "$backup_path"
-    return 0
+    if chmod "$live_mode" "$backup_path"; then
+      printf '%s\n' "$backup_path"
+      return 0
+    fi
   fi
   rm -f "$backup_path"
   return 1
@@ -183,7 +224,11 @@ trap 'exit 143' TERM
 JS_TEMP=$(stage_copy "$JS_SOURCE" "$JS_DEST")
 CSS_TEMP=$(stage_copy "$CSS_SOURCE" "$CSS_DEST")
 ROMANIZER_TEMP=$(stage_copy "$ROMANIZER_SOURCE" "$ROMANIZER_DEST")
-INDEX_TEMP=$(stage_copy "$INDEX" "$INDEX")
+# index.html is a service-owned file and can legitimately be less permissive
+# than the JS/CSS assets.  Use the preservation path for its staged copy so
+# the atomic rename does not turn a 0640 (or similarly restricted) index into
+# a generic 0644 file.
+INDEX_TEMP=$(stage_existing_backup "$INDEX")
 
 # Snapshot the complete previous live asset set before the first commit. Empty
 # rollback paths mean that asset did not exist and should be removed on rollback.
@@ -198,7 +243,10 @@ import os, re, sys
 path = Path(sys.argv[1])
 version = sys.argv[2]
 lyricg2p_version = sys.argv[3]
-content = path.read_text(encoding="utf-8")
+# ``Path.read_text`` enables universal-newline conversion.  Preserve the
+# Jellyfin index's existing CRLF/LF representation while changing only tags.
+with path.open("r", encoding="utf-8", newline="") as handle:
+    content = handle.read()
 
 content = re.sub(
     r"<link\b[^>]*href=[\"'][^\"']*(?:jellyfin-lyric-motion|apple-karaoke)\.css(?:\?[^\"']*)?[\"'][^>]*>",

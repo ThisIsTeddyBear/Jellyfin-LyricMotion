@@ -1,6 +1,6 @@
 # LyricG2P 6.5.1 Architecture
 
-Jellyfin LyricMotion: `3.2.4`
+Jellyfin LyricMotion: `3.2.5`
 
 Romanizer: `6.5.1`
 
@@ -8,7 +8,7 @@ Runtime: local/offline, lazy-loaded on desktop/mobile
 
 ## Purpose
 
-LyricG2P 6.5.1 is the merged maintenance release of the in-house lyric-specific Romanization engine. It combines the safer production architecture of the 3.2.0/6.5.0 branch with the useful linguistic experiments from the alternate 6.5 implementation, then gates each imported feature behind regression, Unicode, provenance and performance tests.
+LyricG2P 6.5.1 is the merged maintenance release of the in-house lyric-specific Romanization engine. It combines the safer production architecture of the 3.2.0/6.5.0 branch with the useful linguistic improvements from the alternate 6.5 implementation while keeping normal playback deterministic and local.
 
 The result is deliberately hybrid. The engine does not hand every word to a single learned model. Different evidence sources are authoritative for different problem classes.
 
@@ -73,7 +73,7 @@ romanizeDetailed()  -> deterministic output + learned schwa evidence
 hybrid ranking      -> can consume learned/provider candidates
 ```
 
-This policy was selected after local profiling showed that running the learned inference in every Punjabi production word substantially increased hot-path time while not changing the tested accepted outputs under conservative thresholds.
+This policy keeps learned inference out of every Punjabi production word while preserving the accepted deterministic playback output.
 
 The coefficient metadata includes recorded held-out accuracy values from the source implementation. 6.5.1 marks these as `embedded-build-metadata-not-independently-reproduced-in-this-release`; they are not whole-word Romanization accuracy claims.
 
@@ -103,7 +103,7 @@ Malayalam now makes the display/phonetic distinction explicit. A conservative di
 
 Devanagari remains a shared script. 6.5.1 uses lexical markers, suffix/pattern evidence and neighboring decisive spans to distinguish Hindi, Marathi, Bhojpuri and Nepali when evidence is strong.
 
-Examples exercised by the regression suite:
+Examples of intended language handling:
 
 ```text
 तिमीलाई माया गर्छ  -> Nepali context
@@ -189,9 +189,9 @@ The learned advisors and expanded diagnostics are off the rendering hot path. Br
 
 ## Confidence semantics
 
-LyricG2P confidence remains an **evidence score, not a probability**. The checked-in calibration utility measures how evidence bands correspond to held-out correctness without silently relabeling them as calibrated probabilities.
+LyricG2P confidence remains an **evidence score, not a probability**. It must not be read as a calibrated probability of a Romanization being correct.
 
-## Research/model ship gate
+## Model inclusion criteria
 
 A full native-to-Roman model is still not shipped. It must demonstrate, on licensed and leakage-resistant held-out data:
 
@@ -203,7 +203,7 @@ A full native-to-Roman model is still not shipped. It must demonstrate, on licen
 6. karaoke-safe monotonic alignment/provenance;
 7. license compatibility.
 
-The repository keeps corpus import/evaluation and tiny-model research tooling so that decision can be made from measurements rather than model fashion.
+No corpus-import, evaluation, calibration, or training tooling is shipped in this repository. Any future model would require independent evidence against these criteria before inclusion.
 
 ## Public development surface
 
@@ -227,7 +227,7 @@ explain()
 
 ## Release invariants
 
-- Jellyfin LyricMotion 3.2.4 retains LyricG2P `6.5.1` unchanged.
+- Jellyfin LyricMotion 3.2.5 retains LyricG2P `6.5.1` unchanged.
 - LyricG2P is `6.5.1`.
 - The Romanizer asset is cache-busted with `?v=6.5.1`.
 - The 3.2.x main-script injection also carries `&g2p=6.5.1`, preserving an independent Romanizer cache identity across application releases.

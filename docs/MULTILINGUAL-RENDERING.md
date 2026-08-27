@@ -4,7 +4,7 @@ LyricMotion keeps each visible lyric word as a shaped text run so browser font s
 
 ## Unified glow behavior
 
-Preview 7 removes the old practical distinction where Latin text received the richer staggered Classic Bloom while many shaped scripts fell back to a visibly flatter whole-word effect.
+The current renderer removes the old practical distinction where Latin text received the richer staggered Classic Bloom while many shaped scripts fell back to a visibly flatter whole-word effect.
 
 For scripts with safe grapheme/akshara boundaries, the motion overlay now uses the same per-grapheme Classic Bloom energy model as Latin. This includes Devanagari, Bengali/Assamese, Gurmukhi, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam, Sinhala and other non-joining scripts handled safely by the grapheme segmenter.
 

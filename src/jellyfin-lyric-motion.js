@@ -1029,7 +1029,7 @@
         'appleKaraokeRecentAccents';
 
     /*
-     * Compact six-color OLED palette. Each selection keeps a clean primary
+     * Compact five-color OLED palette. Each selection keeps a clean primary
      * edge and a complementary outer bloom instead of making every shadow the
      * same hue.
      */
@@ -1073,6 +1073,7 @@
         lastAnimationLoopError: '',
         lastMediaWarning: 0,
         geometryTimer: 0,
+        backgroundAnchorTimer: 0,
         decorationRetryStartedAt: 0,
         decorationRetryCount: 0,
         decorationRetryExpiredCount: 0,
@@ -1080,6 +1081,8 @@
         lastActiveLineSignature: '',
         activeLineIndexes: [],
         activeLineScratch: [],
+        handoffLineIndexes: new Set(),
+        retiredLineElements: [],
         lineEndPrefix: [],
         instrumentalGaps: [],
         activeInstrumentalGapIndex: -1,
@@ -1417,27 +1420,9 @@
                 hasExplicitDuration = true;
             }
 
-            const cues = lyricValue(lyric, 'Cues', 'cues');
-            (Array.isArray(cues) ? cues : []).forEach(cue => {
-                const cueStart = finiteTick(
-                    cueValue(cue, 'Start', 'start')
-                );
-                const cueEnd = finiteTick(
-                    cueValue(cue, 'End', 'end')
-                );
-
-                if (
-                    (cueStart !== null && cueStart > 0)
-                    || (cueEnd !== null && cueEnd > 0)
-                    || (
-                        cueStart !== null
-                        && cueEnd !== null
-                        && cueEnd > cueStart
-                    )
-                ) {
-                    hasAdvancingCueTiming = true;
-                }
-            });
+            if (hasUsableWordTiming(lyric)) {
+                hasAdvancingCueTiming = true;
+            }
         });
 
         if (hasAdvancingCueTiming) return 'enhanced';
@@ -1456,8 +1441,7 @@
         if (lyricTimingMode(lyrics) !== 'enhanced') return 0;
 
         return lyrics.reduce((total, lyric) => {
-            const cues = lyricValue(lyric, 'Cues', 'cues');
-            return total + (Array.isArray(cues) ? cues.length : 0);
+            return total + usableWordCueRanges(lyric).length;
         }, 0);
     }
 
@@ -1497,6 +1481,120 @@
                 left.position - right.position || left.index - right.index
             )
             .map(entry => entry.cue);
+    }
+
+    function normalizedCueTextRanges(cues, rawTextLength) {
+        const source = Array.isArray(cues) ? cues : [];
+        const textLength = Math.max(0, Number(rawTextLength) || 0);
+        if (!source.length || !textLength) return [];
+
+        const positions = source.map(cue => nullableTick(
+            cueValue(cue, 'Position', 'position')
+        ));
+
+        /* Without source positions there is no reliable way to identify the
+         * timed text. Rendering it as word karaoke creates transparent or
+         * misaligned spans, so leave that row line-synchronised instead. */
+        if (positions.some(position => position === null)) return [];
+
+        return source.reduce((ranges, cue, cueIndex) => {
+            const rawStart = Math.max(
+                0,
+                Math.min(textLength, positions[cueIndex])
+            );
+            const explicitEnd = nullableTick(
+                cueValue(cue, 'EndPosition', 'endPosition')
+            );
+            let rawEnd = explicitEnd === null
+                ? rawStart
+                : Math.max(0, Math.min(textLength, explicitEnd));
+
+            if (rawEnd <= rawStart) {
+                const nextPosition = positions
+                    .slice(cueIndex + 1)
+                    .find(position => position > rawStart);
+                rawEnd = nextPosition === undefined
+                    ? textLength
+                    : Math.min(textLength, nextPosition);
+            }
+
+            if (rawEnd > rawStart) {
+                ranges.push({
+                    cue,
+                    cueIndex,
+                    startPosition: rawStart,
+                    endPosition: rawEnd
+                });
+            }
+            return ranges;
+        }, []);
+    }
+
+    function usableWordCueRanges(lyric, orderedCues = null) {
+        const profile = lyricTextProfile(lyric);
+        const rawCues = orderedCues || orderedCuesBySourcePosition(
+            lyricValue(lyric, 'Cues', 'cues')
+        );
+
+        const candidates = normalizedCueTextRanges(
+            rawCues,
+            profile.rawText.length
+        ).filter(range => {
+            const start = Math.max(
+                0,
+                range.startPosition - profile.positionOffset
+            );
+            const end = Math.max(
+                start,
+                range.endPosition - profile.positionOffset
+            );
+            const cueStart = finiteTick(
+                cueValue(range.cue, 'Start', 'start')
+            );
+            return cueStart !== null
+                && end > start
+                && /\S/u.test(profile.text.slice(start, end));
+        });
+
+        /*
+         * Some providers repeat a whole-line cue for each timestamp. Those
+         * records look populated but their nested text spans make every word
+         * inherit the line duration. Retain only source ranges that move
+         * forward through displayed text; falling back to line timing is safer
+         * than a false full-line karaoke sweep.
+         */
+        const advancing = [];
+        let previousEnd = -1;
+
+        candidates.forEach(range => {
+            const start = Math.max(
+                0,
+                range.startPosition - profile.positionOffset
+            );
+            const end = Math.max(
+                start,
+                range.endPosition - profile.positionOffset
+            );
+
+            if (start < previousEnd) return;
+
+            advancing.push(range);
+            previousEnd = end;
+        });
+
+        return advancing;
+    }
+
+    function hasUsableWordTiming(lyric, orderedCues = null) {
+        const ranges = usableWordCueRanges(lyric, orderedCues);
+        if (ranges.length < 2) return false;
+
+        const starts = new Set(
+            ranges.map(range =>
+                finiteTick(cueValue(range.cue, 'Start', 'start'))
+            )
+        );
+        return starts.size >= 2;
     }
 
 
@@ -2302,14 +2400,20 @@
     }
 
     function classifyWordMotion(words) {
+        const reducedMotion = prefersReducedMotion();
+
         words.forEach(word => {
             if (
+                reducedMotion
+                ||
                 !word.segments.length
                 || !Number.isFinite(word.start)
                 || !Number.isFinite(word.end)
                 || word.end <= word.start
             ) {
                 word.motionMode = 'none';
+                word.motionGlow = false;
+                word.motionDurationMs = 0;
                 return;
             }
 
@@ -2701,28 +2805,39 @@
             return measured;
         };
 
-        const fullWidth =
-            prefixWidth(textNode.length)
-            || wordRect.width;
+        const fullWidth = prefixWidth(textNode.length);
 
-        if (fullWidth > 0) {
-            word.renderWidth = fullWidth;
+        /* Do not manufacture Range geometry from the word's box when Range
+         * measurement failed. A zero-width prefix combined with a non-zero
+         * box maps every segment to 0% and makes the sweep appear only at the
+         * final frame. Leaving visual bounds unset intentionally uses the
+         * reliable source-character fallback in wordTargetProgress(). */
+        if (Number.isFinite(fullWidth) && fullWidth > 0) {
+            const measuredSegments = word.segments.map(segment => ({
+                segment,
+                start: prefixWidth(segment.startPos),
+                end: prefixWidth(segment.endPos)
+            }));
+            const valid = measuredSegments.every(entry =>
+                Number.isFinite(entry.start)
+                && Number.isFinite(entry.end)
+                && entry.end > entry.start
+                && entry.start >= 0
+                && entry.end <= fullWidth + 0.5
+            );
 
-            word.segments.forEach(segment => {
-                const startPx =
-                    prefixWidth(segment.startPos);
-
-                const endPx =
-                    prefixWidth(segment.endPos);
-
-                segment.visualStart =
-                    clamp01(startPx / fullWidth);
-
-                segment.visualEnd =
-                    clamp01(endPx / fullWidth);
-            });
-
-            word.geometryReady = true;
+            if (valid) {
+                word.renderWidth = fullWidth;
+                measuredSegments.forEach(entry => {
+                    entry.segment.visualStart = clamp01(
+                        entry.start / fullWidth
+                    );
+                    entry.segment.visualEnd = clamp01(
+                        entry.end / fullWidth
+                    );
+                });
+                word.geometryReady = true;
+            }
         }
 
         const glyphCount =
@@ -2791,6 +2906,28 @@
         layer.setAttribute('aria-hidden', 'true');
 
         const glyphs = [];
+        const layoutWidth = Number(word.element.offsetWidth);
+        const layoutHeight = Number(word.element.offsetHeight);
+        const scaleX =
+            Number.isFinite(layoutWidth)
+            && layoutWidth > 0
+                ? wordRect.width / layoutWidth
+                : 1;
+        const scaleY =
+            Number.isFinite(layoutHeight)
+            && layoutHeight > 0
+                ? wordRect.height / layoutHeight
+                : 1;
+        const usableScaleX = Number.isFinite(scaleX) && scaleX > 0
+            ? scaleX
+            : 1;
+        const usableScaleY = Number.isFinite(scaleY) && scaleY > 0
+            ? scaleY
+            : 1;
+        const localWordRect = {
+            width: wordRect.width / usableScaleX,
+            height: wordRect.height / usableScaleY
+        };
 
         graphemes.forEach((rangeInfo, index) => {
             const range = document.createRange();
@@ -2810,10 +2947,15 @@
                     index,
                     graphemes.length,
                     {
-                        left: rect.left - wordRect.left,
-                        top: rect.top - wordRect.top,
-                        width: rect.width,
-                        height: rect.height
+                        /* Range rectangles are viewport-space and include the
+                         * line/word scale. Glyph overlays are children of the
+                         * already-transformed word, so convert them back to
+                         * local coordinates instead of applying that scale a
+                         * second time. */
+                        left: (rect.left - wordRect.left) / usableScaleX,
+                        top: (rect.top - wordRect.top) / usableScaleY,
+                        width: rect.width / usableScaleX,
+                        height: rect.height / usableScaleY
                     }
                 );
 
@@ -2833,7 +2975,7 @@
             measuredFallbackGlyphBoxes(
                 word,
                 graphemes,
-                wordRect
+                localWordRect
             ).forEach((box, index) => {
                 const glyph = createMotionGlyph(
                     word,
@@ -3472,7 +3614,7 @@
         return state.accent || NEUTRAL_ACCENT;
     }
 
-    function retireDecoratedLines() {
+    function retireDecoratedLines(hide = true) {
         removeInstrumentalGapRows();
 
         state.lineData.forEach(lineRecord => {
@@ -3482,6 +3624,9 @@
             if (!element || !element.isConnected) return;
 
             try {
+                const ownsRenderedChildren =
+                    lineHasOwnedLyricNodes(element);
+
                 Array.from(element.classList || [])
                     .filter(name => name.indexOf('ak-') === 0)
                     .forEach(name => element.classList.remove(name));
@@ -3495,18 +3640,55 @@
                 delete element.dataset.akBackgroundAnchorLine;
                 element.style.removeProperty('--ak-bg-anchor-offset');
 
-                /*
-                 * Jellyfin may replace/reuse this node on the next SPA task.
-                 * Hide the retired lyric immediately so the previous song can
-                 * never flash while the new/no-lyrics view is being committed.
-                 * decorateLine() clears both properties on valid reuse.
-                 */
-                element.style.visibility = 'hidden';
-                element.setAttribute('aria-hidden', 'true');
+                if (hide) {
+                    /* Jellyfin may replace/reuse this node on the next SPA
+                     * task. Hide only while a new song response is pending so
+                     * the old track cannot flash during the hand-off. */
+                    element.style.visibility = 'hidden';
+                    element.setAttribute('aria-hidden', 'true');
+                    if (!state.retiredLineElements.includes(element)) {
+                        state.retiredLineElements.push(element);
+                    }
+                } else {
+                    /* A completed no-lyrics response must never inherit the
+                     * pending-switch hidden state. If the framework has not
+                     * replaced our old word spans yet, clear just those owned
+                     * children and leave a visible native container for it. */
+                    element.style.removeProperty('visibility');
+                    element.removeAttribute('aria-hidden');
+                    element.removeAttribute('aria-label');
+                    element.removeAttribute('dir');
+                    if (ownsRenderedChildren) {
+                        replaceChildrenCompat(element);
+                    }
+                }
             } catch {
                 // A framework-owned node can detach in the middle of cleanup.
             }
         });
+
+        if (!hide && state.retiredLineElements.length) {
+            state.retiredLineElements.forEach(element => {
+                if (!element || !element.isConnected) return;
+
+                try {
+                    Array.from(element.classList || [])
+                        .filter(name => name.indexOf('ak-') === 0)
+                        .forEach(name => element.classList.remove(name));
+                    element.style.removeProperty('visibility');
+                    element.style.removeProperty('--ak-bg-anchor-offset');
+                    element.removeAttribute('aria-hidden');
+                    element.removeAttribute('aria-label');
+                    element.removeAttribute('dir');
+                    if (lineHasOwnedLyricNodes(element)) {
+                        replaceChildrenCompat(element);
+                    }
+                } catch {
+                    // The framework can detach a pending node during cleanup.
+                }
+            });
+            state.retiredLineElements = [];
+        }
 
         const container =
             getCurrentLyricsContainer(true);
@@ -3527,12 +3709,16 @@
             clearTimeout(state.geometryTimer);
             state.geometryTimer = 0;
         }
+        if (state.backgroundAnchorTimer) {
+            clearTimeout(state.backgroundAnchorTimer);
+            state.backgroundAnchorTimer = 0;
+        }
 
         /* Cancel any artwork decode owned by the outgoing track, but never hide
          * or reset the currently rendered field during lyric-payload churn. */
         invalidateAtmosphereLoads(source);
         stopAnimationLoop(source);
-        retireDecoratedLines();
+        retireDecoratedLines(source === 'request-switch');
 
         if (keepDynamicVisible) {
             const root = state.atmosphereRoot;
@@ -3572,6 +3758,7 @@
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
+        resetMotionHandoffs();
         state.lyricAutoFollowSuspendedUntil = 0;
         state.lyricAutoFollowLastIndex = -1;
         state.lyricAutoFollowLastAt = 0;
@@ -3754,6 +3941,7 @@
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
+        resetMotionHandoffs();
         state.lyricAutoFollowSuspendedUntil = 0;
         state.lyricAutoFollowLastIndex = -1;
         state.lyricAutoFollowLastReason = 'lyrics-accepted';
@@ -4079,27 +4267,6 @@
             markerLength =
                 LEGACY_BACKGROUND_VOCAL_SENTINEL.length;
             roleSource = 'legacy-marker';
-        } else {
-            const trimmed = rawText.trim();
-
-            /*
-             * Recovery path for libraries already imported with the stripped
-             * legacy marker. It is intentionally narrow: only a complete,
-             * short parenthetical response is inferred as a backing vocal.
-             */
-            const firstCharacter = trimmed.charAt(0);
-            const lastCharacter = trimmed.charAt(trimmed.length - 1);
-            const completeParenthetical =
-                (firstCharacter === '(' && lastCharacter === ')')
-                || (firstCharacter === '（' && lastCharacter === '）');
-
-            if (
-                trimmed.length >= 3
-                && trimmed.length <= 64
-                && completeParenthetical
-            ) {
-                roleSource = 'parenthetical-fallback';
-            }
         }
 
         const isBackgroundVocal = !!roleSource;
@@ -4560,16 +4727,27 @@
         }
 
         const sorted = orderedCuesBySourcePosition(rawCues);
-        let rawCursor = profile.positionOffset;
+        const ranges = normalizedCueTextRanges(
+            sorted,
+            profile.rawText.length
+        );
+        const rangeByCueIndex = new Map(
+            ranges.map(range => [range.cueIndex, range])
+        );
 
-        const convertedCues = sorted.map(cue => {
+        const convertedCues = sorted.map((cue, cueIndex) => {
             let start = nullableTick(cueValue(cue, 'Position', 'position'));
             let end = nullableTick(cueValue(cue, 'EndPosition', 'endPosition'));
-            if (start === null) start = rawCursor;
-            if (end === null) end = start;
+            if (start === null) return Object.assign({}, cue);
+            const range = rangeByCueIndex.get(cueIndex);
+            if (range) {
+                start = range.startPosition;
+                end = range.endPosition;
+            } else if (end === null) {
+                end = start;
+            }
             start = Math.max(profile.positionOffset, Math.min(profile.rawText.length, start));
             end = Math.max(start, Math.min(profile.rawText.length, end));
-            rawCursor = end;
 
             const sourceStart = Math.max(0, Math.min(
                 sourceText.length,
@@ -5934,16 +6112,30 @@
         return finiteTick(value);
     }
 
-    function nextLyricStartTicks(lineIndex) {
-        const next =
-            state.lyrics
-            && state.lyrics[lineIndex + 1];
+    function nextLyricStartTicks(lineIndex, afterTicks = null) {
+        const current = state.lyrics && state.lyrics[lineIndex];
+        const currentStart = finiteTick(
+            lyricValue(current, 'Start', 'start')
+        );
+        const threshold = finiteTick(afterTicks) ?? currentStart;
 
-        return next
-            ? finiteTick(
-                lyricValue(next, 'Start', 'start')
-            )
-            : null;
+        for (
+            let index = lineIndex + 1;
+            state.lyrics && index < state.lyrics.length;
+            index += 1
+        ) {
+            const start = finiteTick(
+                lyricValue(state.lyrics[index], 'Start', 'start')
+            );
+            if (
+                start !== null
+                && (threshold === null || start > threshold)
+            ) {
+                return start;
+            }
+        }
+
+        return null;
     }
 
     function calculateLineBounds(
@@ -6966,14 +7158,38 @@
         const backgroundVocalRoleSource =
             textProfile.backgroundVocalRoleSource;
         const rawCues = lyricValue(displayLyric, 'Cues', 'cues');
-        const cues = Array.isArray(rawCues)
+        const orderedCues = Array.isArray(rawCues)
             ? orderedCuesBySourcePosition(rawCues)
+            : [];
+        const wordCueRanges = usableWordCueRanges(
+            displayLyric,
+            orderedCues
+        );
+        const hasWordTiming = hasUsableWordTiming(
+            displayLyric,
+            orderedCues
+        );
+        const cues = hasWordTiming
+            ? wordCueRanges.map(range => range.cue)
             : [];
 
         lineElement.style.removeProperty('visibility');
         lineElement.style.removeProperty('--ak-bg-anchor-offset');
         lineElement.removeAttribute('aria-hidden');
+        state.retiredLineElements = state.retiredLineElements.filter(
+            element => element && element !== lineElement && element.isConnected
+        );
         lineElement.classList.add('ak-enhanced-line');
+        lineElement.classList.remove(
+            'ak-current',
+            'ak-past',
+            'ak-future',
+            'ak-near',
+            'ak-near2',
+            'ak-far',
+            'ak-overlap-current',
+            'ak-motion-handoff'
+        );
         lineElement.dataset.akTimingLineIndex = String(lineIndex);
         lineElement.classList.toggle('ak-line-synced', cues.length === 0);
         lineElement.classList.toggle(
@@ -7015,7 +7231,7 @@
                 displayLyric,
                 lineIndex,
                 [],
-                [],
+                orderedCues,
                 rawText.length
             );
             return {
@@ -7030,6 +7246,7 @@
                 trustedEndTicks: bounds.trustedEndTicks,
                 isBackgroundVocal,
                 backgroundVocalRoleSource,
+                ownedText: text,
                 ownedNodes: Array.from(lineElement.children || [])
             };
         }
@@ -7038,23 +7255,12 @@
             getGraphemeBoundaries(text);
 
         const cueRecords = [];
-        let rawCursor = 0;
 
-        cues.forEach((cue, cueIndex) => {
-            let startPos = nullableTick(
-                cueValue(cue, 'Position', 'position')
-            );
-            let endPos = nullableTick(
-                cueValue(cue, 'EndPosition', 'endPosition')
-            );
-
-            if (startPos === null) startPos = rawCursor;
-            if (endPos === null) endPos = startPos;
-
-            startPos = Math.max(rawCursor, Math.min(rawText.length, startPos));
-            endPos = Math.max(startPos, Math.min(rawText.length, endPos));
-
-            rawCursor = endPos;
+        wordCueRanges.forEach(range => {
+            const cue = range.cue;
+            const sourceCueIndex = range.cueIndex;
+            let startPos = range.startPosition;
+            let endPos = range.endPosition;
 
             startPos = Math.max(
                 0,
@@ -7076,11 +7282,16 @@
                 )
                 ?? 0;
 
+            /* Keep the complete source-ordered cue list here. In particular,
+             * the converter intentionally emits a final empty cue at
+             * text.length to mark the real end of an ELRC line. That cue does
+             * not create a visible word range, but it must still end the last
+             * visible word rather than letting its sweep run to the next line. */
             const end = cueEndTicks(
                 lineIndex,
-                cueIndex,
+                sourceCueIndex,
                 cue,
-                cues
+                orderedCues
             );
 
             startPos = snapBoundary(graphemeBoundaries, startPos, 'backward');
@@ -7090,12 +7301,12 @@
             if (endPos > startPos) {
                 const record = {
                     cue,
-                    cueIndex,
+                    cueIndex: sourceCueIndex,
                     startPos,
                     endPos,
                     start,
                     end,
-                    sourceCueIndexes: [cueIndex]
+                    sourceCueIndexes: [sourceCueIndex]
                 };
 
                 const previous =
@@ -7127,7 +7338,7 @@
                         );
 
                     previous.sourceCueIndexes.push(
-                        cueIndex
+                        sourceCueIndex
                     );
                 } else {
                     cueRecords.push(record);
@@ -7175,12 +7386,12 @@
         }
 
         const bounds = calculateLineBounds(
-            displayLyric,
-            lineIndex,
-            words,
-            cues,
-            rawText.length
-        );
+                displayLyric,
+                lineIndex,
+                words,
+                orderedCues,
+                rawText.length
+            );
 
         return {
             element: lineElement,
@@ -7194,6 +7405,7 @@
             trustedEndTicks: bounds.trustedEndTicks,
             isBackgroundVocal,
             backgroundVocalRoleSource,
+            ownedText: text,
             ownedNodes: Array.from(lineElement.children || [])
         };
     }
@@ -7254,32 +7466,42 @@
 
         const backgroundStart = Number(lineRecord.startTicks);
         const backgroundEnd = Number(lineRecord.endTicks);
-        const previousEnd = previousLead
-            ? Number(previousLead.endTicks)
-            : NaN;
-        const nextStart = nextLead
-            ? Number(nextLead.startTicks)
-            : NaN;
+        const affinity = lead => {
+            const leadStart = Number(lead && lead.startTicks);
+            const leadEnd = Number(lead && lead.endTicks);
+            const hasIntervals =
+                Number.isFinite(backgroundStart)
+                && Number.isFinite(backgroundEnd)
+                && Number.isFinite(leadStart)
+                && Number.isFinite(leadEnd);
+            const overlap = hasIntervals
+                ? Math.max(
+                    0,
+                    Math.min(backgroundEnd, leadEnd)
+                        - Math.max(backgroundStart, leadStart)
+                )
+                : 0;
+            const gap = hasIntervals
+                ? (
+                    overlap > 0
+                        ? 0
+                        : Math.max(
+                            0,
+                            backgroundStart - leadEnd,
+                            leadStart - backgroundEnd
+                        )
+                )
+                : Infinity;
 
-        /*
-         * A backing line that overlaps the next lead belongs immediately
-         * before it. This is the common converter ordering for a same-start
-         * call/response. When it follows a lead instead, attach it after the
-         * closest completed line. Gap distance resolves the rare silent-gap
-         * case and keeps manually-authored ELRC deterministic.
-         */
-        if (
-            nextLead
-            && Number.isFinite(backgroundStart)
-            && Number.isFinite(backgroundEnd)
-            && Number.isFinite(nextStart)
-            && nextStart <= backgroundEnd
-        ) {
             return {
-                placement: 'before',
-                anchorLineIndex: nextLead.lineIndex
+                sameStart:
+                    Number.isFinite(backgroundStart)
+                    && Number.isFinite(leadStart)
+                    && backgroundStart === leadStart,
+                overlap,
+                gap
             };
-        }
+        };
 
         if (!previousLead) {
             return {
@@ -7295,25 +7517,35 @@
             };
         }
 
-        const previousGap =
-            Number.isFinite(backgroundStart)
-            && Number.isFinite(previousEnd)
-                ? Math.max(0, backgroundStart - previousEnd)
-                : Infinity;
-        const nextGap =
-            Number.isFinite(backgroundEnd)
-            && Number.isFinite(nextStart)
-                ? Math.max(0, nextStart - backgroundEnd)
-                : Infinity;
+        const previousAffinity = affinity(previousLead);
+        const nextAffinity = affinity(nextLead);
 
-        return previousGap <= nextGap
+        /* Exact same-start call/response belongs before the following lead.
+         * Otherwise prefer the lead with the longest real overlap, then the
+         * smallest silence. This handles backing lines stored either before
+         * their lead or immediately after it without letting a tiny next-line
+         * overlap steal a response that belongs to the preceding lyric. */
+        const useNext =
+            (nextAffinity.sameStart && !previousAffinity.sameStart)
+            || (
+                nextAffinity.sameStart === previousAffinity.sameStart
+                && (
+                    nextAffinity.overlap > previousAffinity.overlap
+                    || (
+                        nextAffinity.overlap === previousAffinity.overlap
+                        && nextAffinity.gap < previousAffinity.gap
+                    )
+                )
+            );
+
+        return useNext
             ? {
-                placement: 'after',
-                anchorLineIndex: previousLead.lineIndex
-            }
-            : {
                 placement: 'before',
                 anchorLineIndex: nextLead.lineIndex
+            }
+            : {
+                placement: 'after',
+                anchorLineIndex: previousLead.lineIndex
             };
     }
 
@@ -7355,6 +7587,55 @@
         return attachment;
     }
 
+    function renderedLyricTextLeft(element) {
+        if (!element) return null;
+
+        const children = Array.from(element.children || []);
+        for (const child of children) {
+            if (
+                !child
+                || !child.classList
+                || (
+                    !child.classList.contains('ak-word')
+                    && !child.classList.contains('ak-untimed')
+                )
+            ) {
+                continue;
+            }
+
+            const textNode = Array.from(child.childNodes || []).find(node =>
+                node
+                && node.nodeType === Node.TEXT_NODE
+                && /\S/u.test(String(node.textContent || ''))
+            );
+            if (!textNode) continue;
+
+            const text = String(textNode.textContent || '');
+            const start = Math.max(0, text.search(/\S/u));
+            const range = document.createRange();
+
+            try {
+                range.setStart(textNode, start);
+                range.setEnd(textNode, textNode.length);
+                const rects = Array.from(range.getClientRects())
+                    .map(rect => Number(rect.left))
+                    .filter(Number.isFinite);
+                if (rects.length) return Math.min(...rects);
+            } catch {
+                // Layout/range APIs are optional during a detached DOM update.
+            } finally {
+                if (range.detach) range.detach();
+            }
+        }
+
+        try {
+            const left = Number(element.getBoundingClientRect().left);
+            return Number.isFinite(left) ? left : null;
+        } catch {
+            return null;
+        }
+    }
+
     function backgroundVocalAnchorOffset(
         backgroundElement,
         anchorElement
@@ -7368,12 +7649,8 @@
             return null;
         }
 
-        const backgroundLeft = Number(
-            backgroundElement.getBoundingClientRect().left
-        );
-        const anchorLeft = Number(
-            anchorElement.getBoundingClientRect().left
-        );
+        const backgroundLeft = renderedLyricTextLeft(backgroundElement);
+        const anchorLeft = renderedLyricTextLeft(anchorElement);
 
         if (!Number.isFinite(backgroundLeft) || !Number.isFinite(anchorLeft)) {
             return null;
@@ -7430,6 +7707,22 @@
         });
     }
 
+    function queueBackgroundVocalAnchorRefresh() {
+        if (state.backgroundAnchorTimer) {
+            clearTimeout(state.backgroundAnchorTimer);
+        }
+
+        /* Line state uses a CSS scale transition. Re-measure after it settles
+         * so the background's rendered glyph—not merely its border box—stays
+         * exactly flush with its selected lead on every phase change. */
+        state.backgroundAnchorTimer = window.setTimeout(() => {
+            state.backgroundAnchorTimer = 0;
+            if (state.lyrics && isLyricsPage()) {
+                alignBackgroundVocalAnchors();
+            }
+        }, 460);
+    }
+
     function inspectBackgroundVocals() {
         const lines = state.lineData
             .filter(line => line.isBackgroundVocal)
@@ -7467,7 +7760,7 @@
             cacheHint:
                 lines.length
                     ? null
-                    : 'No x-bg role reached the renderer. Reconvert with preview.4; complete parenthetical responses are also recovered when Jellyfin stripped the old marker.'
+                    : 'No x-bg role reached the renderer. Reconvert with the current converter so its [ak:bg] transport token is preserved.'
         };
     }
 
@@ -7496,6 +7789,26 @@
         );
     }
 
+    function ownedLyricText(line) {
+        if (!line || !line.children) return '';
+
+        return Array.from(line.children)
+            .filter(child =>
+                child
+                && child.classList
+                && (
+                    child.classList.contains('ak-word')
+                    || child.classList.contains('ak-untimed')
+                )
+            )
+            .map(child => Array.from(child.childNodes || [])
+                .filter(node => node && node.nodeType === Node.TEXT_NODE)
+                .map(node => String(node.textContent || ''))
+                .join('')
+            )
+            .join('');
+    }
+
     function lyricDomLineReady(line, lyric) {
         if (!line || !lyric) return false;
         const expectedIdentity = lyricDomIdentity(lyric);
@@ -7514,14 +7827,26 @@
         const expected = normalizedLyricDomText(
             lyricTextProfile(lyric).text
         );
-        const actual = normalizedLyricDomText(line.textContent);
+        /* Jellyfin can keep the ASCII transport marker in its native text
+         * node. Compare display text on both sides so x-bg lines can be
+         * decorated and stripped instead of timing out in the readiness loop. */
+        const actual = normalizedLyricDomText(
+            lyricTextProfile({ Text: line.textContent }).text
+        );
         return actual === expected;
     }
 
     function lyricsDomReadyForPayload(lines, lyrics) {
-        const count = Math.min(lines.length, lyrics.length);
-        if (!count) return false;
-        for (let index = 0; index < count; index += 1) {
+        if (
+            !Array.isArray(lines)
+            || !Array.isArray(lyrics)
+            || !lyrics.length
+            || lines.length !== lyrics.length
+        ) {
+            return false;
+        }
+
+        for (let index = 0; index < lines.length; index += 1) {
             if (!lyricDomLineReady(lines[index], lyrics[index])) {
                 return false;
             }
@@ -7579,6 +7904,7 @@
         state.lineEndPrefix = [];
         state.instrumentalGaps = [];
         state.activeLineIndexes = [];
+        resetMotionHandoffs();
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeInstrumentalGapIndex = -1;
@@ -7614,12 +7940,16 @@
 
         const liveChildren = Array.from(element.children || []);
         if (liveChildren.length !== ownedNodes.length) return false;
-        return ownedNodes.every(
+        const ownsExpectedNodes = ownedNodes.every(
             (node, index) =>
                 node
                 && node.parentNode === element
                 && liveChildren[index] === node
         );
+
+        return ownsExpectedNodes
+            && normalizedLyricDomText(ownedLyricText(element))
+                === normalizedLyricDomText(lineRecord.ownedText);
     }
 
     function instrumentalGapRowsHealthy() {
@@ -7662,7 +7992,7 @@
 
         removeInstrumentalGapRows(container);
 
-        const count = Math.min(lines.length, state.lyrics.length);
+        const count = lines.length;
         state.lineData = [];
         state.shapedWordCount = 0;
         state.scriptProfileCounts = {};
@@ -7731,6 +8061,7 @@
         state.lastActiveLine = -999;
         state.lastActiveLineSignature = '';
         state.activeLineIndexes = [];
+        resetMotionHandoffs();
         state.lyricAutoFollowLastIndex = -1;
 
         container.classList.add('ak-karaoke-container');
@@ -7919,7 +8250,8 @@
     function shouldUsePerGlyphMotion(
         glyphCount
     ) {
-        return Number(glyphCount) > 0;
+        return !prefersReducedMotion()
+            && Number(glyphCount) > 0;
     }
 
     function getTargetFrameInterval(media) {
@@ -8518,7 +8850,13 @@
                 state.atmosphereDynamicContextLossCount += 1;
                 state.atmosphereDynamicFallbackReason = 'webgl-context-lost';
                 const root = state.atmosphereRoot;
-                if (root) root.classList.add('ak-dynamic-fallback-active');
+                if (root) {
+                    /* A lost context cannot paint the canvas. Remove the ready
+                     * flag as well as showing fallback; otherwise the later
+                     * ready rule can still hide the fallback layers. */
+                    root.classList.remove('ak-dynamic-webgl-ready');
+                    root.classList.add('ak-dynamic-fallback-active');
+                }
             },
             onContextRestored: () => {
                 state.atmosphereDynamicFallbackReason = 'webgl-context-restored-rebuild';
@@ -8529,12 +8867,123 @@
         };
     }
 
+    function dynamicRendererHasCurrentTexture(renderer) {
+        return !!(
+            renderer
+            && renderer.hasCurrent
+            && !renderer.contextLost
+        );
+    }
+
+    function markDynamicBackgroundWebglReady(root, renderer) {
+        if (!root || !dynamicRendererHasCurrentTexture(renderer)) {
+            return false;
+        }
+
+        /* A constructor alone does not prove that the canvas can show the
+         * artwork. Only hide the CSS fallback after a texture is current. */
+        state.atmosphereDynamicWebglAvailable = true;
+        state.atmosphereDynamicWebglFailureCount = 0;
+        state.atmosphereDynamicWebglRetryAt = 0;
+        state.atmosphereDynamicFallbackReason = '';
+        root.classList.add('ak-dynamic-webgl-ready');
+        root.classList.remove('ak-dynamic-fallback-active');
+        return true;
+    }
+
+    function recordDynamicBackgroundWebglFailure(
+        root,
+        error,
+        fallbackReason = 'webgl-init-failed'
+    ) {
+        const now = performance.now();
+        const canvas =
+            (root && directChildByClass(
+                root,
+                'ak-atmosphere-dynamic-canvas'
+            ))
+            || state.atmosphereDynamicCanvas;
+
+        /* A failed upload can leave a renderer without a usable texture.
+         * Dispose it so a due retry creates a clean context, but retain the
+         * canvas identity so ensureDynamicBackgroundRenderer() honors backoff. */
+        disposeDynamicBackgroundRenderer('webgl-failure');
+        if (canvas) state.atmosphereDynamicCanvas = canvas;
+
+        state.atmosphereDynamicWebglAvailable = false;
+        state.atmosphereDynamicWebglFailureCount += 1;
+        state.atmosphereDynamicWebglRetryAt = now + Math.min(
+            DYNAMIC_BACKGROUND_WEBGL_RETRY_MAX_MS,
+            DYNAMIC_BACKGROUND_WEBGL_RETRY_BASE_MS
+                * Math.pow(
+                    2,
+                    Math.min(
+                        3,
+                        state.atmosphereDynamicWebglFailureCount - 1
+                    )
+                )
+        );
+        state.atmosphereDynamicFallbackReason = String(
+            error && (error.message || error)
+            || fallbackReason
+        );
+
+        if (root) {
+            root.classList.remove('ak-dynamic-webgl-ready');
+            root.classList.add('ak-dynamic-fallback-active');
+        }
+
+        return null;
+    }
+
+    function loadDynamicBackgroundRendererImage(
+        root,
+        renderer,
+        image,
+        failureReason = 'webgl-image-upload-failed'
+    ) {
+        try {
+            const loaded = renderer
+                && renderer.loadImageElement(image);
+
+            if (!loaded || !markDynamicBackgroundWebglReady(root, renderer)) {
+                throw new Error('WebGL artwork texture did not become current.');
+            }
+
+            if (prefersReducedMotion() || document.hidden) {
+                renderer.renderFrame();
+            } else {
+                renderer.start();
+            }
+
+            return true;
+        } catch (error) {
+            recordDynamicBackgroundWebglFailure(
+                root,
+                error,
+                failureReason
+            );
+            return false;
+        }
+    }
+
     function ensureDynamicBackgroundRenderer() {
         const root = state.atmosphereRoot && state.atmosphereRoot.isConnected ? state.atmosphereRoot : ensureAtmosphereRoot();
         if (!root) return null;
         const canvas = directChildByClass(root, 'ak-atmosphere-dynamic-canvas');
         if (!canvas) return null;
-        if (state.atmosphereDynamicRenderer && state.atmosphereDynamicCanvas === canvas) return state.atmosphereDynamicRenderer;
+        if (state.atmosphereDynamicRenderer && state.atmosphereDynamicCanvas === canvas) {
+            if (dynamicRendererHasCurrentTexture(state.atmosphereDynamicRenderer)) {
+                markDynamicBackgroundWebglReady(
+                    root,
+                    state.atmosphereDynamicRenderer
+                );
+            } else {
+                root.classList.remove('ak-dynamic-webgl-ready');
+                root.classList.add('ak-dynamic-fallback-active');
+            }
+            return state.atmosphereDynamicRenderer;
+        }
 
         const now = performance.now();
         const previousCanvas = state.atmosphereDynamicCanvas;
@@ -8551,31 +9000,23 @@
 
         disposeDynamicBackgroundRenderer('renderer-recreate');
         state.atmosphereDynamicCanvas = canvas;
+        /* The CSS artwork remains the visible field until loadImageElement()
+         * has successfully populated a current WebGL texture. */
+        root.classList.remove('ak-dynamic-webgl-ready');
+        root.classList.add('ak-dynamic-fallback-active');
         try {
             const renderer = new DynamicBackgroundRenderer(canvas, dynamicBackgroundRendererOptions());
             state.atmosphereDynamicRenderer = renderer;
             state.atmosphereDynamicWebglAvailable = true;
-            state.atmosphereDynamicWebglFailureCount = 0;
-            state.atmosphereDynamicWebglRetryAt = 0;
-            state.atmosphereDynamicFallbackReason = '';
-            root.classList.add('ak-dynamic-webgl-ready');
-            root.classList.remove('ak-dynamic-fallback-active');
             renderer.resizeToDisplaySize();
             state.atmosphereDynamicResizeCount += 1;
             return renderer;
         } catch (error) {
-            state.atmosphereDynamicRenderer = null;
-            state.atmosphereDynamicWebglAvailable = false;
-            state.atmosphereDynamicWebglFailureCount += 1;
-            state.atmosphereDynamicWebglRetryAt = now + Math.min(
-                DYNAMIC_BACKGROUND_WEBGL_RETRY_MAX_MS,
-                DYNAMIC_BACKGROUND_WEBGL_RETRY_BASE_MS
-                    * Math.pow(2, Math.min(3, state.atmosphereDynamicWebglFailureCount - 1))
+            return recordDynamicBackgroundWebglFailure(
+                root,
+                error,
+                'webgl-init-failed'
             );
-            state.atmosphereDynamicFallbackReason = String(error && error.message || error || 'webgl-init-failed');
-            root.classList.remove('ak-dynamic-webgl-ready');
-            root.classList.add('ak-dynamic-fallback-active');
-            return null;
         }
     }
 
@@ -8614,11 +9055,31 @@
             if (!isLyricsPage() || rebuildSeq !== state.atmosphereLoadSeq || artwork !== state.atmosphereDynamicCurrentArtwork) return;
             const current = state.atmosphereDynamicRenderer;
             if (!current) return;
-            current.loadImageElement(image);
-            if (fingerprint) state.atmosphereDynamicCurrentFingerprint = fingerprint;
-            if (!document.hidden && !prefersReducedMotion()) current.start();
-            else current.renderFrame();
-        }).catch(() => { /* CSS fallback retains current art */ });
+            if (
+                loadDynamicBackgroundRendererImage(
+                    state.atmosphereRoot,
+                    current,
+                    image,
+                    'webgl-rebuild-image-upload-failed'
+                )
+            ) {
+                if (fingerprint) state.atmosphereDynamicCurrentFingerprint = fingerprint;
+            }
+        }).catch(error => {
+            if (
+                !isLyricsPage()
+                || rebuildSeq !== state.atmosphereLoadSeq
+                || artwork !== state.atmosphereDynamicCurrentArtwork
+            ) {
+                return;
+            }
+
+            recordDynamicBackgroundWebglFailure(
+                state.atmosphereRoot,
+                error,
+                'webgl-rebuild-image-load-failed'
+            );
+        });
         return renderer;
     }
 
@@ -8703,8 +9164,9 @@
         if (sameArtwork) {
             if (sameVisual && !sameUrl) state.atmosphereDynamicVisualDedupCount += 1;
             /* Same album, different track-specific URL: update only recovery URL
-             * metadata. Do NOT touch GPU textures, animation time, opacity, or
-             * fallback layer classes. */
+             * metadata. A healthy current texture is left entirely untouched;
+             * an earlier WebGL failure is eligible to recover once its backoff
+             * expires. */
             updateDynamicFallbackSameVisual(artworkUrl);
             state.atmosphereDynamicCurrentArtwork = artworkUrl;
             if (artworkFingerprint) state.atmosphereDynamicCurrentFingerprint = artworkFingerprint;
@@ -8712,11 +9174,28 @@
             state.atmosphereSource = `${source || 'unknown'}+same-visual-reuse`;
             root.classList.add('ak-atmosphere-ready');
             const existing = state.atmosphereDynamicRenderer;
-            if (existing && existing.hasCurrent) {
-                root.classList.add('ak-dynamic-webgl-ready');
-                root.classList.remove('ak-dynamic-fallback-active');
+            if (dynamicRendererHasCurrentTexture(existing)) {
+                markDynamicBackgroundWebglReady(root, existing);
                 if (!document.hidden && !prefersReducedMotion()) existing.start();
+                return false;
             }
+
+            root.classList.remove('ak-dynamic-webgl-ready');
+            root.classList.add('ak-dynamic-fallback-active');
+
+            const retryAt = Number(state.atmosphereDynamicWebglRetryAt) || 0;
+            if (retryAt && performance.now() < retryAt) return false;
+
+            const retryRenderer = ensureDynamicBackgroundRenderer();
+            if (retryRenderer) {
+                loadDynamicBackgroundRendererImage(
+                    root,
+                    retryRenderer,
+                    image,
+                    'webgl-same-artwork-retry-failed'
+                );
+            }
+
             return false;
         }
 
@@ -8725,18 +9204,12 @@
         state.atmosphereDynamicCurrentFingerprint = artworkFingerprint || null;
         const renderer = ensureDynamicBackgroundRenderer();
         if (renderer) {
-            try {
-                renderer.loadImageElement(image);
-                root.classList.add('ak-dynamic-webgl-ready');
-                root.classList.remove('ak-dynamic-fallback-active');
-                if (prefersReducedMotion() || document.hidden) renderer.renderFrame();
-                else renderer.start();
-            } catch (error) {
-                state.atmosphereDynamicWebglAvailable = false;
-                state.atmosphereDynamicFallbackReason = String(error && error.message || error || 'webgl-image-upload-failed');
-                root.classList.remove('ak-dynamic-webgl-ready');
-                root.classList.add('ak-dynamic-fallback-active');
-            }
+            loadDynamicBackgroundRendererImage(
+                root,
+                renderer,
+                image,
+                'webgl-image-upload-failed'
+            );
         } else {
             root.classList.add('ak-dynamic-fallback-active');
         }
@@ -8814,16 +9287,37 @@
 
         if (!force && key === state.atmosphereDynamicResolvedKey) {
             const resolvedAge = now - state.atmosphereDynamicResolvedAt;
-            if (!state.atmosphereDynamicWeakSource && !state.atmosphereDynamicNoArtwork) return;
+            const retryAt = Number(
+                state.atmosphereDynamicWebglRetryAt
+            ) || 0;
+            const webglRecoveryDue = (
+                state.atmosphereDynamicWebglAvailable === false
+                || !dynamicRendererHasCurrentTexture(
+                    state.atmosphereDynamicRenderer
+                )
+            ) && now >= retryAt;
+
+            /* A stable direct-art result normally needs no more work. An
+             * unchanged URL must still be re-entered once WebGL backoff expires
+             * so a failed constructor/upload is not permanent for that album. */
+            if (
+                !state.atmosphereDynamicWeakSource
+                && !state.atmosphereDynamicNoArtwork
+                && !webglRecoveryDue
+            ) {
+                return;
+            }
             if (
                 state.atmosphereDynamicWeakSource
                 && resolvedAge < DYNAMIC_BACKGROUND_WEAK_RECHECK_MS
+                && !webglRecoveryDue
             ) {
                 return;
             }
             if (
                 state.atmosphereDynamicNoArtwork
                 && resolvedAge < DYNAMIC_BACKGROUND_NO_ART_RETRY_MS
+                && !webglRecoveryDue
             ) {
                 return;
             }
@@ -9337,10 +9831,19 @@
 
         active.reverse();
 
+        const presentationRecord = state.lineData[presentationLine];
+        const presentationTrustedEnd = Number(
+            presentationRecord && presentationRecord.trustedEndTicks
+        );
+        const presentationCanRemainCurrent =
+            !Number.isFinite(presentationTrustedEnd)
+            || ticks < presentationTrustedEnd;
+
         if (
             !active.includes(presentationLine)
             && presentationLine >= 0
             && presentationLine < state.lineData.length
+            && presentationCanRemainCurrent
         ) {
             /* The presentation line is the upper bound, so after reversing the
              * descending scan it belongs at the end of this ascending list. */
@@ -9580,20 +10083,33 @@
             return explicitEnd;
         }
 
-        const nextEntry =
-            cues[cueIndex + 1];
+        const cueList = Array.isArray(cues) ? cues : [];
 
-        const nextCue =
-            nextEntry
-            && (
-                nextEntry.cue
-                || nextEntry
+        /* A cue can be skipped from visual tokenisation because it is empty,
+         * duplicated, or otherwise has no paintable text. It can nevertheless
+         * be the authoritative timing boundary for the preceding visible cue
+         * (most notably the terminal text.length marker emitted by the
+         * converter). Scan forward to the first strictly later timestamp
+         * instead of only consulting the next paintable cue. */
+        for (
+            let nextIndex = Math.max(0, Number(cueIndex) + 1);
+            nextIndex < cueList.length;
+            nextIndex += 1
+        ) {
+            const nextEntry = cueList[nextIndex];
+            const nextCue =
+                nextEntry
+                && (
+                    nextEntry.cue
+                    || nextEntry
+                );
+            const nextStart = nullableTick(
+                cueValue(nextCue, 'Start', 'start')
             );
-        const nextStart = nullableTick(
-            cueValue(nextCue, 'Start', 'start')
-        );
-        if (nextStart !== null && nextStart > start) {
-            return nextStart;
+
+            if (nextStart !== null && nextStart > start) {
+                return nextStart;
+            }
         }
 
         const currentLyric =
@@ -9615,10 +10131,7 @@
             return explicitLineEnd;
         }
 
-        const nextLine = state.lyrics && state.lyrics[lineIndex + 1];
-        const nextLineStart = nullableTick(
-            lyricValue(nextLine, 'Start', 'start')
-        );
+        const nextLineStart = nextLyricStartTicks(lineIndex, start);
         if (nextLineStart !== null && nextLineStart > start) {
             return nextLineStart;
         }
@@ -10163,10 +10676,13 @@
         if (
             !word
             || !word.element
-            || word._akMotionIsReset
         ) {
             return;
         }
+
+        word.element.classList.remove('ak-word-handoff');
+
+        if (word._akMotionIsReset) return;
 
         word.element.style.transform = '';
         word.element.style.filter = '';
@@ -10478,6 +10994,15 @@
             isActive
             && activeLines.length > 1;
 
+        const trustedEnd = Number(lineRecord.trustedEndTicks);
+        const presentationExpired =
+            !instrumentalGap
+            && !isActive
+            && lineIndex === activeLine
+            && Number.isFinite(trustedEnd)
+            && Number.isFinite(ticks)
+            && ticks >= trustedEnd;
+
         const phase = instrumentalGap
             ? (
                 lineIndex < instrumentalGap.nextLineIndex
@@ -10487,7 +11012,10 @@
             : (
                 isActive
                     ? 'current'
-                    : lineIndex < activeLine
+                    : (
+                        presentationExpired
+                        || lineIndex < activeLine
+                    )
                     ? 'past'
                     : (
                         lineIndex > activeLine
@@ -10586,8 +11114,9 @@
 
         if (phase === 'past') {
             const dynamicCarry =
-                activeLines.some(
-                    index => lineIndex === index - 1
+                !!(
+                    state.handoffLineIndexes
+                    && state.handoffLineIndexes.has(lineIndex)
                 );
 
             words.forEach(word => {
@@ -10619,6 +11148,26 @@
         }
 
         return true;
+    }
+
+    function clearLineMotionHandoff(lineRecord) {
+        if (!lineRecord) return;
+
+        if (lineRecord.element) {
+            lineRecord.element.classList.remove('ak-motion-handoff');
+        }
+
+        (lineRecord.words || []).forEach(resetWordMotion);
+    }
+
+    function resetMotionHandoffs() {
+        const indexes = state.handoffLineIndexes;
+        if (!indexes || typeof indexes.forEach !== 'function') return;
+
+        indexes.forEach(lineIndex => {
+            clearLineMotionHandoff(state.lineData[lineIndex]);
+        });
+        indexes.clear();
     }
 
     function syncStaticLineStates(
@@ -10684,6 +11233,33 @@
             activeLines.forEach(include);
         }
 
+        if (forceFull || instrumentalActive) {
+            resetMotionHandoffs();
+        } else {
+            removedActiveLines.forEach(lineIndex => {
+                const line = state.lineData[lineIndex];
+                const preserve = !!(
+                    line
+                    && (line.words || []).some(word =>
+                        motionHandoffActive(word, ticks)
+                    )
+                );
+
+                if (preserve) {
+                    state.handoffLineIndexes.add(lineIndex);
+                } else {
+                    state.handoffLineIndexes.delete(lineIndex);
+                    clearLineMotionHandoff(line);
+                }
+            });
+
+            activeLines.forEach(lineIndex => {
+                if (state.handoffLineIndexes.delete(lineIndex)) {
+                    clearLineMotionHandoff(state.lineData[lineIndex]);
+                }
+            });
+        }
+
         let mutationCount = 0;
 
         indexes.forEach(lineIndex => {
@@ -10703,48 +11279,6 @@
             }
         });
 
-        if (!instrumentalActive) {
-            const previousLine =
-                state.lineData[
-                    activeLine - 1
-                ];
-
-            if (previousLine) {
-                const stillSinging =
-                    activeLines.includes(
-                        activeLine - 1
-                    );
-
-                const preserve =
-                    !stillSinging
-                    &&
-                    (previousLine.words || [])
-                        .some(word =>
-                            motionHandoffActive(
-                                word,
-                                ticks
-                            )
-                        );
-
-                previousLine.element.classList.toggle(
-                    'ak-motion-handoff',
-                    preserve
-                );
-            }
-        } else if (instrumentalActive) {
-            removedActiveLines.forEach(lineIndex => {
-                const removed = state.lineData[lineIndex];
-                if (!removed || !removed.element) return;
-                removed.element.classList.remove('ak-motion-handoff');
-                (removed.words || []).forEach(word => {
-                    if (word.element) {
-                        word.element.classList.remove('ak-word-handoff');
-                    }
-                    resetWordMotion(word);
-                });
-            });
-        }
-
         state.lineTransitionCount += 1;
         state.lastLineSyncCount = mutationCount;
         state.maxLineSyncCount =
@@ -10756,83 +11290,52 @@
         state.lastActiveLine = activeLine;
     }
 
-    function updatePreviousLineHandoff(
-        activeLine,
-        ticks
-    ) {
-        const previousIndex =
-            activeLine - 1;
+    function updateLineHandoffs(ticks, activeLines) {
+        const indexes = state.handoffLineIndexes;
+        if (!indexes || !indexes.size) return;
 
-        if (
-            previousIndex < 0
-            || previousIndex
-                >= state.lineData.length
-        ) {
-            return;
-        }
+        const active = Array.isArray(activeLines)
+            ? activeLines
+            : [];
 
-        const line =
-            state.lineData[
-                previousIndex
-            ];
+        Array.from(indexes).forEach(lineIndex => {
+            const line = state.lineData[lineIndex];
 
-        if (
-            state.activeLineIndexes.includes(
-                previousIndex
-            )
-        ) {
-            line.element.classList.remove(
-                'ak-motion-handoff'
-            );
-            return;
-        }
-
-        const words =
-            line.words || [];
-
-        let anyHandoff = false;
-
-        words.forEach(word => {
-            if (
-                !motionHandoffActive(
-                    word,
-                    ticks
-                )
-            ) {
-                resetWordMotion(word);
+            if (!line || !line.element || active.includes(lineIndex)) {
+                clearLineMotionHandoff(line);
+                indexes.delete(lineIndex);
                 return;
             }
 
-            anyHandoff = true;
+            let anyHandoff = false;
 
-            const continuityGain =
-                motionContinuityGain(
-                    word,
-                    ticks
-                );
+            (line.words || []).forEach(word => {
+                const preserve = motionHandoffActive(word, ticks);
 
-            if (
-                word.motionGlyphs
-                && word.motionGlyphs.length
-            ) {
-                updateMotionGlyphs(
-                    word,
-                    ticks,
-                    continuityGain
-                );
-            } else if (word.wholeMotion) {
-                updateWholeMotion(
-                    word,
-                    ticks,
-                    continuityGain
-                );
-            }
+                if (!preserve) {
+                    resetWordMotion(word);
+                    return;
+                }
+
+                anyHandoff = true;
+                word.element.classList.add('ak-word-handoff');
+
+                const continuityGain = motionContinuityGain(word, ticks);
+
+                if (word.motionGlyphs && word.motionGlyphs.length) {
+                    updateMotionGlyphs(word, ticks, continuityGain);
+                } else if (word.wholeMotion) {
+                    updateWholeMotion(word, ticks, continuityGain);
+                }
+            });
+
+            line.element.classList.toggle(
+                'ak-motion-handoff',
+                anyHandoff
+            );
+
+            if (!anyHandoff) indexes.delete(lineIndex);
         });
-
-        line.element.classList.toggle(
-            'ak-motion-handoff',
-            anyHandoff
-        );
     }
 
     function shouldRunAnimationLoop() {
@@ -11312,6 +11815,7 @@
                  * Re-anchor attached backing vocals only at line transitions,
                  * never on the steady-state frame path. */
                 alignBackgroundVocalAnchors();
+                queueBackgroundVocalAnchorRefresh();
 
                 /* Diagnostics keep a human-readable signature, but build it only
                  * when the active set changes instead of allocating every frame. */
@@ -11369,12 +11873,10 @@
                     });
             });
     
-            if (!instrumentalGap && activeLine >= 0) {
-                updatePreviousLineHandoff(
-                    activeLine,
-                    ticks
-                );
-            }
+            updateLineHandoffs(
+                ticks,
+                instrumentalGap ? [] : activeLines
+            );
     
             scheduleNextFrame(
                 media,
@@ -11610,6 +12112,45 @@
         }
     }
 
+    function installReducedMotionHook() {
+        try {
+            if (!window.matchMedia) return;
+
+            reducedMotionMediaQuery = window.matchMedia(
+                '(prefers-reduced-motion: reduce)'
+            );
+
+            const refreshForPreferenceChange = () => {
+                state.lastActiveLine = -999;
+                state.lastActiveLineSignature = '';
+                state.activeLineIndexes = [];
+                resetMotionHandoffs();
+                state.forceNextFrame = true;
+
+                if (state.lyrics && isLyricsPage()) {
+                    /* Existing grow layers must be rebuilt as plain wipe-only
+                     * words (and vice versa) when the OS setting changes. */
+                    state.decoratedGeneration = -1;
+                    queueDecoration();
+                    queueMotionGeometryRefresh();
+                }
+
+                wakeAnimationLoop();
+            };
+
+            if (typeof reducedMotionMediaQuery.addEventListener === 'function') {
+                reducedMotionMediaQuery.addEventListener(
+                    'change',
+                    refreshForPreferenceChange
+                );
+            } else if (typeof reducedMotionMediaQuery.addListener === 'function') {
+                reducedMotionMediaQuery.addListener(refreshForPreferenceChange);
+            }
+        } catch {
+            // Reduced-motion media queries are optional in older WebViews.
+        }
+    }
+
     function installRouteHooks() {
         window.addEventListener('hashchange', () => {
             if (ROUTE_RE.test(location.hash)) {
@@ -11758,6 +12299,7 @@
     installDomObserver();
     installRouteHooks();
     installFontGeometryHooks();
+    installReducedMotionHook();
     installLyricVisualWatchdog();
 
     function rendererFingerprint() {
@@ -11786,7 +12328,7 @@
             if (source === 'range') geometry.rangeWords += 1;
             else if (source === 'canvas-fallback') {
                 geometry.canvasFallbackWords += 1;
-            } else if (source === 'whole-script') {
+            } else if (source === 'whole-joining-or-profile') {
                 geometry.wholeScriptWords += 1;
             } else if (source.indexOf('whole-') === 0) {
                 geometry.wholeFallbackWords += 1;
@@ -12250,7 +12792,7 @@
                 backgroundVocalCount:
                     state.backgroundVocalCount,
                 backgroundVocalTransport:
-                    'ascii-elrc-role-token+legacy+parenthetical-recovery',
+                    'ascii-elrc-role-token+legacy-marker',
                 backgroundVocalLayout:
                     'left-aligned+closest-lead-before-or-after',
                 backgroundVocalInspection:

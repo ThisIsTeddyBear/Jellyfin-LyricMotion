@@ -2,6 +2,7 @@
 set -eu
 
 WEB_DIR=""
+WEB_DIR_EXPLICIT=0
 KEEP_BACKUPS=0
 
 usage() {
@@ -11,7 +12,7 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --webdir) [ "$#" -ge 2 ] || usage; WEB_DIR=$2; shift 2 ;;
+    --webdir) [ "$#" -ge 2 ] || usage; WEB_DIR=$2; WEB_DIR_EXPLICIT=1; shift 2 ;;
     --keep-backups) KEEP_BACKUPS=1; shift ;;
     -h|--help) usage ;;
     *) usage ;;
@@ -19,6 +20,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 is_webdir() { [ -n "${1:-}" ] && [ -f "$1/index.html" ]; }
+
+if [ "$WEB_DIR_EXPLICIT" -eq 1 ] && ! is_webdir "$WEB_DIR"; then
+  echo "The supplied --webdir is not a Jellyfin Web directory: $WEB_DIR"
+  exit 1
+fi
 
 if ! is_webdir "$WEB_DIR"; then
   if is_webdir "${JELLYFIN_WEB_DIR:-}"; then
@@ -43,7 +49,11 @@ fi
 
 PYTHON_BIN=${LYRICMOTION_PYTHON:-python3}
 "$PYTHON_BIN" --version >/dev/null 2>&1 || {
-  echo "Python 3 is required by this uninstaller. Set LYRICMOTION_PYTHON when python3 is not on PATH."
+    echo "Python 3 is required by this uninstaller. Set LYRICMOTION_PYTHON when python3 is not on PATH."
+    exit 1
+}
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 8))' || {
+  echo "Python 3.8 or newer is required by this uninstaller."
   exit 1
 }
 
@@ -59,7 +69,10 @@ from pathlib import Path
 import os, re, stat, sys, tempfile
 
 path = Path(sys.argv[1])
-content = path.read_text(encoding="utf-8")
+# Preserve the original line-ending convention; this operation should only
+# remove LyricMotion tags, not rewrite the rest of Jellyfin's index.html.
+with path.open("r", encoding="utf-8", newline="") as handle:
+    content = handle.read()
 
 content = re.sub(
     r"<link\b[^>]*href=[\"'][^\"']*(?:jellyfin-lyric-motion|apple-karaoke)\.css(?:\?[^\"']*)?[\"'][^>]*>",
@@ -85,7 +98,10 @@ try:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
-    os.chmod(temporary, mode)
+    # os.replace installs a new inode owned by the account running this script.
+    # Keep the existing access bits but ensure Jellyfin can still read the
+    # rebuilt index when the uninstaller was run through sudo.
+    os.chmod(temporary, mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     os.replace(temporary, path)
     temporary = None
 finally:

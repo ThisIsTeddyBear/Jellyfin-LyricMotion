@@ -2,6 +2,19 @@
 
 All notable public changes are documented here. The project follows Semantic Versioning.
 
+## [Unreleased] — planned 3.2.6
+
+### Fixed
+
+- Plain unsynchronised lyrics now stay in Jellyfin's native presentation instead of entering karaoke timing state.
+- ELRC word sweep and Classic Bloom tolerate malformed timing data without producing invalid visual state.
+- Background vocals align with their attached lead line's rendered left edge and use closest before/after lead attachment.
+
+### Changed
+
+- The unified TTML/DFXP/QRC converter writes LRC for line-synchronised sources and ELRC only for word/syllable-synchronised sources; it also supports no-argument batch conversion.
+- Release documentation now reflects the minimal package manifest and manual publication process; removed test, workflow, and research tooling is no longer presented as available.
+
 ## [3.2.5] - 2026-08-17
 
 ### Fixed
@@ -11,7 +24,7 @@ All notable public changes are documented here. The project follows Semantic Ver
 - Prevented detached instrumental SVG rows from continuing to animate after Jellyfin replaces lyric DOM.
 - Prevented rapid-skip artwork from committing when the image URL explicitly belongs to another Jellyfin item. The old DOM cover is snapshotted at media switch and generic unbound fallback requires additional stability before commit.
 - Fixed music tracks with album-inherited Primary artwork being rejected because the artwork URL belongs to the album item rather than the track item. Current now-playing album art is identity/stability gated, and visible artwork can no longer be misclassified as confirmed no-art.
-- Fixed shuffled transitions from track-owned artwork to album-inherited artwork waiting behind the generic 900 ms + 1.5 s fallback gates, or behind a missing track-image request for up to 6.5 s. Album-inherited now-playing art now has a short dedicated stability path, direct Primary probes have a 550 ms fast-path budget, and fallback stability is tracked independently per artwork URL so multiple Jellyfin candidates cannot reset one another forever.
+- Fixed shuffled transitions from track-owned artwork to album-inherited artwork waiting behind the generic 900 ms + 1.5 s fallback gates, or behind a missing track-image request for up to 6.5 s. Album-inherited now-playing art can commit immediately after active-context validation; direct Primary probes begin after a 700 ms grace period and use a 900 ms load timeout; and fallback stability is tracked independently per artwork URL so multiple Jellyfin candidates cannot reset one another forever.
 - Restored the timing icon and removed the obsolete rounded backing behind the Romanization SVG. Romanization and nonzero timing now use an explicit white active state with black glyph/text.
 - Fixed transient no-art/image failures becoming permanently resolved blank backgrounds. No-art is confirmed only after repeated stable failures and is retried.
 - Normalized volatile Jellyfin media query parameters case-insensitively, including `StartTimeTicks`, `PlaySessionId`, API keys and device/session fields.

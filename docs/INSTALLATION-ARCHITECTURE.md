@@ -18,22 +18,15 @@ Common locations include:
 
 ## Release artifact
 
-Do not include Jellyfin's generated `index.html`.
+Do not include Jellyfin's generated `index.html` or a full source checkout. Platform archives use a strict allowlist.
 
-Ship:
+Every archive contains the generated platform `README.md`, `VERSION`, `LYRICG2P_VERSION`, runtime assets from `src/`, and the required license/notice files. The remaining contents are platform-specific:
 
-```text
-src/
-scripts/
-docker/
-examples/
-docs/
-VERSION
-README.md
-CHANGELOG.md
-LICENSE
-THIRD_PARTY_NOTICES.md
-```
+- Windows: `INSTALL-WINDOWS.cmd`, `UNINSTALL-WINDOWS.cmd`, and the PowerShell installer/uninstaller.
+- Linux and macOS: the POSIX installer and uninstaller.
+- Docker: `docker/Dockerfile`.
+
+Repository documentation, examples, CI metadata, and release tooling are excluded.
 
 ## Patch strategy
 
@@ -51,4 +44,4 @@ A normal uninstall surgically removes LyricMotion loader tags and assets, then d
 
 Package managers and container updates may replace the webroot. Re-run or rebuild LyricMotion after an update when necessary.
 
-Each GitHub release should publish a tested Jellyfin compatibility matrix.
+Each GitHub release should publish a Jellyfin compatibility matrix.

@@ -18,11 +18,12 @@ import argparse
 import html
 import re
 import os
+import stat
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, ROUND_HALF_UP
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -37,6 +38,10 @@ SPACE_ATTRIBUTE = f"{{{XML_NS}}}space"
 BACKGROUND_ROLES = {"x-bg", "background", "bg"}
 AUXILIARY_ROLES = {"x-roman", "roman", "romanization", "x-translation", "translation"}
 MAX_TTML_BYTES = 64 * 1024 * 1024
+# Jellyfin timestamps use signed 64-bit ticks (10,000 ticks per millisecond).
+# Keeping parsed times inside that range avoids Decimal overflows and impractical
+# LRC clocks while still allowing tracks far longer than any real recording.
+MAX_TIMESTAMP_MS = 922_337_203_685_477
 SUPPORTED_INPUT_SUFFIXES = {".ttml", ".dfxp", ".qrc"}
 
 # ELRC has no standard per-line role field. Jellyfin strips Unicode format
@@ -55,8 +60,10 @@ QRC_LINE_RE = re.compile(r"^\s*\[\s*(-?\d+)\s*,\s*(\d+)\s*\](.*)$")
 QRC_WORD_RE = re.compile(r"\(\s*(-?\d+)\s*,\s*(\d+)\s*\)")
 QRC_META_RE = re.compile(r"^\s*\[([A-Za-z][\w-]*):(.*)\]\s*$")
 QRC_CONTENT_RE = re.compile(
-    r"LyricContent\s*=\s*\"(.*?)\"\s*/\s*>", re.IGNORECASE | re.DOTALL
+    r"LyricContent\s*=\s*(?:\"(?P<double>.*?)\"|'(?P<single>.*?)')",
+    re.IGNORECASE | re.DOTALL,
 )
+QRC_CDATA_RE = re.compile(r"^\s*<!\[CDATA\[(.*)\]\]>\s*$", re.DOTALL)
 
 
 class ConversionError(ValueError):
@@ -102,18 +109,80 @@ def local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def display_input(value: str, *, limit: int = 160) -> str:
+    """Quote malformed input without copying an entire hostile field to stderr."""
+
+    if len(value) <= limit:
+        return repr(value)
+    return f"{value[:limit]!r}... ({len(value)} characters)"
+
+
 def parse_rate(value: str | None, default: Decimal) -> Decimal:
     if not value:
         return default
     try:
         rate = Decimal(value)
-    except InvalidOperation as exc:
-        raise ConversionError(f"Invalid TTML timing rate: {value!r}") from exc
+    except DecimalException as exc:
+        raise ConversionError(
+            f"Invalid TTML timing rate: {display_input(value)}"
+        ) from exc
     if not rate.is_finite() or rate <= 0:
         raise ConversionError(
-            f"TTML timing rate must be finite and positive: {value!r}"
+            f"TTML timing rate must be finite and positive: {display_input(value)}"
         )
     return rate
+
+
+def checked_timestamp_ms(
+    value: int,
+    *,
+    label: str,
+    allow_negative: bool = False,
+) -> int:
+    """Return a timestamp that can safely be represented in an LRC clock.
+
+    QRC offsets can temporarily make an otherwise valid timestamp negative;
+    callers opt into that explicitly and clamp only at the output boundary.
+    All other timestamps must be non-negative.
+    """
+
+    lower_limit = -MAX_TIMESTAMP_MS if allow_negative else 0
+    if value < lower_limit or value > MAX_TIMESTAMP_MS:
+        raise ConversionError(f"{label} is outside the supported timestamp range")
+    return value
+
+
+def parse_qrc_integer(
+    value: str,
+    *,
+    label: str,
+    allow_negative: bool = False,
+) -> int:
+    """Parse a QRC millisecond field without leaking ``int`` errors."""
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConversionError(
+            f"Invalid QRC {label}: {display_input(value)}"
+        ) from exc
+    return checked_timestamp_ms(
+        parsed,
+        label=f"QRC {label}",
+        allow_negative=allow_negative,
+    )
+
+
+def add_qrc_timestamps(label: str, *values: int) -> int:
+    """Add QRC millisecond values while preserving the supported range."""
+
+    for value in values:
+        checked_timestamp_ms(value, label=label, allow_negative=True)
+    return checked_timestamp_ms(
+        sum(values),
+        label=label,
+        allow_negative=True,
+    )
 
 
 def apply_frame_rate_multiplier(
@@ -128,15 +197,15 @@ def apply_frame_rate_multiplier(
     parts = value.split()
     if len(parts) != 2:
         raise ConversionError(
-            f"Invalid TTML frameRateMultiplier: {value!r}"
+            f"Invalid TTML frameRateMultiplier: {display_input(value)}"
         )
 
     try:
         numerator = Decimal(parts[0])
         denominator = Decimal(parts[1])
-    except InvalidOperation as exc:
+    except DecimalException as exc:
         raise ConversionError(
-            f"Invalid TTML frameRateMultiplier: {value!r}"
+            f"Invalid TTML frameRateMultiplier: {display_input(value)}"
         ) from exc
 
     if (
@@ -146,14 +215,42 @@ def apply_frame_rate_multiplier(
         or denominator <= 0
     ):
         raise ConversionError(
-            f"TTML frameRateMultiplier must be finite and positive: {value!r}"
+            "TTML frameRateMultiplier must be finite and positive: "
+            f"{display_input(value)}"
         )
 
-    return frame_rate * numerator / denominator
+    try:
+        effective_rate = frame_rate * numerator / denominator
+    except DecimalException as exc:
+        raise ConversionError(
+            "TTML frameRateMultiplier is outside the supported range: "
+            f"{display_input(value)}"
+        ) from exc
+    if not effective_rate.is_finite() or effective_rate <= 0:
+        raise ConversionError(
+            "TTML frameRateMultiplier must produce a finite positive rate: "
+            f"{display_input(value)}"
+        )
+    return effective_rate
 
 
 def decimal_milliseconds(seconds: Decimal) -> int:
-    return int((seconds * 1000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    try:
+        milliseconds = seconds * 1000
+        if (
+            not milliseconds.is_finite()
+            or milliseconds < 0
+            or milliseconds > MAX_TIMESTAMP_MS
+        ):
+            raise ConversionError("TTML time is outside the supported timestamp range")
+        return checked_timestamp_ms(
+            int(milliseconds.quantize(Decimal("1"), rounding=ROUND_HALF_UP)),
+            label="TTML time",
+        )
+    except DecimalException as exc:
+        raise ConversionError(
+            "TTML time is outside the supported timestamp range"
+        ) from exc
 
 
 def parse_ttml_time(
@@ -183,62 +280,85 @@ def parse_ttml_time(
     if offset_match:
         try:
             amount = Decimal(offset_match.group(1))
-        except InvalidOperation as exc:
+        except DecimalException as exc:
             raise ConversionError(
-                f"Unsupported TTML time expression: {value!r}"
+                f"Unsupported TTML time expression: {display_input(value)}"
             ) from exc
         if not amount.is_finite() or amount < 0:
             raise ConversionError(
-                f"TTML time must be finite and non-negative: {value!r}"
+                "TTML time must be finite and non-negative: "
+                f"{display_input(value)}"
             )
         unit = offset_match.group(2).lower()
-        if unit == "h":
-            seconds = amount * 3600
-        elif unit == "m":
-            seconds = amount * 60
-        elif unit == "s":
-            seconds = amount
-        elif unit == "ms":
-            seconds = amount / 1000
-        elif unit == "f":
-            seconds = amount / frame_rate
-        else:
-            seconds = amount / tick_rate
+        try:
+            if unit == "h":
+                seconds = amount * 3600
+            elif unit == "m":
+                seconds = amount * 60
+            elif unit == "s":
+                seconds = amount
+            elif unit == "ms":
+                seconds = amount / 1000
+            elif unit == "f":
+                seconds = amount / frame_rate
+            else:
+                seconds = amount / tick_rate
+        except DecimalException as exc:
+            raise ConversionError(
+                "TTML time is outside the supported timestamp range"
+            ) from exc
         return decimal_milliseconds(seconds)
 
     fields = value.split(":")
     try:
         numbers = [Decimal(field) for field in fields]
-    except (InvalidOperation, ValueError) as exc:
-        raise ConversionError(f"Unsupported TTML time expression: {value!r}") from exc
+    except (DecimalException, ValueError) as exc:
+        raise ConversionError(
+            f"Unsupported TTML time expression: {display_input(value)}"
+        ) from exc
 
     if not numbers or any(not number.is_finite() for number in numbers):
-        raise ConversionError(f"TTML time must be finite: {value!r}")
+        raise ConversionError(f"TTML time must be finite: {display_input(value)}")
     if any(number < 0 for number in numbers):
-        raise ConversionError(f"Negative TTML time is not supported: {value!r}")
+        raise ConversionError(
+            f"Negative TTML time is not supported: {display_input(value)}"
+        )
 
-    if len(numbers) == 4:
-        hours, minutes, seconds, frames = numbers
-        if minutes >= 60 or seconds >= 60 or frames >= frame_rate:
-            raise ConversionError(f"Malformed TTML clock time: {value!r}")
-        total = hours * 3600 + minutes * 60 + seconds + frames / frame_rate
-    elif len(numbers) == 3:
-        hours, minutes, seconds = numbers
-        if minutes >= 60 or seconds >= 60:
-            raise ConversionError(f"Malformed TTML clock time: {value!r}")
-        total = hours * 3600 + minutes * 60 + seconds
-    elif len(numbers) == 2:
-        minutes, seconds = numbers
-        if seconds >= 60:
-            raise ConversionError(f"Malformed TTML clock time: {value!r}")
-        total = minutes * 60 + seconds
-    elif len(numbers) == 1:
-        total = numbers[0]
-    else:
-        raise ConversionError(f"Unsupported TTML time expression: {value!r}")
+    try:
+        if len(numbers) == 4:
+            hours, minutes, seconds, frames = numbers
+            if minutes >= 60 or seconds >= 60 or frames >= frame_rate:
+                raise ConversionError(
+                    f"Malformed TTML clock time: {display_input(value)}"
+                )
+            total = hours * 3600 + minutes * 60 + seconds + frames / frame_rate
+        elif len(numbers) == 3:
+            hours, minutes, seconds = numbers
+            if minutes >= 60 or seconds >= 60:
+                raise ConversionError(
+                    f"Malformed TTML clock time: {display_input(value)}"
+                )
+            total = hours * 3600 + minutes * 60 + seconds
+        elif len(numbers) == 2:
+            minutes, seconds = numbers
+            if seconds >= 60:
+                raise ConversionError(
+                    f"Malformed TTML clock time: {display_input(value)}"
+                )
+            total = minutes * 60 + seconds
+        elif len(numbers) == 1:
+            total = numbers[0]
+        else:
+            raise ConversionError(
+                f"Unsupported TTML time expression: {display_input(value)}"
+            )
+    except DecimalException as exc:
+        raise ConversionError(
+            "TTML time is outside the supported timestamp range"
+        ) from exc
 
     if not total.is_finite():
-        raise ConversionError(f"TTML time must be finite: {value!r}")
+        raise ConversionError(f"TTML time must be finite: {display_input(value)}")
     return decimal_milliseconds(total)
 
 
@@ -247,6 +367,7 @@ def elrc_time(milliseconds: int) -> str:
 
     if milliseconds < 0:
         raise ConversionError("ELRC timestamps cannot be negative")
+    checked_timestamp_ms(milliseconds, label="ELRC timestamp")
     minutes, remainder = divmod(milliseconds, 60_000)
     seconds, millis = divmod(remainder, 1000)
     return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
@@ -305,16 +426,51 @@ def timing_for(
 
     if begin is None:
         begin = inherited_begin
+    elif inherited_begin is not None:
+        # Apple lyric spans carry absolute media times, but a child can never
+        # be active before its parent.  Without this bound an invalid source
+        # could serialize a word cue before its enclosing LRC line timestamp.
+        begin = max(begin, inherited_begin)
+
+    # TTML permits a timed element to omit ``begin``; its implicit start is
+    # zero when there is no timed ancestor to inherit from.  In particular,
+    # ``<p end="5s">`` and ``<p dur="5s">`` must not be discarded merely
+    # because they have no explicit begin attribute.
+    if begin is None and (end is not None or duration is not None):
+        begin = 0
+
+    if begin is not None:
+        checked_timestamp_ms(begin, label="TTML begin time")
+    if end is not None:
+        checked_timestamp_ms(end, label="TTML end time")
+    if duration is not None:
+        checked_timestamp_ms(duration, label="TTML duration")
 
     if duration is not None and begin is not None:
-        duration_end = begin + duration
+        duration_end = checked_timestamp_ms(
+            begin + duration,
+            label="TTML derived end time",
+        )
         if end is None or duration_end < end:
             end = duration_end
 
     if end is None:
         end = inherited_end
-    elif inherited_end is not None:
-        end = min(end, inherited_end)
+    else:
+        if inherited_begin is not None:
+            end = max(end, inherited_begin)
+        if inherited_end is not None:
+            end = min(end, inherited_end)
+
+    if begin is not None and inherited_end is not None:
+        # Intersect a child interval with its parent's closing boundary.  This
+        # keeps completely out-of-range child spans as zero-duration cues
+        # instead of emitting reversed ELRC timestamps or rejecting an
+        # otherwise readable document.
+        begin = min(begin, inherited_end)
+
+    if end is not None:
+        checked_timestamp_ms(end, label="TTML end time")
 
     if begin is not None and end is not None and end < begin:
         raise ConversionError(
@@ -322,6 +478,51 @@ def timing_for(
         )
 
     return begin, end
+
+
+def collect_timing_contexts(
+    root: ET.Element,
+    *,
+    frame_rate: Decimal,
+    tick_rate: Decimal,
+    include_background: bool,
+) -> dict[int, tuple[int | None, int | None, str]]:
+    """Calculate effective timing/space context for every TTML element.
+
+    ``ElementTree`` does not expose parent pointers.  Recording the inherited
+    values while walking from the document root lets a paragraph (and a
+    background subtree nested below a timed ``body``/``div``) retain its
+    container timing when it is later converted independently.
+    """
+
+    contexts: dict[int, tuple[int | None, int | None, str]] = {}
+
+    def visit(
+        element: ET.Element,
+        inherited_begin: int | None,
+        inherited_end: int | None,
+        space_mode: str,
+    ) -> None:
+        begin, end = timing_for(
+            element,
+            inherited_begin,
+            inherited_end,
+            frame_rate=frame_rate,
+            tick_rate=tick_rate,
+        )
+        current_space_mode = inherited_space_mode(element, space_mode)
+        contexts[id(element)] = (begin, end, current_space_mode)
+        for child in element:
+            # These tracks are omitted from conversion, so do not let a
+            # malformed timestamp in an ignored annotation reject the song.
+            if is_auxiliary_text(child):
+                continue
+            if not include_background and is_background(child):
+                continue
+            visit(child, begin, end, current_space_mode)
+
+    visit(root, None, None, "default")
+    return contexts
 
 
 def walk_text(
@@ -354,7 +555,12 @@ def walk_text(
         # must never be flattened into the ELRC line. LyricMotion generates
         # its PC/mobile romanized view independently at runtime.
         excluded = is_auxiliary_text(child) or (exclude_background and is_background(child))
-        if not excluded:
+        if local_name(child.tag).casefold() == "br":
+            # LRC has no inline line-break representation. Retain a separator
+            # rather than concatenating adjacent words (``hello<br/>world``).
+            # Any tail whitespace is compacted to this same single separator.
+            yield TimedText(" ", None, None, timed=False)
+        elif not excluded:
             yield from walk_text(
                 child,
                 inherited_begin=begin,
@@ -377,6 +583,11 @@ def top_level_backgrounds(paragraph: ET.Element) -> Iterator[ET.Element]:
 
     def visit(element: ET.Element, inside_background: bool) -> Iterator[ET.Element]:
         for child in element:
+            # Keep the backing-vocal lane consistent with ``walk_text``:
+            # annotations are not sung even if they happen to contain an
+            # x-bg-marked fragment.
+            if is_auxiliary_text(child):
+                continue
             child_is_background = is_background(child)
             if child_is_background and not inside_background:
                 yield child
@@ -540,7 +751,12 @@ def convert_tree(
         root.get("tickRate") or root.get(f"{{{TTML_NS}#parameter}}tickRate"),
         Decimal(1),
     )
-    root_space_mode = inherited_space_mode(root, "default")
+    timing_contexts = collect_timing_contexts(
+        root,
+        frame_rate=frame_rate,
+        tick_rate=tick_rate,
+        include_background=include_background,
+    )
 
     lines: list[LyricLine] = []
     paragraph_count = 0
@@ -552,31 +768,26 @@ def convert_tree(
 
     for source_order, paragraph in enumerate(paragraphs):
         paragraph_count += 1
-        paragraph_begin, paragraph_end = timing_for(
-            paragraph,
-            None,
-            None,
-            frame_rate=frame_rate,
-            tick_rate=tick_rate,
-        )
-        paragraph_space_mode = inherited_space_mode(paragraph, root_space_mode)
+        if is_auxiliary_text(paragraph):
+            continue
+        paragraph_begin, paragraph_end, paragraph_space_mode = timing_contexts[
+            id(paragraph)
+        ]
 
         backgrounds = list(top_level_backgrounds(paragraph))
         if include_background:
             for lane_order, background in enumerate(backgrounds):
-                background_begin, background_end = timing_for(
-                    background,
-                    paragraph_begin,
-                    paragraph_end,
-                    frame_rate=frame_rate,
-                    tick_rate=tick_rate,
-                )
+                (
+                    background_begin,
+                    background_end,
+                    background_space_mode,
+                ) = timing_contexts[id(background)]
                 line = make_line(
                     walk_text(
                         background,
-                        inherited_begin=paragraph_begin,
-                        inherited_end=paragraph_end,
-                        space_mode=paragraph_space_mode,
+                        inherited_begin=background_begin,
+                        inherited_end=background_end,
+                        space_mode=background_space_mode,
                         frame_rate=frame_rate,
                         tick_rate=tick_rate,
                         exclude_background=False,
@@ -673,13 +884,20 @@ def extract_qrc_content(raw: str) -> str:
 
     match = QRC_CONTENT_RE.search(raw)
     if match:
-        return html.unescape(match.group(1)).replace("&#10;", "\n")
+        content = match.group("double")
+        if content is None:
+            content = match.group("single")
+        return html.unescape(content or "")
 
     element_match = re.search(
         r"<LyricContent[^>]*>(.*?)</LyricContent>", raw, re.IGNORECASE | re.DOTALL
     )
     if element_match:
-        return html.unescape(element_match.group(1))
+        content = element_match.group(1)
+        cdata_match = QRC_CDATA_RE.fullmatch(content)
+        if cdata_match:
+            return cdata_match.group(1)
+        return html.unescape(content)
 
     if any(QRC_LINE_RE.match(line) for line in raw.splitlines()):
         return raw
@@ -696,10 +914,33 @@ def parse_qrc_metadata(content: str) -> dict[str, str]:
     return metadata
 
 
-def qrc_word_timing_mode(line_start: int, starts: Sequence[int]) -> str:
+def qrc_word_timing_mode(
+    line_start: int,
+    line_duration: int,
+    starts: Sequence[int],
+) -> str:
     """Distinguish absolute QRC word times from line-relative exports."""
 
     if not starts or line_start <= 0:
+        return "absolute"
+
+    # Header duration gives an unambiguous answer for most QRC exports. For
+    # example, a line at 1000 ms with word starts 600/1000 is relative, even
+    # though both values happen to be positive absolute timestamps too.
+    relative_window = (
+        line_duration > 0
+        and all(0 <= start <= line_duration for start in starts)
+    )
+    absolute_window = (
+        line_duration > 0
+        and all(
+            line_start <= start <= line_start + line_duration
+            for start in starts
+        )
+    )
+    if relative_window and not absolute_window:
+        return "relative"
+    if absolute_window and not relative_window:
         return "absolute"
 
     absolute_distance = min(abs(start - line_start) for start in starts)
@@ -712,6 +953,31 @@ def qrc_word_timing_mode(line_start: int, starts: Sequence[int]) -> str:
     return "absolute"
 
 
+def qrc_word_marker_style(
+    payload: str,
+    matches: Sequence[re.Match[str]],
+) -> str | None:
+    """Return QRC marker placement only when its timing syntax is credible.
+
+    A lyric can legitimately contain a number pair such as ``(1999, 2000)``.
+    Treating every such pair as timing would remove it from line-synchronised
+    lyrics. Real QRC word timing starts with a tuple before the first word. A
+    reverse hand-authored form is accepted only with multiple tuples: a single
+    trailing number pair is indistinguishable from literal lyric text.
+    """
+
+    if not matches:
+        return None
+
+    leading_text = payload[:matches[0].start()]
+    if not leading_text.strip("\ufeff \t\r\n"):
+        return "before"
+
+    if len(matches) >= 2:
+        return "after"
+    return None
+
+
 def parse_qrc_timed_line(
     raw_line: str,
     *,
@@ -722,14 +988,36 @@ def parse_qrc_timed_line(
     if not header:
         return None, None
 
-    line_start = int(header.group(1))
-    line_duration = int(header.group(2))
+    line_start = parse_qrc_integer(
+        header.group(1),
+        label="line start",
+        allow_negative=True,
+    )
+    line_duration = parse_qrc_integer(
+        header.group(2),
+        label="line duration",
+    )
     payload = header.group(3)
     matches = list(QRC_WORD_RE.finditer(payload))
-    header_start = max(0, line_start + offset_ms)
-    header_end = max(header_start, line_start + line_duration + offset_ms)
+    marker_style = qrc_word_marker_style(payload, matches)
+    line_end = add_qrc_timestamps("QRC line end", line_start, line_duration)
+    header_start = max(
+        0,
+        add_qrc_timestamps("QRC line start after offset", line_start, offset_ms),
+    )
+    header_end = max(
+        header_start,
+        max(
+            0,
+            add_qrc_timestamps(
+                "QRC line end after offset",
+                line_end,
+                offset_ms,
+            ),
+        ),
+    )
 
-    if not matches:
+    def line_synced_result() -> tuple[LyricLine | None, str | None]:
         text = payload.strip()
         if not text:
             return None, None
@@ -745,29 +1033,99 @@ def parse_qrc_timed_line(
             None,
         )
 
-    starts = [int(match.group(1)) for match in matches]
-    timing_mode = qrc_word_timing_mode(line_start, starts)
-    tokens: list[TimedText] = []
-    cursor = 0
-    for match in matches:
-        text = payload[cursor:match.start()]
-        raw_start = int(match.group(1))
-        duration = int(match.group(2))
-        absolute_start = raw_start + (
-            line_start if timing_mode == "relative" else 0
-        )
-        begin = max(0, absolute_start + offset_ms)
-        end = max(begin, absolute_start + duration + offset_ms)
-        if text:
-            tokens.append(TimedText(text, begin, end, timed=True))
-        cursor = match.end()
+    if marker_style is None:
+        return line_synced_result()
 
-    if payload[cursor:]:
-        tokens.append(TimedText(payload[cursor:], None, None, timed=False))
+    starts = [
+        parse_qrc_integer(
+            match.group(1),
+            label="word start",
+            allow_negative=True,
+        )
+        for match in matches
+    ]
+    timing_mode = qrc_word_timing_mode(line_start, line_duration, starts)
+    tokens: list[TimedText] = []
+
+    def timed_token(match: re.Match[str], text: str) -> TimedText | None:
+        """Pair a QRC ``(start,duration)`` marker with its lyric fragment."""
+
+        if not text:
+            return None
+        raw_start = parse_qrc_integer(
+            match.group(1),
+            label="word start",
+            allow_negative=True,
+        )
+        duration = parse_qrc_integer(match.group(2), label="word duration")
+        absolute_start = (
+            add_qrc_timestamps("QRC relative word start", raw_start, line_start)
+            if timing_mode == "relative"
+            else raw_start
+        )
+        word_end = add_qrc_timestamps(
+            "QRC word end",
+            absolute_start,
+            duration,
+        )
+        begin = max(
+            0,
+            add_qrc_timestamps(
+                "QRC word start after offset",
+                absolute_start,
+                offset_ms,
+            ),
+        )
+        end = max(
+            begin,
+            max(
+                0,
+                add_qrc_timestamps(
+                    "QRC word end after offset",
+                    word_end,
+                    offset_ms,
+                ),
+            ),
+        )
+        return TimedText(text, begin, end, timed=True)
+
+    # Standard QQ Music QRC puts each timing tuple *before* the word it times:
+    # ``(1000,300)one(1300,300) two``. The former converter paired each marker
+    # with the preceding text instead, dropping the final word and shifting all
+    # earlier cues forward. A few hand-authored exports use the reverse form,
+    # so retain it when actual lyric text precedes the first marker.
+    leading_text = payload[:matches[0].start()]
+
+    if marker_style == "before":
+        if leading_text:
+            tokens.append(TimedText(leading_text, None, None, timed=False))
+        for index, match in enumerate(matches):
+            next_start = (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else len(payload)
+            )
+            token = timed_token(match, payload[match.end():next_start])
+            if token is not None:
+                tokens.append(token)
+    else:
+        cursor = 0
+        for match in matches:
+            token = timed_token(match, payload[cursor:match.start()])
+            if token is not None:
+                tokens.append(token)
+            cursor = match.end()
+
+        if payload[cursor:]:
+            tokens.append(TimedText(payload[cursor:], None, None, timed=False))
 
     tokens = list(compact_tokens(tokens))
     if not tokens or not "".join(token.text for token in tokens).strip():
-        return None, timing_mode
+        # A leading literal such as ``(1999, 2000)`` is indistinguishable from
+        # a one-marker QRC line until its following lyric fragment is parsed.
+        # Never drop the complete line just because no credible timed fragment
+        # remained; retain it as ordinary line-synchronised text instead.
+        return line_synced_result()
 
     token_starts = [token.begin_ms for token in tokens if token.begin_ms is not None]
     token_ends = [token.end_ms for token in tokens if token.end_ms is not None]
@@ -790,18 +1148,24 @@ def parse_qrc_file(path: Path) -> ConversionResult:
             raise ConversionError(
                 f"QRC input is too large ({path.stat().st_size} bytes; limit {MAX_TTML_BYTES})"
             )
-        raw = path.read_text(encoding="utf-8-sig", errors="replace")
+        raw = path.read_text(encoding="utf-8-sig")
     except ConversionError:
         raise
+    except UnicodeDecodeError as exc:
+        raise ConversionError(
+            f"QRC input is not valid UTF-8: {path}"
+        ) from exc
     except OSError as exc:
         raise ConversionError(f"Could not read QRC file {path}: {exc}") from exc
 
     content = extract_qrc_content(raw)
     metadata = parse_qrc_metadata(content)
-    try:
-        offset_ms = int(metadata.get("offset", "0") or "0")
-    except ValueError:
-        offset_ms = 0
+    raw_offset = metadata.get("offset", "0") or "0"
+    offset_ms = parse_qrc_integer(
+        raw_offset,
+        label="[offset:] value",
+        allow_negative=True,
+    )
 
     lines: list[LyricLine] = []
     timing_modes: list[str] = []
@@ -872,6 +1236,7 @@ def convert_file(
     source_format: str = "auto",
     include_background: bool = True,
     mark_background: bool = True,
+    replace_alternate: bool = False,
 ) -> tuple[Path, ConversionResult]:
     if not input_path.exists():
         raise ConversionError(f"Input file does not exist: {input_path}")
@@ -914,7 +1279,8 @@ def convert_file(
     if not result.lines:
         raise ConversionError("No timed lyric lines were found")
 
-    if output_path is None:
+    output_was_default = output_path is None
+    if output_was_default:
         output_path = input_path.with_suffix(
             ".lrc" if result.timing_mode == "lrc" else ".elrc"
         )
@@ -945,6 +1311,11 @@ def convert_file(
     # therefore cannot leave an existing ELRC half-written.
     temporary_path: Path | None = None
     try:
+        try:
+            existing_mode = stat.S_IMODE(output_path.stat().st_mode)
+        except FileNotFoundError:
+            existing_mode = 0o644
+
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -959,6 +1330,14 @@ def convert_file(
             handle.flush()
             os.fsync(handle.fileno())
 
+        # NamedTemporaryFile creates mode 0600. Lyric files are normally read
+        # by Jellyfin under a different service account, so make the replacement
+        # readable while retaining any existing write/execute policy.
+        os.chmod(
+            temporary_path,
+            existing_mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH,
+        )
+
         temporary_path.replace(output_path)
         temporary_path = None
     except OSError as exc:
@@ -968,8 +1347,20 @@ def convert_file(
             except OSError:
                 pass
         raise ConversionError(
-            f"Could not write ELRC file {output_path}: {exc}"
+            f"Could not write lyric output {output_path}: {exc}"
         ) from exc
+
+    if replace_alternate and output_was_default:
+        alternate_suffix = ".elrc" if output_path.suffix.casefold() == ".lrc" else ".lrc"
+        alternate_path = input_path.with_suffix(alternate_suffix)
+        if alternate_path.exists():
+            try:
+                alternate_path.unlink()
+            except OSError as exc:
+                raise ConversionError(
+                    f"Created {output_path}, but could not remove conflicting "
+                    f"alternate output {alternate_path}: {exc}"
+                ) from exc
 
     return output_path, result
 
@@ -1012,6 +1403,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="directory mode: skip a source when its .lrc or .elrc output exists",
     )
     parser.add_argument(
+        "--replace-alternate",
+        action="store_true",
+        help=(
+            "remove a conflicting default .lrc/.elrc sidecar after a successful "
+            "conversion (use when migrating an older converter output)"
+        ),
+    )
+    parser.add_argument(
         "--no-background",
         action="store_true",
         help="omit ttm:role=x-bg vocals instead of creating separate ELRC lines",
@@ -1043,6 +1442,13 @@ def run_batch(directory: Path, args: argparse.Namespace) -> int:
     if args.output is not None:
         print(
             "error: -o/--output is only supported for a single input file",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.skip_existing and args.replace_alternate:
+        print(
+            "error: --skip-existing cannot be combined with --replace-alternate",
             file=sys.stderr,
         )
         return 1
@@ -1090,6 +1496,7 @@ def run_batch(directory: Path, args: argparse.Namespace) -> int:
                 source_format=args.format,
                 include_background=not args.no_background,
                 mark_background=not args.plain_background,
+                replace_alternate=args.replace_alternate,
             )
         except ConversionError as exc:
             print(f"{label} -> ERROR: {exc}", file=sys.stderr)
@@ -1107,6 +1514,9 @@ def run_batch(directory: Path, args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if sys.version_info < (3, 8):
+        print("error: Python 3.8 or newer is required", file=sys.stderr)
+        return 1
     args = build_argument_parser().parse_args(argv)
 
     if args.input.is_dir():
@@ -1119,6 +1529,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
+    if args.replace_alternate and args.output is not None:
+        print(
+            "error: --replace-alternate is only supported with the default output path",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         output_path, result = convert_file(
             args.input,
@@ -1126,6 +1543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_format=args.format,
             include_background=not args.no_background,
             mark_background=not args.plain_background,
+            replace_alternate=args.replace_alternate,
         )
     except ConversionError as exc:
         print(f"error: {exc}", file=sys.stderr)

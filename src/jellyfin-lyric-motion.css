@@ -121,7 +121,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .lyricPage .ak-atmosphere-dynamic-canvas { will-change: auto; }
+    .lyricPage .ak-atmosphere,
+    .lyricPage .ak-atmosphere-dynamic-canvas,
+    .lyricPage .ak-atmosphere-dynamic-fallback {
+        transition: none;
+        will-change: auto;
+    }
 }
 
 .lyricPage .lyricsContainer.ak-karaoke-container {
@@ -900,6 +905,26 @@
     transition:
         opacity 320ms ease,
         transform 320ms cubic-bezier(0.41, 0, 0.12, 0.99) !important;
+}
+
+/* Keep the time-driven neutral wipe, but honour reduced motion by removing
+ * lyric scaling, bloom and glyph-overlay movement immediately—even while the
+ * renderer is waiting to rebuild its word records after a preference change. */
+@media (prefers-reduced-motion: reduce) {
+    .lyricPage .lyricsLine.ak-enhanced-line,
+    .lyricPage .lyricsLine.ak-enhanced-line.ak-motion-handoff,
+    .lyricPage .lyricsLine.ak-enhanced-line.ak-background-vocal,
+    .lyricPage .lyricsLine.ak-enhanced-line .ak-word {
+        transition: none !important;
+        transform: none !important;
+        filter: none !important;
+        will-change: auto !important;
+    }
+
+    .lyricPage .ak-motion-layer,
+    .lyricPage .ak-glow-layer {
+        display: none !important;
+    }
 }
 
 /* Untimed whitespace / punctuation. */

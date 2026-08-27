@@ -8,9 +8,9 @@ Jellyfin LyricMotion includes a recursive TTML/QRC converter because a shallow `
 python scripts/ttml_qrc_to_elrc.py "/music/Artist/Album/01 - Song.ttml"
 ```
 
-The default output is written beside the input. It uses `.lrc` when every vocal line is line-synchronised, otherwise `.elrc`; mixed sources use `.elrc` but keep their line-only rows as normal LRC rows. Use `-o` to choose a different output path. `.qrc` and `.dfxp` inputs are auto-detected too.
+The default output is written beside the input. It uses `.lrc` when every vocal line is line-synchronised, otherwise `.elrc`; mixed sources use `.elrc` but keep their line-only rows as normal LRC rows. Use `-o` to choose a different output path, or `--replace-alternate` to remove an older conflicting default `.lrc`/`.elrc` sidecar after a successful conversion. `.qrc` and `.dfxp` inputs are auto-detected too.
 
-With no input argument, the converter batch-converts every supported source in the current directory. `--recursive` includes subdirectories and `--skip-existing` leaves an existing `.lrc` or `.elrc` untouched. Sources with the same basename are deliberately not batch-converted because they would otherwise target the same output name; use `-o` on each one instead.
+With no input argument, the converter batch-converts every supported source in the current directory. `--recursive` includes subdirectories and `--skip-existing` leaves an existing `.lrc` or `.elrc` untouched. Sources in the same directory with the same basename are deliberately not batch-converted because they would otherwise target the same output name; use `-o` on each one instead.
 
 ## Preserved information
 
@@ -24,26 +24,28 @@ With no input argument, the converter batch-converts every supported source in t
 
 ## Background-vocal transport
 
-ELRC has no standard field for a vocal role. The converter prefixes a background line with the ASCII token `[ak:bg]` before the first enhanced cue. Unlike Unicode format controls, this survives Jellyfin server parsing. LyricMotion removes it before display, corrects cue positions by the token length, and assigns the compact background-vocal lane.
+LRC/ELRC has no standard field for a vocal role. The converter prefixes a background line with the ASCII token `[ak:bg]` immediately after its line timestamp. Unlike Unicode format controls, this survives Jellyfin server parsing. LyricMotion removes it before display, corrects cue positions by the token length, and renders the smaller background line aligned to its attached lead's rendered left edge. It compares the nearest preceding and following lead by same-start timing, overlap, then gap, placing the backing line immediately before or after the better match.
 
-The timing text is otherwise ordinary ELRC. The token may be visible in players that do not run LyricMotion, which is the necessary tradeoff for reliable transport through Jellyfin.
+The remaining timing text uses the selected LRC or ELRC format. The token may be visible in players that do not run LyricMotion, which is the necessary tradeoff for reliable transport through Jellyfin.
 
 Use `--plain-background` to create separate background lines without the token, or `--no-background` to omit them.
 
 ## Sidecar naming
 
-The audio and ELRC basenames must match:
+The audio and LRC/ELRC basenames must match:
 
 ```text
 01 - Song.flac
-01 - Song.elrc
+01 - Song.lrc   # line-synchronised source
+# or
+01 - Song.elrc  # word/syllable-synchronised source
 ```
 
-After replacing the ELRC, refresh the song or its library in Jellyfin. Fully restart a TV/mobile client if it has cached the previous lyric payload.
+After replacing the LRC/ELRC sidecar, refresh the song or its library in Jellyfin. Fully restart a TV/mobile client if it has cached the previous lyric payload.
 
 ## Source of truth
 
-Keep the TTML. ELRC can preserve timing and LyricMotion's private background token, but it cannot express every TTML layout, metadata, agent, or role feature in a standard way.
+Keep the original TTML, DFXP, or QRC source. LRC/ELRC can preserve timing and LyricMotion's private background token, but it cannot express every source layout, metadata, agent, or role feature in a standard way.
 
 ## Safety and timing validation
 

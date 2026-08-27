@@ -2,8 +2,6 @@
 
 > **3.2.5 Dynamic Background God Mode build:** single atmosphere engine, same-album visual deduplication, latest-media-only artwork commits, and rapid-skip transition hardening.
 
-
-[![Validate](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/actions/workflows/validate.yml/badge.svg)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/actions/workflows/validate.yml)
 [![Release](https://img.shields.io/github/v/release/ThisIsTeddyBear/Jellyfin-LyricMotion?display_name=tag)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
@@ -29,17 +27,15 @@ Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmospher
 - **Self-healing lyric DOM.** Reused `.lyricsLine` shells are validated against LyricMotion-owned child nodes and lyric identity. If Jellyfin replaces line contents, ELRC sweep, Classic Bloom, and instrumental SVG rows are redecorated instead of continuing on detached nodes.
 - **Perceptually balanced shuffle.** The compact Classic Bloom set now shuffles five high-contrast accents equally. Per-palette gain is normalized so yellow/green choices do not dominate the red/blue/violet choices, and the fallback remains neutral.
 
-### Validation snapshot
+### Runtime safeguards
 
-The release gate covers JavaScript/Python syntax, **32 LyricG2P regressions + 500 Unicode fuzz cases**, the 6.5.1 hybrid/provenance suite with **3,000 fuzz cases**, **5,000 randomized instrumental timelines**, runtime smoke/core tests, timing/request/accent/atmosphere tests, TTML conversion, research-pipeline hygiene, installer rollback simulation, static JS/CSS contracts, deterministic packaging and synthetic Jellyfin install/uninstall.
+LyricMotion verifies reused lyric DOM shells before updating them, keeps malformed timing data from producing invalid visual state, and leaves plain unsynchronised lyrics in Jellyfin's native presentation.
 
 Read: [Dynamic Background Design](docs/DYNAMIC-BACKGROUND-3.2.5.md), [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), and the canonical [CHANGELOG](CHANGELOG.md).
 
 ## Feature gallery
 
-### Classic Bloom and adaptive atmosphere
-
-![Classic Bloom glow with a blue and violet adaptive atmosphere](docs/screenshots/classic-bloom-atmosphere.png)
+### Classic Bloom and Dynamic Background
 
 Classic Bloom uses a crisp letter-bound core followed by primary/secondary bloom and a restrained tertiary outer halo. The runtime exposes five punchier palettes and shuffles them per song without immediate repetition. Dynamic Background uses the album artwork itself as a preblurred WebGL texture and continuously deforms it with domain warping. Lyric rendering remains independent of the atmosphere and keeps its neutral sweep plus Classic Bloom foreground treatment.
 
@@ -53,15 +49,15 @@ The fill and wave phase are derived from media time rather than a standalone CSS
 
 ![Two lead lines with compact left-anchored background vocals attached to their nearest lead lines](docs/screenshots/overlap-background-vocals.png)
 
-LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content is rendered in a slightly smaller, always-left-aligned backing-vocal line. When it overlaps a following lead it is attached immediately before that line; when it follows a lead it stays immediately after the closest preceding line.
+LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content is rendered in a slightly smaller backing-vocal line aligned to its attached lead's rendered left edge. It compares the nearest preceding and following lead by same-start timing, overlap, then gap, placing the backing line immediately before or after the better match.
 
 ## Supported lyric inputs
 
 | Input | Support | Result |
 |---|---|---|
-| Enhanced LRC / ELRC | Native | Word/syllable-aware wipe, motion, glow, overlaps, background lanes, exact line endings and trustworthy instrumental-gap progress |
+| Enhanced LRC / ELRC | Native | Word/syllable-aware wipe, motion, glow, overlaps, attached left-aligned background vocals, exact line endings and trustworthy instrumental-gap progress |
 | Standard LRC | Native | Polished line-synced presentation; instrumental gaps only when the source exposes a trustworthy explicit end |
-| Timed TTML | Converter | Recursive main + `x-bg` extraction into Jellyfin-compatible ELRC |
+| Timed TTML / DFXP / QRC | Converter | Extracts timed lines and background roles; writes LRC for line timing and ELRC only for word/syllable timing |
 | Plain unsynced lyrics | Jellyfin fallback | Displayed by Jellyfin without LyricMotion timing effects |
 
 LyricMotion does not download lyrics. It enhances lyric data already available to Jellyfin.
@@ -75,7 +71,7 @@ Download the platform-specific archive from GitHub Releases, then extract it:
 - **macOS:** `jellyfin-lyric-motion-v3.2.5-macos.zip`
 - **Docker build context:** `jellyfin-lyric-motion-v3.2.5-docker.zip`
 
-The release archives are strict allowlists. Tests, research, benchmarks, repository documentation, examples, CI metadata, and release tooling are not bundled.
+The release archives are strict allowlists. Repository-only documentation, examples, CI metadata, and release tooling are not bundled.
 
 ### Windows
 
@@ -189,6 +185,7 @@ Options:
 --no-background     omit background-vocal content
 --format FORMAT      force auto, ttml, or qrc detection
 --plain-background   keep background lines without LyricMotion's role token
+--replace-alternate  remove a conflicting default .lrc/.elrc output after conversion
 -o PATH             choose the output path
 ```
 
@@ -236,7 +233,7 @@ JellyfinLyricMotion.refreshAtmosphere()
 
 Dynamic Background is deliberately audio-independent. There is no audio-reactive atmosphere API in this build.
 
-`AppleKaraoke` remains as a compatibility alias for older local-test users.
+`AppleKaraoke` remains as a compatibility alias for older integrations.
 
 ## Performance model
 
@@ -279,9 +276,9 @@ sudo ./scripts/uninstall.sh
 
 The uninstaller surgically removes LyricMotion loader tags/assets and normally deletes LyricMotion-owned timestamped `index.html` safety backups. Use `-KeepBackups` on PowerShell or `--keep-backups` on POSIX if you intentionally want to retain them.
 
-## Compatibility and validation
+## Compatibility
 
-The 3.2.5 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients are validated as a hard stock-Jellyfin bypass.
+The 3.2.5 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients remain a hard stock-Jellyfin bypass.
 
 Real behavior can still vary by Jellyfin build, browser/WebView, available fonts and source lyric quality.
 

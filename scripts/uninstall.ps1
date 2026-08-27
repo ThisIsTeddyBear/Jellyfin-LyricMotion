@@ -54,12 +54,15 @@ if ($EnsureAdministrator -and -not (Test-IsAdministrator)) {
 
 function Test-WebDir([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    return Test-Path (Join-Path $Path "index.html")
+    return Test-Path -LiteralPath (Join-Path $Path "index.html") -PathType Leaf
 }
 
 function Find-JellyfinWebDir([string]$Requested) {
-    if (Test-WebDir $Requested) { return (Resolve-Path $Requested).Path }
-    if (Test-WebDir $env:JELLYFIN_WEB_DIR) { return (Resolve-Path $env:JELLYFIN_WEB_DIR).Path }
+    if (-not [string]::IsNullOrWhiteSpace($Requested)) {
+        if (Test-WebDir $Requested) { return (Resolve-Path -LiteralPath $Requested).Path }
+        throw "The supplied -WebDir is not a Jellyfin Web directory: $Requested"
+    }
+    if (Test-WebDir $env:JELLYFIN_WEB_DIR) { return (Resolve-Path -LiteralPath $env:JELLYFIN_WEB_DIR).Path }
 
     foreach ($registryPath in @(
         "HKLM:\SOFTWARE\WOW6432Node\Jellyfin\Server",
@@ -69,7 +72,7 @@ function Find-JellyfinWebDir([string]$Requested) {
             $props = Get-ItemProperty -Path $registryPath -ErrorAction Stop
             if ($props.InstallFolder) {
                 $candidate = Join-Path $props.InstallFolder "jellyfin-web"
-                if (Test-WebDir $candidate) { return (Resolve-Path $candidate).Path }
+                if (Test-WebDir $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
             }
         } catch {}
     }
@@ -78,7 +81,7 @@ function Find-JellyfinWebDir([string]$Requested) {
         "$env:ProgramFiles\Jellyfin\Server\jellyfin-web",
         "${env:ProgramFiles(x86)}\Jellyfin\Server\jellyfin-web"
     )) {
-        if (Test-WebDir $candidate) { return (Resolve-Path $candidate).Path }
+        if (Test-WebDir $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
     }
 
     throw "Could not locate Jellyfin Web. Pass -WebDir explicitly."
@@ -96,20 +99,9 @@ function Commit-AtomicReplacement([string]$Temporary, [string]$Destination) {
     $replaceBackup = Join-Path $directory ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.replace.bak')
 
     try {
-        try {
-            # Windows PowerShell 5.1/.NET Framework can reject $null here with
-            # "The path is not of a legal form." Use a real transient backup.
-            [IO.File]::Replace($Temporary, $Destination, $replaceBackup, $true)
-        } catch [System.ArgumentException] {
-            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
-            Remove-Item -LiteralPath $Temporary -Force
-        } catch [System.IO.IOException] {
-            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
-            Remove-Item -LiteralPath $Temporary -Force
-        } catch [System.NotSupportedException] {
-            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
-            Remove-Item -LiteralPath $Temporary -Force
-        }
+        # Do not fall back to a direct copy over index.html: an interrupted
+        # non-atomic write can leave Jellyfin without a usable web entrypoint.
+        [IO.File]::Replace($Temporary, $Destination, $replaceBackup, $true)
     } finally {
         Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
     }
@@ -143,15 +135,15 @@ foreach ($pattern in @(
 
 Write-AtomicUtf8 $IndexPath $content
 
-Remove-Item (Join-Path $WebDir "jellyfin-lyric-motion.js") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $WebDir "jellyfin-lyric-motion.css") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $WebDir "jellyfin-lyric-romanizer.js") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $WebDir "jellyfin-lyric-romanization-sources.js") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "jellyfin-lyric-motion.js") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "jellyfin-lyric-motion.css") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "jellyfin-lyric-romanizer.js") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "jellyfin-lyric-romanization-sources.js") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
 
 if (-not $KeepBackups) {
-    Remove-Item (Join-Path $WebDir "index.html.before-jellyfin-lyric-motion") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $WebDir "index.html.before-jellyfin-lyric-motion") -Force -ErrorAction SilentlyContinue
     Get-ChildItem -LiteralPath $WebDir -Filter "index.html.before-jellyfin-lyric-motion-*" -File -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }

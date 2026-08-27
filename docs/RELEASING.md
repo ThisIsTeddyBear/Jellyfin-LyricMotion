@@ -1,13 +1,13 @@
 # Releasing Jellyfin LyricMotion
 
-The release pipeline publishes one GitHub Release with four minimal platform archives:
+Release maintainers build and publish one GitHub Release with four minimal platform archives:
 
 - `jellyfin-lyric-motion-v<VERSION>-windows.zip`
 - `jellyfin-lyric-motion-v<VERSION>-linux.zip`
 - `jellyfin-lyric-motion-v<VERSION>-macos.zip`
 - `jellyfin-lyric-motion-v<VERSION>-docker.zip`
 
-Every ZIP has a matching `.sha256` sidecar. Repository-only tests, research, docs, benchmarks, examples, CI metadata, and release tooling are never included because `scripts/package_release.py` uses strict allowlists.
+Every ZIP has a matching `.sha256` sidecar. Repository documentation, examples, CI metadata, and release tooling are excluded because `scripts/package_release.py` uses strict allowlists.
 
 ## Pre-release checks
 
@@ -19,11 +19,11 @@ cat VERSION
 cat LYRICG2P_VERSION
 ```
 
-For v3.2.5 the version files must be:
+The version files must match the release being prepared:
 
 ```text
-VERSION          = 3.2.5
-LYRICG2P_VERSION = 6.5.1
+VERSION          = release application version
+LYRICG2P_VERSION = bundled Romanizer version
 ```
 
 ## Build the same platform assets locally
@@ -61,11 +61,9 @@ git tag -a "v$(cat VERSION)" \
 git push origin "v$(cat VERSION)"
 ```
 
-Pushing the tag triggers `.github/workflows/release.yml`. The workflow reruns the full validation gate, builds all four deterministic archives, verifies their checksums, and publishes them on one GitHub Release.
+There is no GitHub Actions release workflow in this repository. After pushing the verified tag, create the matching GitHub Release manually and upload the four ZIPs with their four `.sha256` sidecars.
 
-## Manual rerun
-
-If the tag already exists but the GitHub Action needs to be rerun, open **Actions → Release → Run workflow**, enter the existing tag such as `v3.2.5`, and run it. Do not move the tag just to rerun the workflow.
+Never force-move a published release tag. If publication needs correction, create a new release version rather than retagging an existing one.
 
 ## Post-release checks
 
@@ -74,4 +72,4 @@ If the tag already exists but the GitHub Action needs to be rerun, open **Action
 3. Windows must contain only Windows installers plus common runtime/legal files.
 4. Linux and macOS must contain only POSIX installers plus common runtime/legal files.
 5. Docker must contain only the Dockerfile plus common runtime/legal files.
-6. Confirm no `tests/`, `research/`, `docs/`, `examples/`, `.github/`, benchmarks, or release scripts are inside any release ZIP.
+6. Confirm no repository-only documentation, examples, `.github/` metadata, or release scripts are inside any release ZIP.

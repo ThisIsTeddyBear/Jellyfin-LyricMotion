@@ -27,5 +27,6 @@ assignees: ""
 JellyfinLyricMotion.diagnostics()
 ```
 
-For TV issues, include the playback timestamp and whether the focus/current
-line moved before or after the word wipe.
+For TV issues, include the client model/firmware and, if available, the user
+agent. State whether any LyricMotion UI or effects appeared instead of
+Jellyfin's stock lyrics experience.

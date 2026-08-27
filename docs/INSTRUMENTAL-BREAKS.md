@@ -1,9 +1,8 @@
 # Instrumental Break Progress
 
-Release: Jellyfin LyricMotion `3.2.4`  
-LyricG2P: `6.5.1`
+Release: Jellyfin LyricMotion `3.2.5` · LyricG2P: `6.5.1`
 
-Jellyfin LyricMotion 3.2.4 uses a synthetic vector `♪` row for real instrumental gaps between timed lyric lines. The symbol is intentionally sparse: one note per qualifying break, with a bottom-to-top fill that reaches 100% exactly when the next lyric begins.
+Jellyfin LyricMotion 3.2.5 uses a synthetic vector `♪` row for real instrumental gaps between timed lyric lines. The symbol is intentionally sparse: one note per qualifying break, with a bottom-to-top fill that reaches 100% exactly when the next lyric begins.
 
 ## User-visible behavior
 
@@ -27,7 +26,7 @@ Accepted end evidence:
 
 1. an explicit lyric `End` value;
 2. an explicit end on the terminal textual cue; or
-3. the final empty enhanced timestamp emitted by the TTML-to-ELRC converter at `text.length`.
+3. the final empty enhanced timestamp emitted at `text.length` when the TTML/QRC converter produces ELRC.
 
 An earlier cue's explicit end does **not** prove that the complete line has ended. A malformed end that occurs before the final vocal start is also rejected.
 
@@ -121,9 +120,6 @@ The renderer accounts for:
 - progressive wave flattening near the next vocal;
 - flat reduced-motion rendering;
 - pause/seek-derived fill state;
-- exact gap-end handoff to the upcoming lyric;
-- 5,000 deterministic randomized timing/overlap fuzz timelines in the default release gate.
-
-Final 3.2.4 acceptance is also run with `INSTRUMENTAL_FUZZ_CASES=20000` to extend randomized timing/overlap coverage without making every normal CI run unnecessarily expensive.
+- exact gap-end handoff to the upcoming lyric.
 
 These safeguards keep the note row derived from the lyric timeline rather than an independent animation clock.

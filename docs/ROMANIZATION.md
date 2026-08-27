@@ -33,13 +33,13 @@ The design was informed by publicly documented Indian-language transliteration w
 - **Dakshina** is particularly relevant to the product goal because it contains attested Romanization lexicons and full-sentence native/Latin parallel data for major South Asian languages.
 - Published Hindi/Punjabi G2P work identifies schwa deletion as a central pronunciation problem that naive Devanagari transliterators get wrong.
 
-No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P 6 keeps deterministic production output and adds a local corpus/evaluation pipeline, mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. A learned model is eligible only after it demonstrates held-out improvement and acceptable browser cost. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
+No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P keeps deterministic production output with mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. Any future learned model would require independent evidence of improvement and acceptable browser cost. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
 
-## v3.2.4 / LyricG2P 6.5.1 implementation
+## v3.2.5 / LyricG2P 6.5.1 implementation
 
 LyricG2P 6.5 makes several pieces that were diagnostic scaffolding in 6.0 materially useful to production: conservative shared-script language evidence, structured phonological tokens, known-stem morphology, transform-carried provenance, n-best style variants and a richer candidate ranker. It also fixes legacy Malayalam chillu sequences whose joiners were previously discarded before final-short-u handling.
 
-The public confidence field remains an engineering evidence score, not a calibrated probability. The release includes calibration tooling so future independent corpora can fit those scores from observations rather than by renaming constants.
+The public confidence field remains an engineering evidence score, not a calibrated probability.
 
 No learned model or training pipeline is bundled. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
 
@@ -96,9 +96,9 @@ existing Jellyfin ELRC cue timestamps, unchanged
 
 The Malayalam path understands independent vowels, vowel signs, chillus, conjuncts, doubled consonants, nasal marks and common pronunciation conventions. The engine contains a compact exception/pronunciation lexicon for high-confidence song words while unseen words still use the general parser.
 
-The exact KALYANI regressions that motivated the previous pass remain locked into tests. LyricG2P 6 additionally fixes a systematic Malayalam song-orthography failure: singleton medial `ട` now becomes `d` in the high-confidence vocalic environment where listeners expect it, while word-initial and geminated `ട` remain `t/tt`. Word-final chandrakkala also receives a conservative short-u pass for native endings, without blindly appending `u` to every modern loanword.
+Examples that motivated the Malayalam handling include a systematic song-orthography case where singleton medial `ട` becomes `d` in the high-confidence vocalic environment where listeners expect it, while word-initial and geminated `ട` remain `t/tt`. Word-final chandrakkala also receives a conservative short-u pass for native endings, without blindly appending `u` to every modern loanword.
 
-New permanent regressions include:
+Representative examples include:
 
 ```text
 ഇടിമിന്നലാടി നിനക്കെന്താ പേടി
@@ -114,7 +114,7 @@ New permanent regressions include:
 -> ithu / athu / enthu / aanu
 ```
 
-The KALYANI corpus is still retained as well:
+Additional Malayalam examples:
 
 ```text
 കാറ്റിൻ തൂവൽ പോലെ മെല്ലെ തഴുകാനേ
@@ -240,7 +240,7 @@ Romanized strings are held in an LRU-style cache capped at **1,800 entries**. Hi
 
 The Romanizer is a lazy sibling asset. It is loaded only when a native-script lyric candidate needs it. Stock TV clients hard-exit before this runtime is initialized.
 
-The offline stress suite repeatedly converts a multilingual Indian corpus and also exhausts every code point in Devanagari, Bengali/Assamese, Gurmukhi, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam and the Urdu/Shahmukhi Arabic block for deterministic/no-throw/bounded behavior.
+The runtime is designed to preserve deterministic, bounded handling across its supported Indic and Urdu/Shahmukhi scripts.
 
 ## UI
 
@@ -263,7 +263,3 @@ The uninstaller still removes the old `jellyfin-lyric-romanization-sources.js` f
 - Song Romanization itself is not standardized: `aa` vs `a`, `dh` vs `d`, and similar spellings can all be reasonable depending on convention.
 - Urdu/Shahmukhi short vowels cannot always be inferred from unvowelled text without a much larger pronunciation lexicon or a learned language model.
 - The broad ICU-derived fallback is coverage insurance, not the pronunciation-quality target for first-class Indian languages.
-
-## Validation
-
-The feature suite includes exact Hindi/Punjabi regressions, the reported Malayalam/KALYANI regressions, Tamil/Telugu/Kannada/Bengali-Assamese/Gujarati/Odia/Urdu examples, source-to-Roman timing boundaries, LRU behavior, NFD normalization, network-isolation checks, installer checks, exhaustive script-block safety tests and mixed-script fuzzing.
