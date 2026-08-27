@@ -177,7 +177,6 @@
     // Behaviour adapted from the current am-lyrics renderer.
     const BASE_WIPE_GRADIENT_EM = 0.75;
     const LONG_WORD_WIPE_EXTRA_EM = 0.45;
-    const SHORT_WORD_DRAG_MIN_DURATION_MS = 760;
     const SHORT_WORD_GLOW_MIN_DURATION_MS = 1320;
     const MOTION_FINAL_RISE_EM = -0.035;
     const MOTION_HANDOFF_TICKS = 3200000; // 320 ms previous-line glow decay
@@ -1166,6 +1165,8 @@
         lyricAutoFollowManualScrollCount: 0,
         lyricAutoFollowForceCount: 0,
         lyricAutoFollowLastReason: '',
+        lyricStockAutoFollowSuppressCount: 0,
+        lyricStockAutoFollowLastReason: '',
         lyricSeekCount: 0,
         instrumentalSeekCount: 0,
         lastLyricSeekKind: '',
@@ -2455,40 +2456,10 @@
                 }
             }
 
-            const hasCharRiseDuration =
-                durationMs >= Math.max(700, wordLen * 85);
-
-            const hasTinyWordDragDuration =
-                wordLen >= 2
-                && wordLen <= 3
-                && durationMs >= Math.max(
-                    SHORT_WORD_DRAG_MIN_DURATION_MS,
-                    wordLen * 150
-                );
-
-            const hasLongShortWordDuration =
-                wordLen >= 4
-                && durationMs >= Math.max(
-                    1300,
-                    wordLen * 260
-                );
-
-            const charRise =
-                canAnimate
-                && !growable
-                && (
-                    (wordLen >= 8 && hasCharRiseDuration)
-                    || (wordLen < 8 && hasLongShortWordDuration)
-                );
-
-            const charDrag =
-                canAnimate
-                && !growable
-                && hasTinyWordDragDuration;
-
-            word.motionMode = growable
-                ? 'grow'
-                : (charRise ? 'rise' : (charDrag ? 'drag' : 'none'));
+            /* Motion and bloom are one effect. Words that miss the complete
+             * grow/glow eligibility test keep only their neutral timed sweep;
+             * a lift without its bloom reads as a stray vertical jump. */
+            word.motionMode = growable ? 'grow' : 'none';
 
             word.motionGlow =
                 growable;
@@ -3691,12 +3662,25 @@
         }
 
         const container =
-            getCurrentLyricsContainer(true);
+            getCurrentLyricsContainer(false);
 
         if (container) {
             container.classList.remove(
-                'ak-karaoke-container'
+                'ak-karaoke-container',
+                'ak-plain-lyrics-container'
             );
+
+            Array.from(
+                container.querySelectorAll('.ak-plain-line')
+            ).forEach(line => {
+                Array.from(line.classList || [])
+                    .filter(name =>
+                        name === 'ak-plain-line'
+                        || name.indexOf('ak-script-') === 0
+                    )
+                    .forEach(name => line.classList.remove(name));
+                line.removeAttribute('dir');
+            });
         }
     }
 
@@ -3968,7 +3952,7 @@
         scheduleLyricVisualRecoveryBurst(state.generation, 'lyrics-accepted');
 
         if (state.lyricTimingMode === 'plain') {
-            log('Plain unsynced lyrics detected; leaving Jellyfin lyric DOM untouched.');
+            log('Plain unsynced lyrics detected; applying typography-only presentation.');
         } else if (cueCount === 0) {
             warn('Lyrics loaded without enhanced ELRC cue data.');
         }
@@ -4954,6 +4938,11 @@
         state.timingOffsetSeconds = normalized;
         state.timingOffsetChangeCount += 1;
 
+        /* Jellyfin follows the uncorrected source line on every timeupdate.
+         * Once an offset is changed, make LyricMotion the sole scroll owner so
+         * the source and corrected targets cannot pull the view up and down. */
+        suppressJellyfinLyricAutoFollow('timing-offset-change');
+
         if (persist) persistCurrentSongPreference();
 
         invalidateTimingPaintState();
@@ -5178,6 +5167,36 @@
         }
     }
 
+    function suppressJellyfinLyricAutoFollow(
+        reason = 'lyric-motion-follow'
+    ) {
+        if (
+            typeof document === 'undefined'
+            || !isLyricsPage()
+        ) {
+            return false;
+        }
+
+        /* Jellyfin's lyrics controller disables its private autoScroll state
+         * on wheel/touchmove. There is no public controller API for this. A
+         * zero-delta synthetic wheel uses that controller path while our own
+         * capture listener explicitly ignores the internal event. */
+        try {
+            const event = new Event('wheel', {
+                bubbles: true,
+                cancelable: false
+            });
+            event.akLyricMotionInternal = true;
+            document.dispatchEvent(event);
+        } catch {
+            return false;
+        }
+
+        state.lyricStockAutoFollowSuppressCount += 1;
+        state.lyricStockAutoFollowLastReason = reason;
+        return true;
+    }
+
     function resumeLyricAutoFollow(reason = 'resume') {
         state.lyricAutoFollowSuspendedUntil = 0;
         state.lyricAutoFollowLastReason = reason;
@@ -5267,6 +5286,7 @@
 
     function handleLyricManualScroll(event) {
         if (!isLyricsPage()) return;
+        if (event && event.akLyricMotionInternal) return;
 
         const page = getCurrentLyricPage();
         const target = event && event.target;
@@ -7173,6 +7193,13 @@
             ? wordCueRanges.map(range => range.cue)
             : [];
 
+        Array.from(lineElement.classList || [])
+            .filter(name =>
+                name === 'ak-plain-line'
+                || name.indexOf('ak-script-') === 0
+            )
+            .forEach(name => lineElement.classList.remove(name));
+
         lineElement.style.removeProperty('visibility');
         lineElement.style.removeProperty('--ak-bg-anchor-offset');
         lineElement.removeAttribute('aria-hidden');
@@ -7860,6 +7887,10 @@
         lines.forEach((line, index) => {
             if (!line || !line.classList) return;
 
+            const plainText = lyrics[index]
+                ? lyricTextProfile(lyrics[index]).text
+                : String(line.textContent || '');
+
             const wasEnhanced =
                 line.classList.contains('ak-enhanced-line')
                 || !!(line.dataset && line.dataset.akGeneration);
@@ -7867,6 +7898,15 @@
             Array.from(line.classList)
                 .filter(name => name.indexOf('ak-') === 0)
                 .forEach(name => line.classList.remove(name));
+
+            line.classList.add(
+                'ak-plain-line',
+                `ak-script-${detectScriptProfile(plainText)}`
+            );
+            line.setAttribute(
+                'dir',
+                firstStrongDirection(plainText)
+            );
 
             [
                 'akGeneration',
@@ -7890,7 +7930,6 @@
              * Restore a single native text node rather than leaving stale word
              * spans and their sweep/glow styles inside Jellyfin's plain view. */
             line.removeAttribute('aria-label');
-            line.removeAttribute('dir');
             replaceChildrenCompat(line);
             line.appendChild(
                 document.createTextNode(
@@ -7900,6 +7939,7 @@
         });
 
         container.classList.remove('ak-karaoke-container');
+        container.classList.add('ak-plain-lyrics-container');
         state.lineData = [];
         state.lineEndPrefix = [];
         state.instrumentalGaps = [];
@@ -7961,10 +8001,41 @@
         );
     }
 
+    function plainLyricTypographyHealthy() {
+        const container = getCurrentLyricsContainer(false);
+        if (
+            !container
+            || !container.classList.contains(
+                'ak-plain-lyrics-container'
+            )
+        ) {
+            return false;
+        }
+
+        const lines = Array.from(
+            container.querySelectorAll('.lyricsLine')
+        );
+        const lyrics = Array.isArray(state.lyrics)
+            ? state.lyrics
+            : [];
+
+        return lines.length === lyrics.length
+            && lines.every((line, index) => {
+                const text = lyricTextProfile(lyrics[index]).text;
+                return line.classList.contains('ak-plain-line')
+                    && line.classList.contains(
+                        `ak-script-${detectScriptProfile(text)}`
+                    )
+                    && line.getAttribute('dir')
+                        === firstStrongDirection(text);
+            });
+    }
+
     function lyricVisualDomHealthy() {
         if (state.lyricTimingMode === 'plain') {
             return state.decoratedGeneration === state.generation
-                && state.lineData.length === 0;
+                && state.lineData.length === 0
+                && plainLyricTypographyHealthy();
         }
 
         return state.decoratedGeneration === state.generation
@@ -7989,6 +8060,14 @@
             restorePlainLyricsDom(lines, state.lyrics, container);
             return true;
         }
+
+        container.classList.remove('ak-plain-lyrics-container');
+
+        /* Jellyfin's native follower uses raw lyric timestamps. LyricMotion
+         * uses the user's corrected timeline, so synchronized lyrics must have
+         * exactly one scroll owner or a nonzero offset makes the two targets
+         * alternate vertically on every playback update. */
+        suppressJellyfinLyricAutoFollow('synchronized-lyrics-decorated');
 
         removeInstrumentalGapRows(container);
 
@@ -10638,40 +10717,6 @@
         word._akMotionIsReset = false;
     }
 
-    function updateSimpleLift(word, timelineTicks) {
-        if (!word.element || word.motionMode === 'none') return;
-
-        const durationTicks =
-            Math.max(1, word.end - word.start);
-
-        const progress =
-            clamp01(
-                (
-                    timelineTicks - word.start
-                )
-                / durationTicks
-            );
-
-        let lift = 0;
-
-        if (word.motionMode === 'rise') {
-            lift =
-                MOTION_FINAL_RISE_EM
-                * easeMotion(
-                    Math.min(1, progress / 0.65)
-                );
-        } else if (word.motionMode === 'drag') {
-            lift =
-                MOTION_FINAL_RISE_EM
-                * easeMotion(progress);
-        }
-
-        word.element.style.transform =
-            `translate3d(0, ${lift.toFixed(4)}em, 0)`;
-
-        word._akMotionIsReset = false;
-    }
-
     function resetWordMotion(word) {
         if (
             !word
@@ -10852,11 +10897,6 @@
                     continuityGain
                 );
             }
-        } else if (
-            word.motionMode === 'rise'
-            || word.motionMode === 'drag'
-        ) {
-            updateSimpleLift(word, timelineTicks);
         }
     }
 
@@ -11931,6 +11971,16 @@
                 return;
             }
 
+            /* Timed lyrics already probe artwork from their animation loop.
+             * Plain/untimed lyrics intentionally stop that loop, so keep a
+             * lightweight watchdog probe alive for late album/folder covers,
+             * including covers painted through CSS background-image. Resolved
+             * strong sources return immediately inside refreshAtmosphere(). */
+            const media = getLocalMediaElement(true);
+            if (media) {
+                maybeRefreshAtmosphere(media, performance.now());
+            }
+
             if (
                 shouldRunAnimationLoop()
                 && !state.animationLoopRunning
@@ -11980,7 +12030,11 @@
             '.nowPlayingBar img',
             '.nowPlayingPage img',
             '.nowPlayingInfoContainer img',
-            '.detailImageContainer img'
+            '.detailImageContainer img',
+            '.nowPlayingBar [style*="background-image"]',
+            '.nowPlayingPage [style*="background-image"]',
+            '.nowPlayingInfoContainer [style*="background-image"]',
+            '.detailImageContainer [style*="background-image"]'
         ].join(',');
 
         const touchesArtworkDom = node => {
@@ -12073,6 +12127,10 @@
                 subtree: true,
                 characterData: true,
                 attributes: true,
+                /* Per-frame lyric transforms also mutate `style`, so do not
+                 * observe that attribute globally. The 700 ms visual watchdog
+                 * continuously probes CSS background artwork without adding a
+                 * mutation record for every animated glyph. */
                 attributeFilter: ['src', 'srcset']
             }
         );
@@ -12551,7 +12609,13 @@
                     scrollCount: state.lyricAutoFollowScrollCount,
                     manualScrollCount: state.lyricAutoFollowManualScrollCount,
                     forceCount: state.lyricAutoFollowForceCount,
-                    lastReason: state.lyricAutoFollowLastReason
+                    lastReason: state.lyricAutoFollowLastReason,
+                    stockFollowerSuppressed:
+                        state.lyricStockAutoFollowSuppressCount > 0,
+                    stockSuppressCount:
+                        state.lyricStockAutoFollowSuppressCount,
+                    stockSuppressReason:
+                        state.lyricStockAutoFollowLastReason
                 },
                 seekCount: state.lyricSeekCount,
                 lastSeekKind: state.lastLyricSeekKind,

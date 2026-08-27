@@ -144,6 +144,11 @@
     gap: 0;
 }
 
+.lyricPage .lyricsContainer.ak-plain-lyrics-container {
+    width: min(76rem, calc(100vw - 3rem));
+    gap: 0;
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* Line typography                                                            */
@@ -188,6 +193,38 @@
         transform 400ms var(--ak-line-ease);
 
     will-change: auto;
+}
+
+/* Plain/untimed LRC keeps Jellyfin's native static behavior, but it should not
+ * fall back to a visibly different type system. This is typography-only: no
+ * timing state, opacity bands, transforms, sweep, bloom or custom scrolling. */
+.lyricPage .lyricsLine.ak-plain-line {
+    max-width: min(72rem, calc(100vw - 4rem));
+    margin: 0.018em 0;
+    padding: 0.14em 0.13em 0.20em;
+    min-height: 1.52em;
+
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        "Helvetica Neue",
+        Arial,
+        sans-serif;
+
+    font-size: clamp(2.2rem, 4vw, 4.55rem);
+    font-weight: 725;
+    line-height: 1.17;
+    letter-spacing: -0.026em;
+    text-wrap: pretty;
+
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+.lyricPage .lyricsLine.ak-plain-line[dir="rtl"] {
+    letter-spacing: normal;
 }
 
 .lyricPage .lyricsLine.ak-enhanced-line.ak-current,
@@ -955,12 +992,17 @@
 }
 
 @media (max-width: 760px) {
+    .lyricPage .lyricsContainer.ak-plain-lyrics-container,
     .lyricPage .lyricsContainer.ak-karaoke-container {
         width: calc(100vw - 1.5rem);
+    }
+
+    .lyricPage .lyricsContainer.ak-karaoke-container {
         padding-top: 8vh;
         padding-bottom: 22vh;
     }
 
+    .lyricPage .lyricsLine.ak-plain-line,
     .lyricPage .lyricsLine.ak-enhanced-line {
         max-width: calc(100vw - 2rem);
         font-size: clamp(1.9rem, 8vw, 3.1rem);

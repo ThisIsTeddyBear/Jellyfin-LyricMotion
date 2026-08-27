@@ -6,6 +6,10 @@ All notable public changes are documented here. The project follows Semantic Ver
 
 ### Fixed
 
+- Album/folder-inherited covers applied late through a now-playing `background-image` style are now discovered continuously on static/untimed lyric pages instead of being missed after the initial probe window.
+- Plain untimed LRC lyrics now use the same LyricMotion typography and script-aware font fallbacks as synchronized lyrics while retaining native static behavior.
+- Non-glow-qualified ELRC words now stay on the normal neutral sweep instead of receiving a stray rise/drag jump without bloom.
+- Offset-corrected lyric auto-follow no longer fights Jellyfin's unadjusted native follower and pulls the view up and down between two lines.
 - Plain unsynchronised lyrics now stay in Jellyfin's native presentation instead of entering karaoke timing state.
 - ELRC word sweep and Classic Bloom tolerate malformed timing data without producing invalid visual state.
 - Background vocals align with their attached lead line's rendered left edge and use closest before/after lead attachment.

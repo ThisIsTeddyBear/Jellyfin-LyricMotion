@@ -29,7 +29,7 @@ Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmospher
 
 ### Runtime safeguards
 
-LyricMotion verifies reused lyric DOM shells before updating them, keeps malformed timing data from producing invalid visual state, and leaves plain unsynchronised lyrics in Jellyfin's native presentation.
+LyricMotion verifies reused lyric DOM shells before updating them, keeps malformed timing data from producing invalid visual state, and gives plain unsynchronised lyrics the same typography while preserving Jellyfin's native static behavior.
 
 Read: [Dynamic Background Design](docs/DYNAMIC-BACKGROUND-3.2.5.md), [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), and the canonical [CHANGELOG](CHANGELOG.md).
 
@@ -58,7 +58,7 @@ LyricMotion tracks an active set instead of a single current line. Overlapping l
 | Enhanced LRC / ELRC | Native | Word/syllable-aware wipe, motion, glow, overlaps, attached left-aligned background vocals, exact line endings and trustworthy instrumental-gap progress |
 | Standard LRC | Native | Polished line-synced presentation; instrumental gaps only when the source exposes a trustworthy explicit end |
 | Timed TTML / DFXP / QRC | Converter | Extracts timed lines and background roles; writes LRC for line timing and ELRC only for word/syllable timing |
-| Plain unsynced lyrics | Jellyfin fallback | Displayed by Jellyfin without LyricMotion timing effects |
+| Plain unsynced lyrics | Typography-only | LyricMotion font system with Jellyfin's native static behavior and no timing effects |
 
 LyricMotion does not download lyrics. It enhances lyric data already available to Jellyfin.
 
