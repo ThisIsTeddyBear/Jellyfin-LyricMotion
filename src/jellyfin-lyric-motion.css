@@ -227,6 +227,32 @@
     letter-spacing: normal;
 }
 
+/* Explicit x-bg lines and the narrow whole-parenthetical recovery path should
+ * retain their vocal hierarchy even when the source is only line-synchronised
+ * or completely untimed. No timing animation is introduced here. */
+.lyricPage .lyricsLine.ak-plain-line.ak-background-vocal {
+    max-width: min(58rem, calc(100vw - 6rem));
+    min-height: 1.14em;
+    margin-top: -0.02em;
+    margin-right: auto;
+    margin-bottom: 0.02em;
+    margin-left: 0;
+
+    font-size: clamp(1.7rem, 3vw, 3.35rem);
+    font-weight: 650;
+    line-height: 1.14;
+    letter-spacing: -0.018em;
+    text-align: left !important;
+    opacity: 0.82;
+}
+
+[dir="rtl"] .lyricPage .lyricsLine.ak-plain-line.ak-background-vocal,
+.lyricPage .lyricsLine.ak-plain-line.ak-background-vocal[dir="rtl"] {
+    margin-left: auto;
+    margin-right: 0;
+    text-align: right !important;
+}
+
 .lyricPage .lyricsLine.ak-enhanced-line.ak-current,
 .lyricPage .lyricsLine.ak-enhanced-line.ak-motion-handoff {
     will-change: opacity, filter, transform;
@@ -1009,6 +1035,14 @@
         letter-spacing: -0.026em;
         line-height: 1.18;
         padding-bottom: 0.22em;
+    }
+
+    .lyricPage .lyricsLine.ak-plain-line.ak-background-vocal {
+        max-width: calc(100vw - 3rem);
+        margin-left: 0;
+        margin-right: auto;
+        font-size: clamp(1.5rem, 6.25vw, 2.6rem);
+        line-height: 1.14;
     }
 
     .lyricPage .ak-instrumental-gap-line {

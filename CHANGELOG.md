@@ -13,6 +13,8 @@ All notable public changes are documented here. The project follows Semantic Ver
 - Plain unsynchronised lyrics now stay in Jellyfin's native presentation instead of entering karaoke timing state.
 - ELRC word sweep and Classic Bloom tolerate malformed timing data without producing invalid visual state.
 - Background vocals align with their attached lead line's rendered left edge and use closest before/after lead attachment.
+- Background-vocal transport markers are now stripped on plain/untimed lyric pages too, including imported `[ak:bg]\(` lines, instead of leaking into visible lyrics.
+- Restored the narrow whole-line parenthetical fallback so short `(response)` / `（response）` lyric lines are recognized as backing vocals when a provider loses the x-bg role.
 
 ### Changed
 

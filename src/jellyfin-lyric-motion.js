@@ -4243,6 +4243,17 @@
         if (rawText.indexOf(BACKGROUND_VOCAL_TOKEN) === 0) {
             markerLength = BACKGROUND_VOCAL_TOKEN.length;
             roleSource = 'ascii-marker';
+
+            /* Some lyric import/export paths escape an opening parenthesis as
+             * `\(` even though the backslash is transport syntax, not sung
+             * text. Treat that one leading escape as part of the role prefix so
+             * both display text and Jellyfin cue positions remain aligned. */
+            if (
+                rawText.slice(markerLength, markerLength + 2) === '\\('
+                || rawText.slice(markerLength, markerLength + 2) === '\\（'
+            ) {
+                markerLength += 1;
+            }
         } else if (
             rawText.indexOf(
                 LEGACY_BACKGROUND_VOCAL_SENTINEL
@@ -4251,13 +4262,36 @@
             markerLength =
                 LEGACY_BACKGROUND_VOCAL_SENTINEL.length;
             roleSource = 'legacy-marker';
+        } else {
+            const trimmed = rawText.trim();
+
+            /* Recovery path for providers/libraries that preserve the lyric but
+             * lose its x-bg role. Keep this deliberately narrow so ordinary
+             * parenthetical punctuation inside a lead line is not reclassified:
+             * only a complete, short parenthetical response becomes backing
+             * vocal content. This restores the behavior used before 3.2.x. */
+            const firstCharacter = trimmed.charAt(0);
+            const lastCharacter = trimmed.charAt(trimmed.length - 1);
+            const completeParenthetical =
+                (firstCharacter === '(' && lastCharacter === ')')
+                || (firstCharacter === '（' && lastCharacter === '）')
+                || (trimmed.indexOf('\\(') === 0 && lastCharacter === ')')
+                || (trimmed.indexOf('\\（') === 0 && lastCharacter === '）');
+
+            if (
+                trimmed.length >= 3
+                && trimmed.length <= 64
+                && completeParenthetical
+            ) {
+                roleSource = 'parenthetical-fallback';
+            }
         }
 
         const isBackgroundVocal = !!roleSource;
 
         return {
             rawText,
-            text: isBackgroundVocal
+            text: markerLength > 0
                 ? rawText.slice(markerLength)
                 : rawText,
             positionOffset: markerLength,
@@ -7883,13 +7917,19 @@
 
     function restorePlainLyricsDom(lines, lyrics, container) {
         removeInstrumentalGapRows(container);
+        let plainBackgroundVocalCount = 0;
 
         lines.forEach((line, index) => {
             if (!line || !line.classList) return;
 
-            const plainText = lyrics[index]
-                ? lyricTextProfile(lyrics[index]).text
-                : String(line.textContent || '');
+            const textProfile = lyrics[index]
+                ? lyricTextProfile(lyrics[index])
+                : {
+                    text: String(line.textContent || ''),
+                    isBackgroundVocal: false,
+                    backgroundVocalRoleSource: null
+                };
+            const plainText = textProfile.text;
 
             const wasEnhanced =
                 line.classList.contains('ak-enhanced-line')
@@ -7902,6 +7942,10 @@
             line.classList.add(
                 'ak-plain-line',
                 `ak-script-${detectScriptProfile(plainText)}`
+            );
+            line.classList.toggle(
+                'ak-background-vocal',
+                textProfile.isBackgroundVocal
             );
             line.setAttribute(
                 'dir',
@@ -7920,23 +7964,39 @@
                 if (line.dataset) delete line.dataset[key];
             });
 
+            if (textProfile.isBackgroundVocal) {
+                plainBackgroundVocalCount += 1;
+                if (line.dataset) {
+                    line.dataset.akVocalRole = 'background';
+                    if (textProfile.backgroundVocalRoleSource) {
+                        line.dataset.akVocalRoleSource =
+                            textProfile.backgroundVocalRoleSource;
+                    }
+                }
+            }
+
             line.style.removeProperty('visibility');
             line.style.removeProperty('--ak-bg-anchor-offset');
             line.removeAttribute('aria-hidden');
 
-            if (!wasEnhanced || !lyrics[index]) return;
+            if (!lyrics[index]) return;
 
-            /* A same-text song transition can reuse our old enhanced node.
-             * Restore a single native text node rather than leaving stale word
-             * spans and their sweep/glow styles inside Jellyfin's plain view. */
+            const currentText = String(line.textContent || '');
+            if (!wasEnhanced && currentText === plainText) return;
+
+            /* Plain lyrics can arrive with LyricMotion's [ak:bg] transport
+             * token still present in Jellyfin's native text node. Always repair
+             * the node when its display text differs, not only when this line
+             * used to be enhanced. This also clears stale owned word spans after
+             * same-text song transitions. */
             line.removeAttribute('aria-label');
             replaceChildrenCompat(line);
             line.appendChild(
-                document.createTextNode(
-                    lyricTextProfile(lyrics[index]).text
-                )
+                document.createTextNode(plainText)
             );
         });
+
+        state.backgroundVocalCount = plainBackgroundVocalCount;
 
         container.classList.remove('ak-karaoke-container');
         container.classList.add('ak-plain-lyrics-container');
@@ -8021,13 +8081,17 @@
 
         return lines.length === lyrics.length
             && lines.every((line, index) => {
-                const text = lyricTextProfile(lyrics[index]).text;
+                const profile = lyricTextProfile(lyrics[index]);
+                const text = profile.text;
                 return line.classList.contains('ak-plain-line')
                     && line.classList.contains(
                         `ak-script-${detectScriptProfile(text)}`
                     )
+                    && line.classList.contains('ak-background-vocal')
+                        === profile.isBackgroundVocal
                     && line.getAttribute('dir')
-                        === firstStrongDirection(text);
+                        === firstStrongDirection(text)
+                    && String(line.textContent || '') === text;
             });
     }
 
