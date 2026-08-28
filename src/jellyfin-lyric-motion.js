@@ -4240,27 +4240,26 @@
         let markerLength = 0;
         let roleSource = null;
 
-        if (rawText.indexOf(BACKGROUND_VOCAL_TOKEN) === 0) {
-            markerLength = BACKGROUND_VOCAL_TOKEN.length;
-            roleSource = 'ascii-marker';
+        /* Providers can prepend whitespace/BOM characters to a lyric line,
+         * and some ELRC/LRC transport paths escape the opening parenthesis as
+         * `\(`. Match the complete transport prefix instead of requiring the
+         * token to be byte zero. Nothing in this prefix is sung text, so cue
+         * positions are shifted by the same number of removed characters. */
+        const asciiMarkerMatch = rawText.match(
+            /^\s*\[ak:bg\](?:\\(?=[(（]))?/
+        );
+        const legacyMarkerMatch = rawText.match(
+            new RegExp(
+                '^\\s*'
+                + LEGACY_BACKGROUND_VOCAL_SENTINEL
+            )
+        );
 
-            /* Some lyric import/export paths escape an opening parenthesis as
-             * `\(` even though the backslash is transport syntax, not sung
-             * text. Treat that one leading escape as part of the role prefix so
-             * both display text and Jellyfin cue positions remain aligned. */
-            if (
-                rawText.slice(markerLength, markerLength + 2) === '\\('
-                || rawText.slice(markerLength, markerLength + 2) === '\\（'
-            ) {
-                markerLength += 1;
-            }
-        } else if (
-            rawText.indexOf(
-                LEGACY_BACKGROUND_VOCAL_SENTINEL
-            ) === 0
-        ) {
-            markerLength =
-                LEGACY_BACKGROUND_VOCAL_SENTINEL.length;
+        if (asciiMarkerMatch) {
+            markerLength = asciiMarkerMatch[0].length;
+            roleSource = 'ascii-marker';
+        } else if (legacyMarkerMatch) {
+            markerLength = legacyMarkerMatch[0].length;
             roleSource = 'legacy-marker';
         } else {
             const trimmed = rawText.trim();

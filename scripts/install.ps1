@@ -62,6 +62,8 @@ if ($LyricG2PVersion -notmatch '^[A-Za-z0-9._+\-]+$') { throw "LYRICG2P_VERSION 
 $JsSource = Join-Path $Root "src\jellyfin-lyric-motion.js"
 $CssSource = Join-Path $Root "src\jellyfin-lyric-motion.css"
 $RomanizerSource = Join-Path $Root "src\jellyfin-lyric-romanizer.js"
+$JsCacheKey = (Get-FileHash -Algorithm SHA256 -LiteralPath $JsSource).Hash.Substring(0, 12).ToLowerInvariant()
+$CssCacheKey = (Get-FileHash -Algorithm SHA256 -LiteralPath $CssSource).Hash.Substring(0, 12).ToLowerInvariant()
 
 function Test-WebDir([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
@@ -197,7 +199,7 @@ if (-not $runtime.Success) {
     throw "runtime.bundle.js was not found. Jellyfin Web was not modified."
 }
 
-$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '&g2p=' + $LyricG2PVersion + '"></script>'
+$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '&build=' + $CssCacheKey + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '&build=' + $JsCacheKey + '&g2p=' + $LyricG2PVersion + '"></script>'
 $content = $content.Insert($runtime.Index, $inject)
 
 $BackupName = "index.html.before-jellyfin-lyric-motion-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
