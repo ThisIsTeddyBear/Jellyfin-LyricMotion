@@ -12,7 +12,7 @@ remove swipe/glow/motion features. See `MULTILINGUAL-RENDERING.md`.
 
 ## Romanization on desktop/mobile
 
-Romanization is an optional display layer over the same captured Jellyfin lyric payload. The local romanizer asset is loaded only after a native-script song is detected. Switching modes rebuilds cue character positions but never changes media/cue time. See `ROMANIZATION.md`.
+Romanization is an optional Google-backed display layer over the same captured Jellyfin lyric payload. Requests begin only after a native-script song is detected and the user enables the view. Switching modes rebuilds cue character positions but never changes media/cue time. See `GOOGLE-ROMANIZATION.md`.
 
 ## TV-class clients
 

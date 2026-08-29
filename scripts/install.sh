@@ -13,20 +13,12 @@ ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 VERSION_FILE="$ROOT_DIR/VERSION"
 [ -f "$VERSION_FILE" ] || { echo "Missing $VERSION_FILE"; exit 1; }
 VERSION=$(tr -d '\r\n' < "$VERSION_FILE")
-LYRICG2P_VERSION_FILE="$ROOT_DIR/LYRICG2P_VERSION"
-[ -f "$LYRICG2P_VERSION_FILE" ] || { echo "Missing $LYRICG2P_VERSION_FILE"; exit 1; }
-LYRICG2P_VERSION=$(tr -d '\r\n' < "$LYRICG2P_VERSION_FILE")
 [ -n "$VERSION" ] || { echo "VERSION is empty"; exit 1; }
 case "$VERSION" in
   *[!A-Za-z0-9._+-]*) echo "VERSION contains unsafe characters"; exit 1 ;;
 esac
-[ -n "$LYRICG2P_VERSION" ] || { echo "LYRICG2P_VERSION is empty"; exit 1; }
-case "$LYRICG2P_VERSION" in
-  *[!A-Za-z0-9._+-]*) echo "LYRICG2P_VERSION contains unsafe characters"; exit 1 ;;
-esac
 JS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.js"
 CSS_SOURCE="$ROOT_DIR/src/jellyfin-lyric-motion.css"
-ROMANIZER_SOURCE="$ROOT_DIR/src/jellyfin-lyric-romanizer.js"
 WEB_DIR=""
 WEB_DIR_EXPLICIT=0
 
@@ -90,20 +82,8 @@ PYTHON_BIN=${LYRICMOTION_PYTHON:-python3}
   echo "Missing $CSS_SOURCE"
   exit 1
 }
-[ -f "$ROMANIZER_SOURCE" ] || {
-  echo "Missing $ROMANIZER_SOURCE"
-  exit 1
-}
 grep -Fq "const VERSION = '$VERSION';" "$JS_SOURCE" || {
   echo "Runtime JavaScript VERSION does not match VERSION; refusing to install a mismatched release."
-  exit 1
-}
-grep -Fq "const VERSION = '$LYRICG2P_VERSION';" "$ROMANIZER_SOURCE" || {
-  echo "Romanizer JavaScript VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
-  exit 1
-}
-grep -Fq "const LYRICG2P_VERSION = '$LYRICG2P_VERSION';" "$JS_SOURCE" || {
-  echo "Runtime LYRICG2P_VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
   exit 1
 }
 
@@ -170,18 +150,15 @@ stage_existing_backup() {
 
 JS_DEST="$WEB_DIR/jellyfin-lyric-motion.js"
 CSS_DEST="$WEB_DIR/jellyfin-lyric-motion.css"
-ROMANIZER_DEST="$WEB_DIR/jellyfin-lyric-romanizer.js"
 
 # Stage the complete replacement set, including the transformed index, before
 # touching any live asset. A malformed Jellyfin index therefore fails before a
 # partial LyricMotion upgrade can become visible.
 JS_TEMP=''
 CSS_TEMP=''
-ROMANIZER_TEMP=''
 INDEX_TEMP=''
 JS_ROLLBACK=''
 CSS_ROLLBACK=''
-ROMANIZER_ROLLBACK=''
 COMMITTING=0
 COMMITTED=0
 
@@ -200,11 +177,9 @@ restore_live_asset() {
 cleanup_transaction_files() {
   [ -z "$JS_TEMP" ] || rm -f "$JS_TEMP"
   [ -z "$CSS_TEMP" ] || rm -f "$CSS_TEMP"
-  [ -z "$ROMANIZER_TEMP" ] || rm -f "$ROMANIZER_TEMP"
   [ -z "$INDEX_TEMP" ] || rm -f "$INDEX_TEMP"
   [ -z "$JS_ROLLBACK" ] || rm -f "$JS_ROLLBACK"
   [ -z "$CSS_ROLLBACK" ] || rm -f "$CSS_ROLLBACK"
-  [ -z "$ROMANIZER_ROLLBACK" ] || rm -f "$ROMANIZER_ROLLBACK"
 }
 
 finish_install_transaction() {
@@ -214,7 +189,6 @@ finish_install_transaction() {
     echo "Installation commit failed; restoring the previous LyricMotion assets." >&2
     restore_live_asset "$JS_DEST" "$JS_ROLLBACK" || true
     restore_live_asset "$CSS_DEST" "$CSS_ROLLBACK" || true
-    restore_live_asset "$ROMANIZER_DEST" "$ROMANIZER_ROLLBACK" || true
     cp -p "$BACKUP" "$INDEX" 2>/dev/null || cp "$BACKUP" "$INDEX" || true
   fi
   cleanup_transaction_files
@@ -227,7 +201,6 @@ trap 'exit 143' TERM
 
 JS_TEMP=$(stage_copy "$JS_SOURCE" "$JS_DEST")
 CSS_TEMP=$(stage_copy "$CSS_SOURCE" "$CSS_DEST")
-ROMANIZER_TEMP=$(stage_copy "$ROMANIZER_SOURCE" "$ROMANIZER_DEST")
 # index.html is a service-owned file and can legitimately be less permissive
 # than the JS/CSS assets.  Use the preservation path for its staged copy so
 # the atomic rename does not turn a 0640 (or similarly restricted) index into
@@ -238,15 +211,13 @@ INDEX_TEMP=$(stage_existing_backup "$INDEX")
 # rollback paths mean that asset did not exist and should be removed on rollback.
 JS_ROLLBACK=$(stage_existing_backup "$JS_DEST")
 CSS_ROLLBACK=$(stage_existing_backup "$CSS_DEST")
-ROMANIZER_ROLLBACK=$(stage_existing_backup "$ROMANIZER_DEST")
 
-"$PYTHON_BIN" - "$INDEX_TEMP" "$VERSION" "$LYRICG2P_VERSION" <<'PY'
+"$PYTHON_BIN" - "$INDEX_TEMP" "$VERSION" <<'PY'
 from pathlib import Path
 import os, re, sys
 
 path = Path(sys.argv[1])
 version = sys.argv[2]
-lyricg2p_version = sys.argv[3]
 # ``Path.read_text`` enables universal-newline conversion.  Preserve the
 # Jellyfin index's existing CRLF/LF representation while changing only tags.
 with path.open("r", encoding="utf-8", newline="") as handle:
@@ -275,7 +246,7 @@ if not match:
 
 inject = (
     f'<link rel="stylesheet" href="jellyfin-lyric-motion.css?v={version}">'
-    f'<script defer="defer" src="jellyfin-lyric-motion.js?v={version}&g2p={lyricg2p_version}"></script>'
+    f'<script defer="defer" src="jellyfin-lyric-motion.js?v={version}"></script>'
 )
 content = content[:match.start()] + inject + content[match.start():]
 
@@ -292,8 +263,6 @@ mv -f "$JS_TEMP" "$JS_DEST"
 JS_TEMP=''
 mv -f "$CSS_TEMP" "$CSS_DEST"
 CSS_TEMP=''
-mv -f "$ROMANIZER_TEMP" "$ROMANIZER_DEST"
-ROMANIZER_TEMP=''
 mv -f "$INDEX_TEMP" "$INDEX"
 INDEX_TEMP=''
 COMMITTED=1
@@ -301,10 +270,10 @@ COMMITTING=0
 cleanup_transaction_files
 trap - EXIT HUP INT TERM
 
-rm -f "$WEB_DIR/apple-karaoke.js" "$WEB_DIR/apple-karaoke.css"
+rm -f "$WEB_DIR/apple-karaoke.js" "$WEB_DIR/apple-karaoke.css" "$WEB_DIR/jellyfin-lyric-romanizer.js"
 
 echo
-echo "Jellyfin LyricMotion v$VERSION / LyricG2P $LYRICG2P_VERSION installed."
+echo "Jellyfin LyricMotion v$VERSION / Google Romanization installed."
 echo "Web directory: $WEB_DIR"
 echo "Backup: $BACKUP"
 echo "Hard-refresh Jellyfin Web or use a private browser window."

@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.2.7] - 2026-08-30
+
+### Changed
+
+- Removed the complete in-house LyricG2P Romanizer, its fallback tables, pronunciation lexicons, diagnostics, tests, versioning, package asset and documentation.
+- Google Translate `dt=rm` is now the sole Romanization path for every native-script lyric, including Indian languages. The existing control remains independent of network availability; failed requests retain native text.
+- Installers now deploy only the main JavaScript and CSS assets and remove the legacy `jellyfin-lyric-romanizer.js` file.
+
+## [3.2.6] - 2026-08-29
+
+### Added
+
+- LyricG2P `6.9.0` adds an on-demand Google Translate `dt=rm` Romanization path for non-Indic native scripts. Japanese, Korean, Chinese, Thai and other non-Indic scripts now receive a pronunciation-aware Roman reading instead of the local broad Unicode fallback when the user selects Romanized view.
+- The request path has a 1,500-character per-line guard, six-second abort timeout, three bounded retries with exponential backoff, three-request concurrency cap, response validation and per-song LRU cache.
+- Mocked regressions cover Japanese/Korean/Chinese/Thai eligibility, every supported Indic exclusion, malformed responses, HTTP failure, retry recovery, oversized-line safety and order preservation.
+
+### Changed
+
+- Network Romanization begins only after the user activates Romanized view; it cannot gate, hide or disable the Romanization control. Eligible non-Indic lines bypass the local engine completely. A failed or blocked Google response leaves their native text intact.
+- LyricG2P remains authoritative for Indian scripts and Urdu/Shahmukhi. Mixed and Indic lines are never submitted to the Google path.
+
 ## LyricG2P 6.8.1
 
 - Correct readable Hindi lyric spellings for high-frequency function words: `तू → tu` and `भी → bhi`. The rule is lexical and does not globally collapse the `ू`/`ी` vowel signs.

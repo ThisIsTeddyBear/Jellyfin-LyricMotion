@@ -16,15 +16,9 @@ From the repository root:
 ```bash
 git status --short
 cat VERSION
-cat LYRICG2P_VERSION
 ```
 
-The version files must match the release being prepared:
-
-```text
-VERSION          = release application version
-LYRICG2P_VERSION = bundled Romanizer version
-```
+`VERSION` must match the release being prepared.
 
 ## Build the same platform assets locally
 
@@ -57,7 +51,7 @@ If the tag does not exist:
 
 ```bash
 git tag -a "v$(cat VERSION)" \
-  -m "Jellyfin LyricMotion $(cat VERSION) / LyricG2P $(cat LYRICG2P_VERSION)"
+  -m "Jellyfin LyricMotion $(cat VERSION)"
 git push origin "v$(cat VERSION)"
 ```
 

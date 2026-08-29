@@ -8,8 +8,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.2.5';
-    const LYRICG2P_VERSION = '6.8.1';
+    const VERSION = '3.2.7';
 
     /*
      * A duplicated script tag used to create a second DOM observer, route-hook
@@ -971,14 +970,16 @@
 
     const PERFORMANCE_STORAGE_KEY = 'appleKaraokePerformanceMode';
 
-    // PC/mobile-only romanization. The heavy local romanizer is lazy-loaded
-    // only for songs that actually contain non-Latin/native-script lyrics.
+    // PC/mobile-only Google Romanization. Requests begin only after the user
+    // selects Romanized view for a native-script song.
     const LEGACY_ROMANIZATION_STORAGE_KEY = 'appleKaraokeRomanizationMode';
     const SONG_PREFERENCES_STORAGE_KEY = 'appleKaraokeSongPreferencesV2';
-    const ROMANIZER_ASSET = 'jellyfin-lyric-romanizer.js';
-    const ROMANIZER_ASSET_VERSION = LYRICG2P_VERSION;
-    const ROMANIZER_LOAD_TIMEOUT_MS = 8000;
-    const ROMANIZATION_CACHE_MAX_ENTRIES = 1800;
+    const GOOGLE_ROMANIZATION_CACHE_MAX_ENTRIES = 1800;
+    const GOOGLE_ROMANIZATION_MAX_TEXT_CHARS = 1500;
+    const GOOGLE_ROMANIZATION_MAX_RETRIES = 3;
+    const GOOGLE_ROMANIZATION_RETRY_DELAY_MS = 1000;
+    const GOOGLE_ROMANIZATION_TIMEOUT_MS = 6000;
+    const GOOGLE_ROMANIZATION_CONCURRENCY = 3;
 
     // Per-timeline display synchronization. Positive values delay the lyrics;
     // negative values make lyrics appear earlier. The permanent UI is one
@@ -1140,7 +1141,12 @@
         romanizationLoadError: '',
         romanizationSource: 'none',
         romanizationToggle: null,
-        romanizationCache: new Map(),
+        googleRomanizationCache: new Map(),
+        googleRomanizationAttempted: new Set(),
+        googleRomanizationRequest: null,
+        googleRomanizationState: 'idle',
+        googleRomanizationError: '',
+        googleRomanizationLineCount: 0,
         romanizationLineCount: 0,
         romanizationToggleCount: 0,
 
@@ -3725,9 +3731,16 @@
         state.backgroundVocalCount = 0;
         state.romanizationAvailable = false;
         state.romanizationCandidate = false;
-        if (state.romanizationCache && typeof state.romanizationCache.clear === 'function') {
-            state.romanizationCache.clear();
+        if (state.googleRomanizationCache && typeof state.googleRomanizationCache.clear === 'function') {
+            state.googleRomanizationCache.clear();
         }
+        if (state.googleRomanizationAttempted && typeof state.googleRomanizationAttempted.clear === 'function') {
+            state.googleRomanizationAttempted.clear();
+        }
+        state.googleRomanizationRequest = null;
+        state.googleRomanizationState = 'idle';
+        state.googleRomanizationError = '';
+        state.googleRomanizationLineCount = 0;
         state.romanizationLineCount = 0;
         state.songPreferenceKey = '';
         state.timingOffsetSeconds = 0;
@@ -4300,8 +4313,6 @@
     }
 
 
-    let romanizerLoadPromise = null;
-
     function finiteNumber(value, fallback = 0) {
         const numeric = Number(value);
         return Number.isFinite(numeric) ? numeric : fallback;
@@ -4509,137 +4520,167 @@
         });
     }
 
-    function romanizerAssetUrl() {
-        let source = '';
-        try {
-            const scripts = document.getElementsByTagName('script');
-            for (let index = scripts.length - 1; index >= 0; index -= 1) {
-                const candidate = String(scripts[index].src || '');
-                if (candidate.indexOf('jellyfin-lyric-motion.js') >= 0) {
-                    source = candidate;
-                    break;
-                }
-            }
-        } catch {
-            source = '';
-        }
-
-        if (source) {
-            const clean = source.split('#', 1)[0].split('?', 1)[0];
-            return clean.replace(/jellyfin-lyric-motion\.js$/i, ROMANIZER_ASSET)
-                + `?v=${encodeURIComponent(ROMANIZER_ASSET_VERSION)}`;
-        }
-
-        return `${ROMANIZER_ASSET}?v=${encodeURIComponent(ROMANIZER_ASSET_VERSION)}`;
+    function googleRomanizationUrl(text) {
+        return 'https://translate.googleapis.com/translate_a/single'
+            + `?client=gtx&sl=auto&tl=en&dt=rm&q=${encodeURIComponent(text)}`;
     }
 
-    function getRomanizer() {
-        const candidate = window.JellyfinLyricRomanizer;
-        return candidate
-            && String(candidate.version || '') === LYRICG2P_VERSION
-            && typeof candidate.romanize === 'function'
-            && typeof candidate.canRomanize === 'function'
-            ? candidate
+    function waitForGoogleRetry(milliseconds) {
+        return new Promise(resolve => setTimeout(resolve, milliseconds));
+    }
+
+    async function googleFetchWithTimeout(url) {
+        if (typeof fetch !== 'function') throw new Error('Fetch API unavailable');
+        const controller = typeof AbortController === 'function'
+            ? new AbortController()
             : null;
-    }
-
-    function ensureRomanizerLoaded() {
-        const existing = getRomanizer();
-        if (existing) {
-            state.romanizationLoadState = 'ready';
-            state.romanizationSource = existing.strategy || 'local';
-            return Promise.resolve(existing);
-        }
-
-        if (romanizerLoadPromise) return romanizerLoadPromise;
-
-        state.romanizationLoadState = 'loading';
-        state.romanizationLoadError = '';
-
-        romanizerLoadPromise = new Promise((resolve, reject) => {
-            const script = document.createElement('script');
-            script.async = true;
-            script.src = romanizerAssetUrl();
-            script.dataset.akRomanizerLoader = '1';
-
-            let settled = false;
-            const cleanup = () => {
-                if (script.parentNode) script.parentNode.removeChild(script);
-            };
-            const finish = (error, loaded = null) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timeoutId);
-                cleanup();
-                if (error) reject(error);
-                else resolve(loaded);
-            };
-            const timeoutId = setTimeout(() => {
-                finish(new Error('Romanizer asset load timed out'));
-            }, ROMANIZER_LOAD_TIMEOUT_MS);
-
-            script.onload = () => {
-                const loaded = getRomanizer();
-                if (!loaded) {
-                    finish(new Error('Romanizer asset loaded without API'));
-                    return;
-                }
-                finish(null, loaded);
-            };
-            script.onerror = () => finish(new Error('Romanizer asset failed to load'));
-
-            (document.head || document.documentElement).appendChild(script);
-        }).then(romanizer => {
-            state.romanizationLoadState = 'ready';
-            state.romanizationLoadError = '';
-            state.romanizationSource = romanizer.strategy || 'local';
-            return romanizer;
-        }).catch(error => {
-            state.romanizationLoadState = 'error';
-            state.romanizationLoadError = String(error && error.message || error);
-            romanizerLoadPromise = null;
-            throw error;
-        });
-
-        return romanizerLoadPromise;
-    }
-
-    function romanizeCached(text) {
-        const value = String(text == null ? '' : text);
-        if (!value) return value;
-
-        if (state.romanizationCache.has(value)) {
-            const cached = state.romanizationCache.get(value);
-            /* Refresh recency on hits so the bounded cache behaves as LRU
-             * instead of evicting frequently reused chorus lines by age. */
-            state.romanizationCache.delete(value);
-            state.romanizationCache.set(value, cached);
-            return cached;
-        }
-
-        const romanizer = getRomanizer();
-        if (!romanizer) return value;
-
-        let result = value;
+        const timeout = controller
+            ? setTimeout(() => controller.abort(), GOOGLE_ROMANIZATION_TIMEOUT_MS)
+            : null;
         try {
-            const converted = romanizer.romanize(value);
-            if (typeof converted === 'string' && converted.length) {
-                result = converted;
+            const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+            if (!response || !response.ok) {
+                throw new Error(`Google romanization HTTP ${response && response.status || 'error'}`);
             }
-        } catch {
-            result = value;
+            return response;
+        } finally {
+            if (timeout) clearTimeout(timeout);
         }
+    }
 
-        if (state.romanizationCache.has(value)) {
-            state.romanizationCache.delete(value);
+    function parseGoogleRomanization(payload) {
+        const segments = Array.isArray(payload) && Array.isArray(payload[0])
+            ? payload[0]
+            : [];
+        return segments
+            .map(segment => Array.isArray(segment) ? segment[3] : '')
+            .filter(value => typeof value === 'string' && value.trim())
+            .join('');
+    }
+
+    async function googleRomanizeLine(text) {
+        const source = String(text || '');
+        for (let attempt = 0; attempt < GOOGLE_ROMANIZATION_MAX_RETRIES; attempt += 1) {
+            try {
+                const response = await googleFetchWithTimeout(googleRomanizationUrl(source));
+                const reading = parseGoogleRomanization(await response.json());
+                if (reading && !hasNativeScriptCandidate(reading)) return reading;
+                throw new Error('Google romanization response had no Latin reading');
+            } catch (error) {
+                if (attempt + 1 >= GOOGLE_ROMANIZATION_MAX_RETRIES) throw error;
+                await waitForGoogleRetry(GOOGLE_ROMANIZATION_RETRY_DELAY_MS * (2 ** attempt));
+            }
         }
-        state.romanizationCache.set(value, result);
-        while (state.romanizationCache.size > ROMANIZATION_CACHE_MAX_ENTRIES) {
-            const oldest = state.romanizationCache.keys().next();
+        return source;
+    }
+
+    function cacheGoogleRomanization(source, romanized) {
+        const nativeText = String(source == null ? '' : source);
+        const remoteText = String(romanized == null ? '' : romanized).trim();
+        if (
+            !nativeText
+            || !remoteText
+            || remoteText === nativeText
+            || hasNativeScriptCandidate(remoteText)
+        ) return false;
+
+        if (state.googleRomanizationCache.has(nativeText)) {
+            state.googleRomanizationCache.delete(nativeText);
+        }
+        state.googleRomanizationCache.set(nativeText, remoteText);
+        while (state.googleRomanizationCache.size > GOOGLE_ROMANIZATION_CACHE_MAX_ENTRIES) {
+            const oldest = state.googleRomanizationCache.keys().next();
             if (oldest.done) break;
-            state.romanizationCache.delete(oldest.value);
+            state.googleRomanizationCache.delete(oldest.value);
         }
-        return result;
+        return true;
+    }
+
+    function requestGoogleRomanizationForLyrics() {
+        const lyrics = state.lyrics;
+        if (
+            !lyrics
+            || state.googleRomanizationRequest
+        ) return;
+
+        const sourceLines = [];
+        const seen = new Set();
+        lyrics.forEach(lyric => {
+            const text = lyricTextProfile(lyric).text;
+            if (
+                text
+                && !seen.has(text)
+                && !state.googleRomanizationAttempted.has(text)
+                && hasNativeScriptCandidate(text)
+                && text.length <= GOOGLE_ROMANIZATION_MAX_TEXT_CHARS
+            ) {
+                seen.add(text);
+                state.googleRomanizationAttempted.add(text);
+                sourceLines.push(text);
+            }
+        });
+        if (!sourceLines.length) return;
+
+        const generation = state.generation;
+        state.googleRomanizationState = 'loading';
+        state.googleRomanizationError = '';
+        const results = new Array(sourceLines.length);
+        let nextLine = 0;
+        const worker = async () => {
+            while (nextLine < sourceLines.length) {
+                const index = nextLine;
+                nextLine += 1;
+                try {
+                    results[index] = await googleRomanizeLine(sourceLines[index]);
+                } catch {
+                    results[index] = sourceLines[index];
+                }
+            }
+        };
+        state.googleRomanizationRequest = Promise.all(
+            Array.from(
+                { length: Math.min(GOOGLE_ROMANIZATION_CONCURRENCY, sourceLines.length) },
+                worker
+            )
+        ).then(() => results)
+            .then(results => {
+                if (generation !== state.generation || lyrics !== state.lyrics) return;
+                let applied = 0;
+                sourceLines.forEach((source, index) => {
+                    if (cacheGoogleRomanization(source, results && results[index])) applied += 1;
+                });
+                state.googleRomanizationLineCount += applied;
+                state.googleRomanizationState = applied ? 'ready' : 'fallback-native';
+                if (applied) state.romanizationSource = 'google-dt-rm';
+                if (applied && state.romanizationMode === 'romanized') {
+                    /* Results arrive after the native view has rendered. A
+                     * second decoration updates text in place without ever
+                     * delaying or hiding the toggle. */
+                    redecorateForRomanization();
+                }
+            })
+            .catch(error => {
+                if (generation !== state.generation || lyrics !== state.lyrics) return;
+                state.googleRomanizationState = 'fallback-native';
+                state.googleRomanizationError = String(error && error.message || error);
+                warn('Google romanization unavailable; leaving native text unchanged:', error && error.message || error);
+            })
+            .finally(() => {
+                if (generation === state.generation && lyrics === state.lyrics) {
+                    state.googleRomanizationRequest = null;
+                }
+            });
+    }
+
+    function proportionalRomanizedBoundary(sourceText, sourceIndex, convertedLine, bias) {
+        const sourceLength = Math.max(1, String(sourceText || '').length);
+        const targetLength = String(convertedLine || '').length;
+        const ratio = Math.max(0, Math.min(sourceLength, Number(sourceIndex) || 0))
+            / sourceLength;
+        const mapped = bias === 'start'
+            ? Math.floor(ratio * targetLength)
+            : Math.ceil(ratio * targetLength);
+        return Math.max(0, Math.min(targetLength, mapped));
     }
 
     function cloneCueWithPositions(cue, position, endPosition) {
@@ -4667,6 +4708,8 @@
         if (index <= 0) return 0;
         if (index >= sourceText.length) return convertedLine.length;
 
+        return proportionalRomanizedBoundary(sourceText, index, convertedLine, 'start');
+
         /*
          * Bias inserted transliteration separators toward the cue that begins
          * after the source boundary. For example 你好 -> "ni hao": the second
@@ -4675,23 +4718,6 @@
          * Indic schwa/nasal/conjunct rules instead of transliterating each cue
          * as an isolated fragment.
          */
-        const romanizer = getRomanizer();
-        if (romanizer && typeof romanizer.mapBoundary === 'function') {
-            try {
-                const mapped = Number(romanizer.mapBoundary(sourceText, index, 'start'));
-                if (Number.isFinite(mapped)) {
-                    return Math.max(0, Math.min(convertedLine.length, mapped));
-                }
-            } catch {
-                // Fall through to the generic prefix/suffix boundary strategy.
-            }
-        }
-
-        const suffix = romanizeCached(sourceText.slice(index));
-        return Math.max(0, Math.min(
-            convertedLine.length,
-            convertedLine.length - suffix.length
-        ));
     }
 
     function romanizedBoundaryEnd(sourceText, sourceIndex, convertedLine) {
@@ -4699,42 +4725,29 @@
         if (index <= 0) return 0;
         if (index >= sourceText.length) return convertedLine.length;
 
-        /* Keep generated separators after the cue that just ended. */
-        const romanizer = getRomanizer();
-        if (romanizer && typeof romanizer.mapBoundary === 'function') {
-            try {
-                const mapped = Number(romanizer.mapBoundary(sourceText, index, 'end'));
-                if (Number.isFinite(mapped)) {
-                    return Math.max(0, Math.min(convertedLine.length, mapped));
-                }
-            } catch {
-                // Fall through to the generic prefix boundary strategy.
-            }
-        }
+        return proportionalRomanizedBoundary(sourceText, index, convertedLine, 'end');
 
-        const prefix = romanizeCached(sourceText.slice(0, index));
-        return Math.max(0, Math.min(convertedLine.length, prefix.length));
+        /* Keep generated separators after the cue that just ended. */
     }
 
     function romanizedLyricView(lyric) {
         if (!lyric) return lyric;
 
-        const romanizer = getRomanizer();
         const profile = lyricTextProfile(lyric);
         const marker = profile.positionOffset > 0
             ? profile.rawText.slice(0, profile.positionOffset)
             : '';
         const sourceText = profile.text;
-        if (!romanizer || !romanizer.canRomanize(sourceText)) return lyric;
+        const convertedLine = state.googleRomanizationCache.get(sourceText);
+        if (!convertedLine) return lyric;
+        return romanizedLyricViewFromConvertedLine(
+            lyric, profile, marker, sourceText, convertedLine
+        );
+    }
 
-        /*
-         * Romanize the complete lyric line exactly once.  ELRC cues are source
-         * character ranges, so re-map their boundaries into the completed
-         * Latin line instead of transliterating cue fragments independently.
-         * That preserves conjunct, nasal, schwa and neighbouring-word context
-         * while leaving every cue timestamp untouched.
-         */
-        const convertedLine = romanizeCached(sourceText);
+    function romanizedLyricViewFromConvertedLine(
+        lyric, profile, marker, sourceText, convertedLine
+    ) {
         if (!convertedLine || convertedLine === sourceText) return lyric;
 
         const rawCues = lyricValue(lyric, 'Cues', 'cues');
@@ -6073,8 +6086,14 @@
             state.romanizationToggleCount += 1;
             persistCurrentSongPreference();
             redecorateForRomanization();
+            if (normalized === 'romanized') {
+                requestGoogleRomanizationForLyrics();
+            }
         } else {
             updateRomanizationToggleUi();
+            if (normalized === 'romanized') {
+                requestGoogleRomanizationForLyrics();
+            }
         }
 
         return {
@@ -6085,10 +6104,14 @@
 
     function prepareRomanizationForLyrics() {
         const lyrics = state.lyrics;
-        const generation = state.generation;
         const nativeCandidate = lyricsHaveNativeScript(lyrics);
 
-        state.romanizationCache.clear();
+        state.googleRomanizationCache.clear();
+        state.googleRomanizationAttempted.clear();
+        state.googleRomanizationRequest = null;
+        state.googleRomanizationState = 'idle';
+        state.googleRomanizationError = '';
+        state.googleRomanizationLineCount = 0;
         state.romanizationCandidate = nativeCandidate;
         state.romanizationAvailable = false;
         state.romanizationLineCount = 0;
@@ -6099,48 +6122,20 @@
                 state.romanizationMode = 'native';
                 persistCurrentSongPreference();
             }
-            state.romanizationLoadState = getRomanizer() ? 'ready' : 'idle';
+            state.romanizationLoadState = 'idle';
             state.romanizationSource = 'none';
             return;
         }
 
-        ensureRomanizerLoaded().then(romanizer => {
-            if (generation !== state.generation || lyrics !== state.lyrics) return;
-
-            const localAvailable = (lyrics || []).some(lyric => {
-                const profile = lyricTextProfile(lyric);
-                return romanizer.canRomanize(profile.text);
-            });
-            state.romanizationAvailable = localAvailable;
-            state.romanizationSource = localAvailable
-                ? (romanizer.strategy || 'local-offline')
-                : 'unsupported-script';
-
-            if (!localAvailable) {
-                if (state.romanizationMode === 'romanized') {
-                    state.romanizationMode = 'native';
-                    persistCurrentSongPreference();
-                }
-                removeRomanizationToggle();
-                return;
-            }
-
-            ensureRomanizationToggle();
-            if (state.romanizationMode === 'romanized') {
-                redecorateForRomanization();
-            }
-        }).catch(error => {
-            if (generation !== state.generation || lyrics !== state.lyrics) return;
-            state.romanizationLoadError = String(error && error.message || error);
-            state.romanizationAvailable = false;
-            state.romanizationSource = 'local-asset-unavailable';
-            if (state.romanizationMode === 'romanized') {
-                state.romanizationMode = 'native';
-                persistCurrentSongPreference();
-            }
-            warn('Romanization unavailable:', error && error.message || error);
-            removeRomanizationToggle();
-        });
+        state.romanizationLoadState = 'ready';
+        state.romanizationLoadError = '';
+        state.romanizationAvailable = true;
+        state.romanizationSource = 'google-dt-rm';
+        ensureRomanizationToggle();
+        if (state.romanizationMode === 'romanized') {
+            redecorateForRomanization();
+            requestGoogleRomanizationForLyrics();
+        }
     }
 
     loadSongPreferences();
@@ -12525,7 +12520,6 @@
 
     const publicApi = Object.freeze({
         version: VERSION,
-        lyricG2PVersion: LYRICG2P_VERSION,
         redecorate: queueDecoration,
         accents() {
             return PREMIUM_ACCENTS.map(accent => ({
@@ -12543,105 +12537,23 @@
         setPerformance: setPerformanceMode,
         setRomanization: setRomanizationMode,
         romanization() {
-            const romanizer = getRomanizer();
             return {
-                requiredRomanizerVersion: LYRICG2P_VERSION,
                 mode: state.romanizationMode,
                 available: state.romanizationAvailable,
                 candidate: state.romanizationCandidate,
                 loadState: state.romanizationLoadState,
                 loadError: state.romanizationLoadError,
                 source: state.romanizationSource,
-                romanizerVersion: romanizer ? romanizer.version : null,
-                strategy: romanizer ? romanizer.strategy : null,
                 transformedLines: state.romanizationLineCount,
                 toggleCount: state.romanizationToggleCount,
-                offlineOnly: true,
-                networkSources: false,
-                supportedLanguageFamilies: romanizer && romanizer.supportedLanguageFamilies
-                    ? romanizer.supportedLanguageFamilies.slice()
-                    : [],
-                detailedDiagnostics:
-                    !!(romanizer && typeof romanizer.romanizeDetailed === 'function'),
-                contextSegmentation:
-                    !!(romanizer && typeof romanizer.segmentText === 'function'),
-                candidateRanker:
-                    romanizer && romanizer.candidateRanker
-                        ? romanizer.candidateRanker
-                        : null,
-                romanizationStyle:
-                    romanizer && romanizer.romanizationStyle
-                        ? Object.assign({}, romanizer.romanizationStyle)
-                        : null,
-                confidenceSemantics:
-                    romanizer && romanizer.confidenceSemantics
-                        ? romanizer.confidenceSemantics
-                        : null,
-                phonologicalIR:
-                    !!(romanizer && typeof romanizer.phonologicalIR === 'function'),
-                nBestVariants:
-                    !!(romanizer && typeof romanizer.romanizationVariants === 'function'),
-                learnedModelBundled:
-                    !!(romanizer && romanizer.learnedModelBundled),
-                targetedLearnedAdvisorsBundled:
-                    !!(romanizer && romanizer.targetedLearnedAdvisorsBundled),
-                learnedComponentsBundled:
-                    !!(romanizer && romanizer.learnedComponentsBundled),
-                learnedComponents:
-                    romanizer && Array.isArray(romanizer.learnedComponents)
-                        ? romanizer.learnedComponents.map(item => Object.assign({}, item))
-                        : [],
+                provider: 'google-translate-dt-rm',
+                networkSources: true,
+                googleState: state.googleRomanizationState,
+                googleError: state.googleRomanizationError,
+                googleTransformedLines: state.googleRomanizationLineCount,
+                maxLineLength: GOOGLE_ROMANIZATION_MAX_TEXT_CHARS,
                 songKey: state.songPreferenceKey
             };
-        },
-        explainRomanization(text) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.explain !== 'function') return null;
-            return romanizer.explain(String(text == null ? '' : text));
-        },
-        segmentRomanization(text) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.segmentText !== 'function') return [];
-            return romanizer.segmentText(String(text == null ? '' : text));
-        },
-        detectRomanizationLanguages(text) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.detectLanguages !== 'function') return [];
-            return romanizer.detectLanguages(String(text == null ? '' : text));
-        },
-        romanizationIR(text) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.phonologicalIR !== 'function') return null;
-            return romanizer.phonologicalIR(String(text == null ? '' : text));
-        },
-        romanizationVariants(text, limit) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.romanizationVariants !== 'function') return [];
-            return romanizer.romanizationVariants(String(text == null ? '' : text), limit);
-        },
-        exportRomanizationCase(text, expected) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.exportRomanizationCase !== 'function') return null;
-            return romanizer.exportRomanizationCase(
-                String(text == null ? '' : text),
-                String(expected == null ? '' : expected)
-            );
-        },
-        rankRomanizationCandidates(text, candidates) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.rankCandidates !== 'function') return [];
-            return romanizer.rankCandidates(
-                String(text == null ? '' : text),
-                Array.isArray(candidates) ? candidates : []
-            );
-        },
-        selectRomanizationCandidate(text, candidates) {
-            const romanizer = getRomanizer();
-            if (!romanizer || typeof romanizer.selectCandidate !== 'function') return null;
-            return romanizer.selectCandidate(
-                String(text == null ? '' : text),
-                Array.isArray(candidates) ? candidates : []
-            );
         },
         setTimingOffset: setTimingOffsetSeconds,
         adjustTimingOffset: adjustTimingOffsetSeconds,

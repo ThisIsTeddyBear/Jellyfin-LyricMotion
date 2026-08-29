@@ -1,23 +1,23 @@
 # Jellyfin LyricMotion
 
-> **3.2.5 Dynamic Background God Mode build:** single atmosphere engine, same-album visual deduplication, latest-media-only artwork commits, and rapid-skip transition hardening.
+> **3.2.7 Google Romanization build:** one Google Translate Romanization path for every native-script lyric, without gating the control.
 
 [![Release](https://img.shields.io/github/v/release/ThisIsTeddyBear/Jellyfin-LyricMotion?display_name=tag)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
-An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and mobile: ELRC karaoke motion, overlapping/background vocals, **time-synced instrumental-break progress**, fully offline on-device Romanization, per-song lyric timing correction, multilingual Classic Bloom, and adaptive album atmosphere.
+An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and mobile: ELRC karaoke motion, overlapping/background vocals, **time-synced instrumental-break progress**, Google Romanization, per-song lyric timing correction, multilingual Classic Bloom, and adaptive album atmosphere.
 
 > [!IMPORTANT]
 > LyricMotion is a community project. It is not affiliated with or endorsed by the Jellyfin Project or Apple Inc. It patches only the Jellyfin Web client installed on your own server.
 
 > [!NOTE]
-> **TV policy:** LyricMotion intentionally hard-bypasses TV-class clients. Detected TVs use Jellyfin's stock lyrics experience with no LyricMotion fetch/XHR interception, observers, media hooks, lyric DOM decoration, Romanizer loading, or timing controls. Desktop and mobile remain enhanced. See [TV Stock Bypass](docs/TV-STOCK-BYPASS.md).
+> **TV policy:** LyricMotion intentionally hard-bypasses TV-class clients. Detected TVs use Jellyfin's stock lyrics experience with no LyricMotion fetch/XHR interception, observers, media hooks, lyric DOM decoration, Google Romanization requests, or timing controls. Desktop and mobile remain enhanced. See [TV Stock Bypass](docs/TV-STOCK-BYPASS.md).
 
-## What's new in 3.2.5 / LyricG2P 6.8.1
+## What's new in 3.2.7
 
-Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmosphere build centered on the requested album-art shader. LyricG2P is **6.8.1**, adding a phrase-level, confidence-gated decoder for English written phonetically in Indic, Kana and Hangul scripts. It uses script-adaptation profiles and whole-phrase scoring to recover natural forms such as `I want to be with you`, while retaining native-language guards and local-only processing. Common Hindi lyric function words now follow the readable song convention (`तू → tu`, `भी → bhi`) without shortening unrelated long vowels.
+The in-house Romanizer has been removed. Every native-script lyric, including Indian languages, now uses Google Translate's `dt=rm` Romanization response after you select Romanized view. A timeout, rejection or offline client leaves that native line unchanged, but can never hide the Romanization control or interrupt lyrics. Do not activate this mode for private lyrics that must remain entirely on-device.
 
-- **Scripted-English recovery.** English written phonetically in Devanagari and other first-class vowel-bearing Indic scripts can be reconstructed from line context (for example `आई मेट अ बॉय` -> `I met a boy`) while native-word guards prevent ordinary Hindi/Indic lyrics from being spell-corrected into English.
+- **One Romanization provider.** Japanese, Korean, Chinese, Thai, Arabic, Indic scripts and every other native script use Google `dt=rm` directly on demand with a six-second timeout and bounded retries.
 - **Dynamic is the only atmosphere engine.** Legacy atmosphere preferences are ignored; removed modes have no runtime branches or persistent setting path to reactivate them.
 - **Album artwork is the color source.** The Dynamic mode does not synthesize a palette. Artwork is uploaded directly to WebGL, tinted only in dark regions, blurred through eight 128 x 128 Kawase passes when the image changes, then animated with simplex-noise domain warping.
 - **Reference shader character preserved.** Warp intensity 1.0, eight blur passes, animation speed 1.8, saturation 1.7, opacity 0.75, dithering 0, and audio responsiveness off follow the theme's shader configuration.
@@ -32,7 +32,7 @@ Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmospher
 
 LyricMotion verifies reused lyric DOM shells before updating them, keeps malformed timing data from producing invalid visual state, and gives plain unsynchronised lyrics the same typography while preserving Jellyfin's native static behavior.
 
-Read: [Dynamic Background Design](docs/DYNAMIC-BACKGROUND-3.2.5.md), [LyricG2P 6.8.1](docs/LYRICG2P-6.8.1.md), and the canonical [CHANGELOG](CHANGELOG.md).
+Read: [Google Romanization](docs/GOOGLE-ROMANIZATION.md) and the canonical [CHANGELOG](CHANGELOG.md).
 
 ## Feature gallery
 
@@ -67,10 +67,10 @@ LyricMotion does not download lyrics. It enhances lyric data already available t
 
 Download the platform-specific archive from GitHub Releases, then extract it:
 
-- **Windows:** `jellyfin-lyric-motion-v3.2.5-windows.zip`
-- **Linux:** `jellyfin-lyric-motion-v3.2.5-linux.zip`
-- **macOS:** `jellyfin-lyric-motion-v3.2.5-macos.zip`
-- **Docker build context:** `jellyfin-lyric-motion-v3.2.5-docker.zip`
+- **Windows:** `jellyfin-lyric-motion-v3.2.6-windows.zip`
+- **Linux:** `jellyfin-lyric-motion-v3.2.6-linux.zip`
+- **macOS:** `jellyfin-lyric-motion-v3.2.6-macos.zip`
+- **Docker build context:** `jellyfin-lyric-motion-v3.2.6-docker.zip`
 
 The release archives are strict allowlists. Repository-only documentation, examples, CI metadata, and release tooling are not bundled.
 
@@ -131,24 +131,11 @@ Hard-refresh Jellyfin Web, clear site data, or use a private window. Fully close
 
 ## Romanization
 
-For native-script lyrics on desktop/mobile, **Romanize** switches the primary lyric text to local Romanization. The engine is lazy-loaded only when needed.
+For native-script lyrics on desktop/mobile, **Romanize** sends each lyric line to Google Translate's `dt=rm` Romanization endpoint. Requests begin only after you enable the view.
 
-The Romanizer converts the **complete lyric line first**, then remaps Jellyfin's existing ELRC source-character cue boundaries into the Romanized text. Cue timestamps are not modified.
+Google returns a Romanized complete lyric line. Jellyfin's existing ELRC cue positions are reprojected proportionally; cue timestamps are not modified.
 
-First-class lyric-aware paths cover:
-
-- Malayalam
-- Tamil
-- Telugu
-- Kannada
-- Punjabi / Gurmukhi
-- Hindi and other Devanagari-family lyric cases
-- Bengali / Assamese
-- Gujarati
-- Odia
-- lexicon-assisted Urdu / Shahmukhi
-
-The broad ICU-derived fallback remains coverage for unsupported scripts; it is not used as the primary Indian-language pronunciation engine. See [Romanization architecture](docs/ROMANIZATION.md).
+There is no bundled transliteration engine, fallback table, pronunciation lexicon, or language-specific route. See [Google Romanization](docs/GOOGLE-ROMANIZATION.md).
 
 ## Smart lyric timing assistant
 
@@ -204,7 +191,6 @@ JellyfinLyricMotion.atmosphere()
 JellyfinLyricMotion.romanization()
 JellyfinLyricMotion.timing()
 JellyfinLyricMotion.instrumentalBreaks()
-JellyfinLyricMotion.explainRomanization('ഇടി')
 ```
 
 Glow themes:
@@ -255,7 +241,7 @@ The installer:
 2. validates the package version and required overlay assets;
 3. creates a unique backup of the current `index.html`;
 4. removes older LyricMotion/AppleKaraoke loader tags from the working HTML copy;
-5. updates `jellyfin-lyric-motion.js`, `jellyfin-lyric-motion.css`, and `jellyfin-lyric-romanizer.js`;
+5. updates `jellyfin-lyric-motion.js` and `jellyfin-lyric-motion.css`, then removes the legacy Romanizer asset;
 6. commits the edited `index.html` last;
 7. leaves Jellyfin's generated JavaScript bundles untouched.
 
@@ -279,14 +265,14 @@ The uninstaller surgically removes LyricMotion loader tags/assets and normally d
 
 ## Compatibility
 
-The 3.2.5 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients remain a hard stock-Jellyfin bypass.
+The 3.2.7 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients remain a hard stock-Jellyfin bypass.
 
 Real behavior can still vary by Jellyfin build, browser/WebView, available fonts and source lyric quality.
 
 ## Repository layout
 
 ```text
-src/                 browser runtime, offline Romanizer, CSS
+src/                 browser runtime and CSS
 scripts/             installers, unified TTML/QRC converter, release packager
 docs/                current architecture and feature documentation
 examples/            ELRC examples
@@ -311,11 +297,11 @@ The complete tagging/GitHub Release procedure lives in the repository-only `docs
 
 ## Privacy
 
-Romanization is fully local/on-device. LyricMotion has no Romanization cloud service and does not intentionally transmit native lyric text to third-party Romanization providers.
+Romanization sends native lyric text to Google Translate when the user selects Romanized view. Keep the view off for private or unpublished lyrics.
 
 ## Credits and license
 
-The duration-aware motion approach was inspired by and adapted after reviewing [`binimum/am-lyrics`](https://github.com/binimum/am-lyrics). Instrumental-row interaction research also consulted the publicly documented behavior of [`better-lyrics/better-lyrics`](https://github.com/better-lyrics/better-lyrics); LyricMotion independently implements its SVG/wave behavior and does not import Better Lyrics GPLv3 source. The bundled broad transliteration fallback is generated from Unicode ICU transliteration data; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+The duration-aware motion approach was inspired by and adapted after reviewing [`binimum/am-lyrics`](https://github.com/binimum/am-lyrics). Instrumental-row interaction research also consulted the publicly documented behavior of [`better-lyrics/better-lyrics`](https://github.com/better-lyrics/better-lyrics); LyricMotion independently implements its SVG/wave behavior and does not import Better Lyrics GPLv3 source. Google Romanization follows the endpoint pattern documented in [Third-Party Notices](THIRD_PARTY_NOTICES.md).
 
 Jellyfin LyricMotion is distributed under the [Mozilla Public License 2.0](LICENSE).
 

@@ -1,6 +1,6 @@
 # Instrumental Break Progress
 
-Release: Jellyfin LyricMotion `3.2.5` · LyricG2P: `6.5.1`
+Release: Jellyfin LyricMotion `3.2.7`
 
 Jellyfin LyricMotion 3.2.5 uses a synthetic vector `♪` row for real instrumental gaps between timed lyric lines. The symbol is intentionally sparse: one note per qualifying break, with a bottom-to-top fill that reaches 100% exactly when the next lyric begins.
 

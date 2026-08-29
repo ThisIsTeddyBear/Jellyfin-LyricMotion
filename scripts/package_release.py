@@ -25,14 +25,12 @@ RUNTIME_VERSION_RE = re.compile(
 
 COMMON_SOURCE_FILES = (
     "VERSION",
-    "LYRICG2P_VERSION",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "licenses/DYNAMIC-BACKGROUND-MIT.txt",
     "licenses/KAWARP-MIT.txt",
     "src/jellyfin-lyric-motion.js",
     "src/jellyfin-lyric-motion.css",
-    "src/jellyfin-lyric-romanizer.js",
 )
 
 PLATFORM_FILES = {
@@ -101,7 +99,6 @@ def validate_runtime_asset_versions(version: str) -> None:
 
     for relative, expected in (
         ("src/jellyfin-lyric-motion.js", version),
-        ("src/jellyfin-lyric-romanizer.js", read_safe_identifier("LYRICG2P_VERSION")),
     ):
         try:
             source = (ROOT / relative).read_text(encoding="utf-8")
@@ -139,10 +136,10 @@ def expected_files(platform: str) -> tuple[str, ...]:
     return tuple(sorted(("README.md", *COMMON_SOURCE_FILES, *PLATFORM_FILES[platform])))
 
 
-def platform_readme(platform: str, version: str, lyricg2p_version: str) -> bytes:
+def platform_readme(platform: str, version: str) -> bytes:
     common = (
         f"# Jellyfin LyricMotion v{version}\n\n"
-        f"LyricG2P: {lyricg2p_version}\n\n"
+        "Romanization: Google Translate dt=rm\n\n"
         "This is a minimal platform-specific release archive. Repository tests, "
         "research, benchmarks, development documentation, examples, CI files, and "
         "release tooling are intentionally not included.\n\n"
@@ -288,7 +285,6 @@ def build_platform(platform: str, version: str, output_dir: Path) -> tuple[Path,
     if platform not in PLATFORM_FILES:
         raise SystemExit(f"unsupported platform: {platform}")
     validate_safe_identifier("version", version)
-    lyricg2p_version = read_safe_identifier("LYRICG2P_VERSION")
 
     files = expected_files(platform)
     source_files = tuple(sorted((*COMMON_SOURCE_FILES, *PLATFORM_FILES[platform])))
@@ -327,7 +323,7 @@ def build_platform(platform: str, version: str, output_dir: Path) -> tuple[Path,
                     info.compress_type = zipfile.ZIP_DEFLATED
                     zf.writestr(
                         info,
-                        platform_readme(platform, version, lyricg2p_version),
+                        platform_readme(platform, version),
                         compress_type=zipfile.ZIP_DEFLATED,
                         compresslevel=9,
                     )
