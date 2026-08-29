@@ -1,7 +1,7 @@
 # Offline LyricG2P Romanization
 
 Release: `3.2.5`
-Romanizer: `6.5.1`
+Romanizer: `6.6.0`
 
 ## Goal
 
@@ -33,7 +33,32 @@ The design was informed by publicly documented Indian-language transliteration w
 - **Dakshina** is particularly relevant to the product goal because it contains attested Romanization lexicons and full-sentence native/Latin parallel data for major South Asian languages.
 - Published Hindi/Punjabi G2P work identifies schwa deletion as a central pronunciation problem that naive Devanagari transliterators get wrong.
 
-No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P keeps deterministic production output with mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. Any future learned model would require independent evidence of improvement and acceptable browser cost. See [LyricG2P 6.5.1](LYRICG2P-6.5.1.md).
+No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P keeps deterministic production output with mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. Any future learned model would require independent evidence of improvement and acceptable browser cost. See [LyricG2P 6.6.0](LYRICG2P-6.6.0.md).
+
+
+## LyricG2P 6.6 scripted-English recovery
+
+Lyric providers sometimes encode **English pronunciation in an Indic script** instead of supplying the original English spelling. A plain transliterator cannot recover that spelling because the source is phonetic, not graphemic. For example:
+
+```text
+ऑल द अनजाना से येह येह येह
+-> All the anajaana say yeh yeh yeh
+
+आई मेट अ बॉय एंड हिस नेम इस अनजाना
+-> I met a boy and his name is anajaana
+```
+
+6.6 adds a conservative contextual recovery stage after the normal script-specific G2P pass. It compares the baseline Roman pronunciation with a compact offline English pronunciation-signature index, requires multiple nearby English anchors, protects known native lyric words, and only permits ambiguous native-looking forms such as `आई`, `इस`, and `से` to switch when an English run has already been established.
+
+This is deliberately **not** a global spell-corrector. Native lines such as `मैं तेरे प्यार में`, `दिल से`, and `हम तुम` retain the existing Indic Romanization. The same recovery architecture is enabled for the first-class vowel-bearing Indic handlers (Devanagari, Gurmukhi, Bengali/Assamese, Gujarati, Odia, Tamil, Telugu, Kannada and Malayalam), while Perso-Arabic Urdu/Shahmukhi remains excluded because omitted short vowels make this kind of reconstruction substantially more ambiguous.
+
+Recovered words carry explicit `scripted-english-recovery` provenance in `romanizeDetailed()` / `detectLanguages()`. Source-to-Roman boundary maps are recomposed through the English spelling transform so ELRC cue timing remains monotonic and attached to the original source characters.
+
+## LyricG2P 6.6 native loanword pronunciation
+
+6.6 also addresses a different failure mode from scripted English: common Devanagari lyric spellings that omit nukta marks. Plain `फ` remains `ph` by default, but a curated high-confidence loanword lexicon restores established `/f/` pronunciations where spelling alone is misleading. This fixes `हमसफर -> humsafar`, `सफर -> safar`, `वफा -> wafa`, `फिक्र -> fikr`, and related common forms while explicitly preserving native controls such as `फूल -> phool`, `फिर -> phir`, and `फल -> phal`.
+
+The correction is lexical rather than a global character rewrite, because `फ` genuinely represents both situations in real lyric data. Exact corrected words retain source-to-Roman boundary maps and expose `curated-loanword-pronunciation` provenance through detailed diagnostics.
 
 ## v3.2.5 / LyricG2P 6.5.1 implementation
 

@@ -72,6 +72,17 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+## CMU Pronouncing Dictionary
+
+LyricG2P 6.6.0 uses a compact set of pronunciation signatures derived at build time from the CMU Pronouncing Dictionary for a hand-curated common-English/song vocabulary. The runtime does not bundle the full dictionary or a CMUdict parser; it stores only the derived signatures required by the scripted-English recovery layer.
+
+- Project: CMU Pronouncing Dictionary (CMUdict)
+- Copyright: Copyright (C) 1993-2015 Carnegie Mellon University
+- License: permissive CMUdict redistribution license
+- Bundled license copy: `licenses/CMUDICT.txt`
+
+The signatures are used only as offline phonetic evidence to recover English spellings when a lyric provider writes English pronunciation in an Indic script.
+
 ## Hindi/Punjabi schwa pronunciation-model research
 
 LyricG2P 6.5.1 contains two compact sparse logistic schwa keep/delete coefficient tables derived from the alternate 6.5 implementation and attributed there to pronunciation-lexicon research associated with Aryaman Arora's Hindi/Punjabi schwa-deletion work. The release does not bundle the source pronunciation datasets.
@@ -95,4 +106,4 @@ Public datasets and third-party/provider Romanizations referenced by these resea
 - Dakshina dataset: https://github.com/google-research-datasets/dakshina
 - Hindi/Punjabi G2P schwa work: https://aclanthology.org/2020.acl-main.696/
 
-LyricG2P 6.5.1 Romanization is fully local/on-device and does not call these projects or any third-party Romanization service at runtime.
+LyricG2P 6.6.0 Romanization is fully local/on-device and does not call these projects or any third-party Romanization service at runtime.

@@ -13,10 +13,11 @@ An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and 
 > [!NOTE]
 > **TV policy:** LyricMotion intentionally hard-bypasses TV-class clients. Detected TVs use Jellyfin's stock lyrics experience with no LyricMotion fetch/XHR interception, observers, media hooks, lyric DOM decoration, Romanizer loading, or timing controls. Desktop and mobile remain enhanced. See [TV Stock Bypass](docs/TV-STOCK-BYPASS.md).
 
-## What's new in 3.2.5 / LyricG2P 6.5.1
+## What's new in 3.2.5 / LyricG2P 6.6.0
 
-Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmosphere build centered on the requested album-art shader. LyricG2P remains **6.5.1**. This hotfix also hardens the lyric visual loop so ELRC sweep/Classic Bloom and instrumental liquid progress cannot be permanently starved by a background/lifecycle exception.
+Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmosphere build centered on the requested album-art shader. LyricG2P is **6.6.0**, adding conservative contextual recovery of English that lyric providers write phonetically in Indic scripts plus native Devanagari loanword pronunciation fixes such as `हमसफर -> humsafar` and `सफर -> safar` without weakening genuine `ph` aspiration. This hotfix also hardens the lyric visual loop so ELRC sweep/Classic Bloom and instrumental liquid progress cannot be permanently starved by a background/lifecycle exception.
 
+- **Scripted-English recovery.** English written phonetically in Devanagari and other first-class vowel-bearing Indic scripts can be reconstructed from line context (for example `आई मेट अ बॉय` -> `I met a boy`) while native-word guards prevent ordinary Hindi/Indic lyrics from being spell-corrected into English.
 - **Dynamic is the only atmosphere engine.** Legacy atmosphere preferences are ignored; removed modes have no runtime branches or persistent setting path to reactivate them.
 - **Album artwork is the color source.** The Dynamic mode does not synthesize a palette. Artwork is uploaded directly to WebGL, tinted only in dark regions, blurred through eight 128 x 128 Kawase passes when the image changes, then animated with simplex-noise domain warping.
 - **Reference shader character preserved.** Warp intensity 1.0, eight blur passes, animation speed 1.8, saturation 1.7, opacity 0.75, dithering 0, and audio responsiveness off follow the theme's shader configuration.
@@ -31,7 +32,7 @@ Jellyfin LyricMotion **3.2.5 Dynamic Background God Mode** is a single-atmospher
 
 LyricMotion verifies reused lyric DOM shells before updating them, keeps malformed timing data from producing invalid visual state, and gives plain unsynchronised lyrics the same typography while preserving Jellyfin's native static behavior.
 
-Read: [Dynamic Background Design](docs/DYNAMIC-BACKGROUND-3.2.5.md), [LyricG2P 6.5.1](docs/LYRICG2P-6.5.1.md), and the canonical [CHANGELOG](CHANGELOG.md).
+Read: [Dynamic Background Design](docs/DYNAMIC-BACKGROUND-3.2.5.md), [LyricG2P 6.6.0](docs/LYRICG2P-6.6.0.md), and the canonical [CHANGELOG](CHANGELOG.md).
 
 ## Feature gallery
 

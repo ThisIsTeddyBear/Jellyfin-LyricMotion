@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '6.5.1';
+    const VERSION = '6.6.0';
 
     const ROMANIZATION_STYLE = Object.freeze({
         id: 'lyricmotion-song-ascii-1',
@@ -22,7 +22,7 @@
         malayalamZha: 'zh',
         tamilZha: 'zh',
         preserveLatin: true,
-        generatedCase: 'lower',
+        generatedCase: 'lower-native+sentence-case-recovered-english',
         goal: 'readable-singable-song-romanization'
     });
     const FALLBACK_ENTRY_COUNT = 60513;
@@ -504,11 +504,46 @@
         'तोहरा':'tohra','हमार':'hamaar','हमरा':'hamra','कइसन':'kaisan','काहे':'kaahe','बाबू':'baabu','सैयाँ':'saiyaan','सइयां':'saiyaan'
     });
 
+
     /*
-     * LyricG2P 6.5.1 compact learned schwa advisors.
+     * Common Perso-Arabic/Urdu loanwords are frequently published without
+     * Devanagari nukta marks by lyric providers. In those spellings plain फ
+     * can represent lexical /f/ rather than native /ph/. Keep this as an
+     * explicit pronunciation lexicon: globally folding फ -> f would corrupt
+     * genuine Hindi words such as फूल (phool), फिर (phir) and फल (phal).
+     *
+     * Lexicalized compounds are also included where ordinary schwa deletion
+     * cannot recover the established sung form (e.g. हमसफर -> humsafar).
+     */
+    const DEVANAGARI_LOANWORD_PRONUNCIATIONS = Object.freeze({
+        'सफर':'safar','सफ़र':'safar',
+        'हमसफर':'humsafar','हमसफ़र':'humsafar',
+        'मुसाफिर':'musaafir','मुसाफ़िर':'musaafir',
+        'वफा':'wafa','वफ़ा':'wafa','बेवफा':'bewafa','बेवफ़ा':'bewafa',
+        'वफादार':'wafaadaar','वफ़ादार':'wafaadaar',
+        'माफ':'maaf','माफ़':'maaf',
+        'फिक्र':'fikr','फ़िक्र':'fikr','फुर्सत':'fursat','फ़ुर्सत':'fursat',
+        'फना':'fana','फ़ना':'fana','फिजा':'fiza','फ़िज़ा':'fiza',
+        'तूफान':'toofaan','तूफ़ान':'toofaan','काफिला':'kaafila','काफ़िला':'kaafila',
+        'हफ्ता':'hafta','हफ़्ता':'hafta','आफत':'aafat','आफ़त':'aafat',
+        'दफा':'dafa','दफ़ा':'dafa','अफसोस':'afsos','अफ़सोस':'afsos',
+        'खफा':'khafa','खफ़ा':'khafa','दफन':'dafan','दफ़न':'dafan',
+        'लफ्ज':'lafz','लफ़्ज':'lafz','लफ्ज़':'lafz','लफ़्ज़':'lafz'
+    });
+
+    function devanagariLexiconEntry(word) {
+        const lyric = DEVANAGARI_LYRIC_OVERRIDES[word];
+        if (lyric) return { text: lyric, source: 'curated-lyric-lexicon' };
+        const loanword = DEVANAGARI_LOANWORD_PRONUNCIATIONS[word];
+        if (loanword) return { text: loanword, source: 'curated-loanword-pronunciation' };
+        return null;
+    }
+
+    /*
+     * LyricG2P 6.6.0 retains the compact learned schwa advisors.
      *
      * The Hindi model is a sparse logistic classifier trained from a
-     * pronunciation lexicon with word-level held-out splits. In 6.5.1 the
+     * pronunciation lexicon with word-level held-out splits. In 6.6.0 the
      * classifier is lazy advisory evidence for diagnostics/candidate research;
      * normal lyric rendering stays on the deterministic hot path. A second
      * sparse classifier is trained directly on a Punjabi pronunciation
@@ -1241,7 +1276,8 @@
         const chunks = devanagariTokenChunks(tokens);
         const baselineValue = normalizeDevanagariLyricRoman(chunks.join(''));
         const baselineMaps = buildIndicWordBoundaryMaps(word, tokens, chunks, baselineValue);
-        const override = DEVANAGARI_LYRIC_OVERRIDES[word];
+        const lexiconEntry = devanagariLexiconEntry(word);
+        const override = lexiconEntry && lexiconEntry.text;
         const morphologyDecision = override
             ? null
             : morphologyProductionDecision(word, descriptor, baselineMaps);
@@ -1251,6 +1287,7 @@
             : buildIndicWordBoundaryMaps(word, tokens, chunks, finalValue);
         result.morphologyDecision = morphologyDecision;
         result.lexiconOverride = !!override;
+        result.lexiconSource = lexiconEntry ? lexiconEntry.source : null;
         result.tokens = tokens;
         result.learnedSchwa = tokens.some(token => token && Number.isFinite(token.schwaKeepProbability));
         result.learnedSchwaApplied = tokens.some(token => token && token.schwaDecision && /^LEARNED_/.test(token.schwaDecision.reason || ''));
@@ -1274,7 +1311,8 @@
         const tokens = applyHindiSchwaDeletion(devanagariTokenizeWord(word));
         const chunks = devanagariTokenChunks(tokens);
         const baselineValue = normalizeDevanagariLyricRoman(chunks.join(''));
-        const override = DEVANAGARI_LYRIC_OVERRIDES[word];
+        const lexiconEntry = devanagariLexiconEntry(word);
+        const override = lexiconEntry && lexiconEntry.text;
         if (override) return override;
         const productionHints = morphologyProductionHints(word, descriptor);
         if (!productionHints.length) return baselineValue;
@@ -2235,6 +2273,397 @@
         return { value: out, nextIndex: index };
     }
 
+
+    /*
+     * LyricG2P 6.6 scripted-English recovery.
+     *
+     * Lyric providers frequently publish English lyrics phonetically in an
+     * Indic script (for example "आई मेट अ बॉय" for "I met a boy"). A normal
+     * transliterator cannot recover English spelling because the script stores
+     * pronunciation, not the original English graphemes. This layer therefore
+     * runs after the native G2P pass and treats its Latin output as a phonetic
+     * observation.
+     *
+     * Safety is intentionally line-contextual. Native words never switch to
+     * English merely because they resemble an English pronunciation. Two
+     * nearby independent English anchors are required, curated native lyric
+     * lexicon entries are protected, and only a small set of genuinely
+     * ambiguous function forms (आई/I, इस/is, से/say, etc.) may switch once an
+     * English run has already been established.
+     *
+     * The compact pronunciation signatures below are generated from a curated
+     * common-English/song vocabulary using CMU Pronouncing Dictionary phones.
+     * Only the derived signatures needed at runtime are bundled; no model,
+     * network lookup or dictionary parser is required in the browser.
+     */
+    const INDIC_ENGLISH_RECOVERY_SCRIPT_KEYS = Object.freeze(new Set([
+        'devanagari', 'gurmukhi', 'bengali', 'gujarati', 'odia',
+        'tamil', 'telugu', 'kannada', 'malayalam'
+    ]));
+
+    const DEVANAGARI_ENGLISH_CONTEXT_CONVERTIBLE = Object.freeze(new Set([
+        'आई', 'आइ', 'अ', 'इस', 'से'
+    ]));
+
+    const DEVANAGARI_NATIVE_GUARD_WORDS = Object.freeze(new Set([
+        'का','की','के','को','से','में','पर','तक','ने','और','या','तो','ही','भी','न','ना',
+        'अब','जब','तब','जो','यह','ये','वह','वो','इस','उस','इन','उन','एक','मैं','हम','तुम','तू',
+        'मेरा','मेरी','मेरे','तेरा','तेरी','तेरे','अपना','अपनी','अपने','दिल','मन','जान','प्यार',
+        'है','हैं','था','थी','थे','हो','हूँ','हूं','क्या','क्यों','कहाँ','कहां','कैसे','जैसे','ऐसे'
+    ]));
+
+    const INDIC_ENGLISH_PRONUNCIATION_PACKED = "a=a,ah,uh;abaut=about;abav=above;abavt=about;about=about;above=above;abuv=above;actually=actually;adar=other;ader=other;aftar=after;after=after;again=again;against=against;agayn=again;agaynst=against;agen=again;agenst=against;ah=ah;ai=i,eye;aid=i'd;aidar=either;aider=either;ail=i'll;aim=i'm;aint=ain't;ais=eyes;aiv=i've;akchli=actually;akchuali=actually;akchuli=actually;akshali=actually;akshuli=actually;al=all;all=all;almost=almost;alon=alone;alone=alone;alrait=alright;already=already;alredi=already;alrigt=alright;also=also;alvays=always;alves=always;alvis=always;am=am,i'm;amang=among;among=among;amung=among;an=an,on;anadar=another;anader=another;and=and;andar=under;ander=under;angel=angel;anoter=another;ansar=answer;ansars=answers;anser=answer;ansers=answers;ansver=answer;ansvers=answers;antu=onto;anudar=another;anuder=another;any=any;anyting=anything;ap=up;apart=apart;aport=apart;ar=or,our,are;arant=aren't;araun=around;araund=around;aravn=around;aravnd=around;are=are;aredi=already;arent=aren't;arli=early;arms=arms;arnt=aren't;around=around;ars=ours;arselvs=ourselves;arunt=aren't;as=as,us;at=at;auar=our;auars=ours;auarselvs=ourselves;auer=our;auers=ours;auerselvs=ourselves;aur=our;aurs=ours;aut=out;autsaid=outside;av=of;avar=our;avars=ours;avarselvs=ourselves;avay=away;ave=away;aver=our;avers=ours;averselvs=ourselves;avr=our;avrs=ours;avt=out;avtsaid=outside;ay=a;ayem=am;aynjal=angel;aynjul=angel;aynt=ain't;babe=babe;babi=baby;babies=babies;baby=baby;back=back;bad=bad;badi=body;badis=bodies;bai=by,bye;bak=back;ban=been;barn=burn;barnd=burned;barneng=burning;barning=burning;barns=burns;bat=but;bayb=babe;baybi=baby;baybis=babies;be=be;beat=beat;beats=beats;beautiful=beautiful;beb=babe;bebi=baby;bebis=babies;because=because;bed=bed,bad;beds=beds;befar=before;befor=before;before=before;beg=big;begar=bigger;begast=biggest;beger=bigger;begust=biggest;being=being;bek=back;bekas=because;bekos=because;bekus=because;believe=believe;believed=believed;believes=believes;believing=believing;beliv=believe;belivd=believed;beliveng=believing;beliving=believing;belivs=believes;belo=below;belov=below;ben=been;bern=burn;bernd=burned;berneng=burning;berning=burning;berns=burns;best=best;betar=better;beter=better;better=better;betvin=between;bi=be;bieng=being;bifar=before;bifor=before;big=big;bigar=bigger;bigast=biggest;biger=bigger;bigger=bigger;biggest=biggest;bigust=biggest;bikas=because;bikos=because;bikus=because;biliv=believe;bilivd=believed;biliveng=believing;biliving=believing;bilivs=believes;bilo=below;bin=been;bing=being;bit=beat;bits=beats;bitvin=between;black=black;blak=black;blek=black;blu=blue;blue=blue;blues=blues;blus=blues;bodi=body;bodies=bodies;bodis=bodies;body=body;boi=boy;bois=boys;bot=both;boy=boy;boys=boys;bradar=brother;brader=brother;brait=bright;braitar=brighter;braiter=brighter;brayk=break;braykeng=breaking;brayking=breaking;brayks=breaks;break=break;breaking=breaking;breaks=breaks;breate=breathe;breated=breathed;breates=breathes;breating=breathing;brek=break;brekeng=breaking;breking=breaking;breks=breaks;brid=breathe;bridd=breathed;brideng=breathing;briding=breathing;brids=breathes;brigt=bright;brigter=brighter;brok=broke;brokan=broken;broke=broke;broken=broken;brokun=broken;broter=brother;brudar=brother;bruder=brother;bun=been;burn=burn;burned=burned;burning=burning;burns=burns;but=but;by=by;bye=bye;byutafal=beautiful;byutaful=beautiful;byutufal=beautiful;byutuful=beautiful;call=call;called=called;calling=calling;calls=calls;came=came;can=can;cant=can't;car=car;cars=cars;cause=cause;chance=chance;chances=chances;change=change;changed=changed;changes=changes;changing=changing;chans=chance;chansas=chances;chanses=chances;chansis=chances;chansus=chances;chaynj=change;chaynjas=changes;chaynjd=changed;chaynjeng=changing;chaynjes=changes;chaynjing=changing;chaynjis=changes;chaynjus=changes;chenj=change;chenjas=changes;chenjd=changed;chenjeng=changing;chenjes=changes;chenjing=changing;chenjis=changes;chenjus=changes;chens=chance;chensas=chances;chenses=chances;chensis=chances;chensus=chances;cities=cities;city=city;close=close;cold=cold;colder=colder;come=come;comes=comes;coming=coming;cos=cos;could=could;couldnt=couldn't;crasy=crazy;cried=cried;cries=cries;cry=cry;crying=crying;cul=cool;d=the;da=the,da;dad=dad;dai=die;daid=died;daieng=dying;daing=dying;dais=dies;dam=them;damselvs=themselves;dance=dance;danced=danced;dances=dances;dancing=dancing;dans=dance;dansas=dances;danseng=dancing;danses=dances;dansing=dancing;dansis=dances;danst=danced;dansus=dances;dar=door;dareng=during;daring=during;dark=dark;darkar=darker;darker=darker;darleng=darling;darling=darling;dars=doors;das=does;dasan=doesn't;dasant=doesn't;dasun=doesn't;dasunt=doesn't;dat=that;dats=that's;daun=down;davn=down;day=they,day;dayd=they'd;dayl=they'll;days=days;dayv=they've;de=they,day;ded=did,dad,they'd;dedan=didn't;dedant=didn't;dednt=didn't;dedun=didn't;dedunt=didn't;del=they'll;dem=them;demselvs=themselves;den=then;dens=dance;densas=dances;denseng=dancing;denses=dances;densing=dancing;densis=dances;denst=danced;densus=dances;der=their,there,they're;dereng=during;dering=during;ders=theirs,there's;des=this,does,days;det=that;dets=that's;dev=they've;deval=devil;devil=devil;devul=devil;di=the;diay=da;did=did;didan=didn't;didant=didn't;didnt=didn't;didun=didn't;didunt=didn't;die=da,die;died=died;dies=dies;dis=this,these,does;do=do,da;does=does;doesnt=doesn't;doing=doing;don=don't;dont=don't;dor=door;dork=dark;dorkar=darker;dorker=darker;dorleng=darling;dorling=darling;dors=doors;dos=those;dovn=down;dream=dream;dreamed=dreamed;dreaming=dreaming;dreams=dreams;drim=dream;drimd=dreamed;drimeng=dreaming;driming=dreaming;drims=dreams;du=the,do;dueng=doing;duing=doing;dum=them;dumselvs=themselves;dur=door;dureng=during;during=during;durs=doors;dus=does;dusan=doesn't;dusant=doesn't;dusun=doesn't;dusunt=doesn't;dut=that;dying=dying;dyureng=during;dyuring=during;e=a;each=each;early=early;easier=easier;easy=easy;ef=if;eftar=after;efter=after;egsaktli=exactly;egsektli=exactly;eiter=either;ekchli=actually;ekchuali=actually;ekchuli=actually;ekshali=actually;ekshuli=actually;em=him,am;en=and,an,in;enaf=enough;end=and,end;eni=any;eniteng=anything;eniting=anything;enjal=angel;enjul=angel;enoug=enough;ensaid=inside;ensar=answer;ensars=answers;enser=answer;ensers=answers;ent=ain't;enta=into;entu=into;enuf=enough;er=or,are;eraun=around;eraund=around;eravn=around;eravnd=around;erli=early;es=as,is;esan=isn't;esant=isn't;esun=isn't;esunt=isn't;et=at,it;ets=its,it's;etself=itself;evar=ever;evari=every;even=even;evening=evening;evenings=evenings;ever=ever;everi=every;every=every;everyting=everything;evri=every;evriteng=everything;evriting=everything;exactly=exactly;eye=eye;eyes=eyes;face=face;faces=faces;fadar=father;fader=father;faiar=fire;faiars=fires;faier=fire;faiers=fires;faind=find;faindeng=finding;fainding=finding;fainds=finds;fair=fire;fairs=fires;faiv=five;fal=fall;falan=fallen;faleng=falling;faling=falling;fall=fall;fallen=fallen;falling=falling;falls=falls;fals=falls,false;false=false;falun=fallen;fame=fame;far=for,four,far;farevar=forever;farever=forever;fargat=forgot;fargatan=forgotten;fargatun=forgotten;farget=forget;fargeteng=forgetting;fargeting=forgetting;fargets=forgets;fargot=forgot;fargotan=forgotten;fargotun=forgotten;farst=first;farvard=forward;farverd=forward;fater=father;faund=found;favnd=found;faym=fame;fays=face;faysas=faces;fayses=faces;faysis=faces;faysus=faces;fear=fear;fears=fears;feks=fix;fekseng=fixing;fekses=fixes;feksing=fixing;feksis=fixes;fekst=fixed;fel=fell;fell=fell;felt=felt;fem=fame;fer=for,fear;ferevar=forever;ferever=forever;fergat=forgot;fergatan=forgotten;fergatun=forgotten;ferget=forget;fergeteng=forgetting;fergeting=forgetting;fergets=forgets;fergot=forgot;fergotan=forgotten;fergotun=forgotten;fers=fears;ferst=first;fes=face;fesas=faces;feses=faces;fesis=faces;fesus=faces;fev=few;fiks=fix;fikseng=fixing;fikses=fixes;fiksing=fixing;fiksis=fixes;fikst=fixed;fil=feel;fileng=feeling;filing=feeling;fils=feels;find=find;finding=finding;finds=finds;fir=fear;fire=fire;fires=fires;firs=fears;first=first;five=five;fix=fix;fixed=fixed;fixes=fixes;fixing=fixing;flai=fly;flaieng=flying;flaing=flying;flais=flies;flar=floor;flars=floors;flev=flew;flies=flies;flon=flown;flor=floor;flors=floors;flovn=flown;flu=flew;flur=floor;flurs=floors;fly=fly;flying=flying;fodar=father;foder=father;fol=fall;folan=fallen;foleng=falling;foling=falling;fols=falls,false;folun=fallen;for=for,four,far;forever=forever;forgat=forgot;forgatan=forgotten;forgatun=forgotten;forget=forget;forgeteng=forgetting;forgeting=forgetting;forgets=forgets;forgetting=forgetting;forgot=forgot;forgotan=forgotten;forgotten=forgotten;forgotun=forgotten;forvard=forward;forverd=forward;found=found;four=four;fram=from;frar=for;frend=friend;frends=friends;frens=friends;frer=for;fri=free;friend=friend;friends=friends;from=from;frum=from;fyu=few;game=game;games=games;gan=gone;gana=gonna;ganu=gonna;garl=girl;garls=girls;gat=got;gata=gotta;gatan=gotten;gatu=gotta;gatun=gotten;gave=gave;gaym=game;gayms=games;gayv=gave;ged=good;gem=game;gemi=gimme;gems=games;gerl=girl;gerls=girls;get=get;geteng=getting;geting=getting;gets=gets;getting=getting;gev=give,gave;gevan=given;geven=given;geveng=giving;gevin=given;geving=giving;gevs=gives;gevun=given;gid=good;gimi=gimme;gimme=gimme;girl=girl;girls=girls;git=get;giteng=getting;giting=getting;gits=gets;giv=give;givan=given;give=give;given=given;giveng=giving;gives=gives;givin=given;giving=giving;givs=gives;givun=given;go=go;goen=going;goeng=going;goes=goes;goin=going;going=going;gold=gold;goldan=golden;golden=golden;goldun=golden;gon=gone;gona=gonna;gone=gone;gonna=gonna;gonu=gonna;gos=goes;got=got;gota=gotta;gotan=gotten;gotta=gotta;gotten=gotten;gotu=gotta;gotun=gotten;gud=good;gudbai=goodbye;gudbye=goodbye;ha=huh;had=had;hadan=hadn't;hadant=hadn't;hadnt=hadn't;hadun=hadn't;hadunt=hadn't;hag=hug;hagd=hugged;hageng=hugging;haging=hugging;hags=hugs;hai=hi,high;haid=hide;haideng=hiding;haiding=hiding;haids=hides;hair=hair;halo=hello;hand=hand;hands=hands;handsome=handsome;hani=honey;hans=hands;hansam=handsome;hansum=handsome;hap=hop;hapinas=happiness;hapinus=happiness;happiness=happiness;har=her;hard=heard,hard;hardar=harder;harder=harder;hars=hers;harself=herself;hart=heart,hurt;harts=hearts,hurts;has=has;hasant=hasn't;hasnt=hasn't;hasunt=hasn't;hat=hot;hatar=hotter;hate=hate;hated=hated;hater=hotter;hates=hates;hating=hating;hau=how;haus=house,how's;hausas=houses;hauses=houses;hausis=houses;hausus=houses;hav=how,have;havan=haven't;havant=haven't;have=have;haveng=having;havent=haven't;having=having;havs=house,how's;havsas=houses;havses=houses;havsis=houses;havsus=houses;havun=haven't;havunt=haven't;hay=hey;hayt=hate;haytad=hated;hayted=hated;hayteng=hating;haytid=hated;hayting=hating;hayts=hates;haytud=hated;he=he,hey;head=head;heads=heads;hear=hear;heard=heard;hearing=hearing;hears=hears;heart=heart;hearts=hearts;hed=had,hid,head;hedan=hidden,hadn't;hedant=hadn't;heds=heads;hedun=hidden,hadn't;hedunt=hadn't;held=held;hello=hello;helo=hello;hem=him;hemself=himself;hend=hand;hends=hands;hens=hands;hensam=handsome;hensum=handsome;hep=hip;hepinas=happiness;hepinus=happiness;her=her,hair;herd=heard;here=here;heres=here's;hero=hero;hers=hers,here's;herself=herself;hert=hurt;herts=hurts;hes=his,has,he's;hesant=hasn't;hesunt=hasn't;het=hate;hetad=hated;heted=hated;heteng=hating;hetid=hated;heting=hating;hets=hates;hetud=hated;hev=have;hevan=haven't;hevant=haven't;heveng=having;heving=having;hevun=haven't;hevunt=haven't;hey=hey;hi=he,hi;hid=hid;hidan=hidden;hidden=hidden;hide=hide;hides=hides;hiding=hiding;hidun=hidden;hig=high;him=him;himself=himself;hip=hip;hir=here,hear;hireng=hearing;hiring=hearing;hiro=hero;hirs=hears,here's;his=his,he's;hm=hmm;hmm=hmm;ho=whoa;hol=whole;hold=hold;holdeng=holding;holding=holding;holds=holds;hom=home;home=home;homes=homes;homs=homes;honey=honey;hop=hope,hop;hope=hope;hoped=hoped;hopeng=hoping;hopes=hopes;hoping=hoping;hops=hopes;hopt=hoped;hord=hard;hordar=harder;horder=harder;hort=heart;horts=hearts;hot=hot;hotar=hotter;hoter=hotter;hotter=hotter;house=house;houses=houses;hov=how;hovs=how's;hu=who,huh;hug=hug;hugd=hugged;hugeng=hugging;hugged=hugged;hugging=hugging;huging=hugging;hugs=hugs;huh=huh;hulo=hello;hum=whom;huni=honey;hurt=hurt;hurts=hurts;hus=whose,has,who's;hvai=why;hvais=why's;hvait=white;hvat=what;hvats=what's;hvech=which;hven=when;hvens=when's;hver=where;hvers=where's;hvich=which;hvo=whoa;hvut=what;hvuts=what's;i=i;ich=each;id=i'd;idar=either;ider=either;if=if;igsaktli=exactly;igsektli=exactly;ill=i'll;im=him,am,i'm;in=in;inaf=enough;insaid=inside;inside=inside;inta=into;into=into;intu=into;inuf=enough;is=is;isan=isn't;isant=isn't;isi=easy;isiar=easier;isier=easier;isnt=isn't;isun=isn't;isunt=isn't;it=it;its=its,it's;itself=itself;ive=i've;iven=even;ivin=even;ivneng=evening;ivnengs=evenings;ivning=evening;ivnings=evenings;jas=jazz;jass=jazz;jast=just;jes=jazz;jest=just;jist=just;joi=joy;jois=joys;joy=joy;joys=joys;just=just;kal=call;kald=called;kaleng=calling;kaling=calling;kals=calls;kam=come;kameng=coming;kaming=coming;kams=comes;kan=can;kant=can't;kapt=kept;kar=car;kars=cars;kas=cars,cause,cos;kaym=came;kem=came;ken=can;kenda=kinda;kendu=kinda;keng=king;kent=can't;kept=kept;kes=kiss;kesas=kisses;keseng=kissing;keses=kisses;kesing=kissing;kesis=kisses;kest=kissed;kesus=kisses;kinda=kinda;kindu=kinda;king=king;kip=keep;kipeng=keeping;kiping=keeping;kips=keeps;kis=kiss;kisas=kisses;kiseng=kissing;kises=kisses;kising=kissing;kisis=kisses;kiss=kiss;kissed=kissed;kisses=kisses;kissing=kissing;kist=kissed;kisus=kisses;klos=close;knev=knew;knov=know;knoving=knowing;knovn=known;knovs=knows;kol=call;kold=called,cold;koldar=colder;kolder=colder;koleng=calling;koling=calling;kols=calls;kor=car;kors=cars;kos=cars,cause,cos;krai=cry;kraid=cried;kraieng=crying;kraing=crying;krais=cries;kraysi=crazy;kresi=crazy;kud=could;kudan=couldn't;kudant=couldn't;kudun=couldn't;kudunt=couldn't;kul=cool;kum=come;kumeng=coming;kuming=coming;kums=comes;kun=can;kveschan=question;kveschans=questions;kveschun=question;kveschuns=questions;kveshan=question;kveshun=question;kvin=queen;la=la;laf=laugh;lafeng=laughing;lafing=laughing;lafs=laughs;laft=laughed;lai=lie;laif=life;laik=like;laikeng=liking;laiking=liking;laiks=likes;laikt=liked;lain=line;lains=lines;lais=lies;lait=light;laiteng=lighting;laiting=lighting;laits=lights;laiv=live;laivd=lived;laivs=lives;las=last;last=last,lost;late=late;laug=laugh;lauged=laughed;lauging=laughing;laugs=laughs;lav=love;lavar=lover;lavars=lovers;lavd=loved;laveng=loving;laver=lover;lavers=lovers;laving=loving;lavli=lovely;lavs=loves;layt=late;least=least;leave=leave;leaves=leaves;leaving=leaving;lef=laugh;lefeng=laughing;lefing=laughing;lefs=laughs;left=left,laughed;lema=lemme;lemme=lemme;lemu=lemme;leps=lips;les=last,less;lesan=listen;lesand=listened;lesaneng=listening;lesaning=listening;lesans=listens;lesneng=listening;lesning=listening;less=less;lest=last;lesun=listen;lesund=listened;lesuneng=listening;lesuning=listening;lesuns=listens;let=late,let,lit;letal=little;leteng=letting;leting=letting;lets=lets,let's;letting=letting;letul=little;lev=live;levd=lived;leveng=living;leving=living;levs=lives;lie=lie;lies=lies;life=life;ligt=light;ligting=lighting;ligts=lights;like=like;liked=liked;likes=likes;liking=liking;line=line;lines=lines;lips=lips;lisan=listen;lisand=listened;lisaneng=listening;lisaning=listening;lisans=listens;lisneng=listening;lisning=listening;list=least;listen=listen;listened=listened;listening=listening;listens=listens;lisun=listen;lisund=listened;lisuneng=listening;lisuning=listening;lisuns=listens;lit=lit;lital=little;little=little;litul=little;liv=leave,live;livd=lived;live=live;lived=lived;liveng=leaving,living;lives=lives;living=leaving,living;livs=leaves,lives;lo=low,la;lonely=lonely;lonli=lonely;lose=lose;loses=loses;losing=losing;lost=lost;lov=low;love=love;loved=loved;lovely=lovely;lover=lover;lovers=lovers;loves=loves;loving=loving;luk=look;luked=looked;lukeng=looking;luking=looking;luks=looks;lukt=looked;lus=lose;lusas=loses;luseng=losing;luses=loses;lusing=losing;lusis=loses;lusus=loses;luv=love;luvar=lover;luvars=lovers;luvd=loved;luveng=loving;luver=lover;luvers=lovers;luving=loving;luvli=lovely;luvs=loves;m=mm;mach=much;madar=mother;made=made;mader=mother;mai=my;main=mine;maind=mind;mainds=minds;maiself=myself;mait=might;make=make;makes=makes;making=making;mam=mom;mama=mama;mamu=mama;man=man;mani=money;many=many;mar=more;marneng=morning;marnengs=mornings;marning=morning;marnings=mornings;masant=mustn't;mast=must;masunt=mustn't;may=may;maybe=maybe;maybi=maybe;mayd=made;mayk=make;maykeng=making;mayking=making;mayks=makes;me=me,may;mebi=maybe;med=made;mek=make;mekeng=making;meking=making;meks=makes;meladi=melody;meladis=melodies;melodies=melodies;melody=melody;meludi=melody;meludis=melodies;memari=memory;memaris=memories;memeri=memory;memeris=memories;memories=memories;memory=memory;men=man,men;meni=many;mes=miss;mesas=misses;meseng=missing;meses=misses,mrs;mesing=missing;mesis=misses,mrs;mest=missed;mestar=mr,mister;mester=mr,mister;mesus=misses;met=met;mi=me;migt=might;mind=mind;minds=minds;mine=mine;mis=miss;misas=misses;miseng=missing;mises=misses,mrs;mising=missing;misis=misses,mrs;miss=miss;missed=missed;misses=misses;missing=missing;mist=missed;mistar=mr,mister;mister=mr,mister;misus=misses;mm=mm;mom=mom;moma=mama;momant=moment;momants=moments;moment=moment;moments=moments;momu=mama;momunt=moment;momunts=moments;money=money;mor=more;more=more;morneng=morning;mornengs=mornings;morning=morning;mornings=mornings;mos=most;most=most;moter=mother;move=move;moved=moved;moves=moves;moving=moving;mr=mr;mrs=mrs;much=much;mudar=mother;muder=mother;mun=moon;muni=money;muns=moons;musant=mustn't;music=music;must=must;mustnt=mustn't;musunt=mustn't;muv=move;muvd=moved;muveng=moving;muving=moving;muvs=moves;my=my;myself=myself;myujik=music;myusek=music;myusik=music;na=na;naidar=neither;naider=neither;nait=night;naits=nights;name=name;names=names;nan=none;nat=not;nateng=nothing;nating=nothing;nau=now;nav=now;naym=name;nayms=names;near=near;neim=name;neiter=neither;neks=next;nekst=next;nem=name;nems=names;ner=near;nev=new;nevar=never;never=never,newer;next=next;nid=need;nidad=needed;nidar=neither;nided=needed;nideng=needing;nider=neither;nidid=needed;niding=needing;nids=needs;nidud=needed;nigt=night;nigts=nights;nir=near;no=no,na,know;noeng=knowing;noing=knowing;non=known;none=none;nop=nope;nope=nope;nos=knows;not=not;noting=nothing;nov=now;nu=knew,new;nuar=newer;nuer=newer;nun=none;nuteng=nothing;nuting=nothing;nyu=knew,new;o=oh,ah;of=of;oh=oh;ok=ok;okay=okay,ok;oke=okay,ok;ol=all;old=old;oldar=older;older=older;olmost=almost;olrait=alright;olredi=already;olso=also;olvays=always;olves=always;olvis=always;on=on;once=once;one=one;onli=only;only=only;onto=onto;ontu=onto;or=or,our,are;orant=aren't;oredi=already;orms=arms;ornt=aren't;ors=ours;orselvs=ourselves;orunt=aren't;oter=other;our=our;ours=ours;ourselves=ourselves;out=out;outside=outside;ovar=over;over=over;pain=pain;pains=pains;pap=pop;papa=papa;papu=papa;parhaps=perhaps;parheps=perhaps;parsan=person;parsun=person;parti=party;parties=parties;partis=parties;party=party;payn=pain;payns=pains;pen=pain;pens=pains;people=people;perhaps=perhaps;perheps=perhaps;persan=person;person=person;persun=person;pipal=people;pipul=people;place=place;places=places;plaing=playing;plane=plane;planes=planes;play=play;playd=played;played=played;playeng=playing;playn=plane;playns=planes;plays=plays,place;playsas=places;playses=places;playsis=places;playsus=places;ple=play;please=please;pled=played;pleing=playing;plen=plane;plens=planes;ples=plays,place;plesas=places;pleses=places;plesis=places;plesus=places;pling=playing;plis=please;pop=pop;popa=papa;popu=papa;porti=party;portis=parties;prababli=probably;prabli=probably;prabubli=probably;prens=prince;prenses=princess;preti=pretty;pretty=pretty;prince=prince;princess=princess;prins=prince;prinses=princess;priti=pretty;probabli=probably;probably=probably;probli=probably;probubli=probably;question=question;questions=questions;quin=queen;rain=rain;rains=rains;rais=rise;raisas=rises;raiseng=rising;raises=rises;raising=rising;raisis=rises;raisus=rises;rait=right;rak=rock;ran=run,ran;raneng=running;rang=wrong;raning=running;rans=runs;rap=rap;rayn=rain;rayns=rains;real=real;really=really;reason=reason;reasons=reasons;red=red;redam=rhythm;redams=rhythms;redum=rhythm;redums=rhythms;reli=really;remembar=remember;remembard=remembered;remembareng=remembering;remembaring=remembering;remembars=remembers;remember=remember;rememberd=remembered;remembered=remembered;remembereng=remembering;remembering=remembering;remembers=remembers;remembreng=remembering;remembring=remembering;ren=ran,rain;rens=rains;rep=rap;resan=risen;resun=risen;rhytm=rhythm;rhytms=rhythms;ridam=rhythm;ridams=rhythms;ridum=rhythm;ridums=rhythms;rigt=right;ril=real;rili=really;rimembar=remember;rimembard=remembered;rimembareng=remembering;rimembaring=remembering;rimembars=remembers;rimember=remember;rimemberd=remembered;rimembereng=remembering;rimembering=remembering;rimembers=remembers;rimembreng=remembering;rimembring=remembering;risan=risen,reason;risans=reasons;rise=rise;risen=risen;rises=rises;rising=rising;risun=risen,reason;risuns=reasons;road=road;roads=roads;rock=rock;rod=road;rods=roads;rok=rock;rol=roll;roll=roll;rong=wrong;ros=rose;rose=rose;rum=room;rums=rooms;run=run;runeng=running;runing=running;running=running;runs=runs;sa=saw;sadnas=sadness;sadness=sadness;sadnus=sadness;saft=soft;said=said;saing=saying;sam=some;same=same;samteng=something;samting=something;san=sun;sang=sang,sung,song;sangs=songs;sans=suns;sari=sorry;saund=sound;saunds=sounds;sauns=sounds;sav=saw;save=save;saved=saved;saves=saves;saving=saving;savnd=sound;savnds=sounds;savns=sounds;say=say;sayeng=saying;saym=same;says=says;sayv=save;sayvd=saved;sayveng=saving;sayving=saving;sayvs=saves;se=say;secret=secret;secrets=secrets;sed=said;sednas=sadness;sednus=sadness;seing=saying;sem=same;seng=sing,sang;sengeng=singing;senging=singing;sengs=sings;ses=says;sestar=sister;sester=sister;seti=city;setis=cities;sev=save;sevd=saved;seveng=saving;seving=saving;sevs=saves;sey=say;shado=shadow;shados=shadows;shadov=shadow;shadovs=shadows;shain=shine;shaineng=shining;shaining=shining;shains=shines;shal=shall;shall=shall;she=she;shedo=shadow;shedos=shadows;shel=shall;shes=she's;shi=she;shine=shine;shines=shines;shining=shining;shis=she's;sho=show;shod=showed;shoeng=showing;shoing=showing;shon=shown,shone;shone=shone;shos=shows;should=should;shouldnt=shouldn't;shov=show;shoved=showed;shoving=showing;shovn=shown;shovs=shows;shud=should;shudant=shouldn't;shudunt=shouldn't;shurli=surely;si=see;sieng=seeing;sikrat=secret;sikrats=secrets;sikret=secret;sikrets=secrets;sikrit=secret;sikrits=secrets;sikrut=secret;sikruts=secrets;sin=seen;sing=seeing,saying,sing;singeng=singing;singing=singing;sings=sings;sis=sees,says;sistar=sister;sister=sister;siti=city;sitis=cities;skai=sky;skais=skies;sken=skin;skies=skies;skin=skin;sky=sky;slept=slept;slip=sleep;slipeng=sleeping;sliping=sleeping;slips=sleeps;smail=smile;smaild=smiled;smaileng=smiling;smailing=smiling;smails=smiles;smal=small;smalar=smaller;smalast=smallest;smaler=smaller;small=small;smaller=smaller;smallest=smallest;smalust=smallest;smile=smile;smiled=smiled;smiles=smiles;smiling=smiling;smol=small;smolar=smaller;smolast=smallest;smoler=smaller;smolust=smallest;so=so,saw;soft=soft;sol=soul;sols=souls;some=some;someting=something;song=song;songs=songs;sori=sorry;sorry=sorry;soul=soul;souls=souls;sound=sound;sounds=sounds;speak=speak;speaking=speaking;speaks=speaks;spik=speak;spikeng=speaking;spiking=speaking;spiks=speaks;spok=spoke;spokan=spoken;spoke=spoke;spoken=spoken;spokun=spoken;staing=staying;stap=stop;stapeng=stopping;staping=stopping;staps=stops;stapt=stopped;star=star;stari=story;staris=stories;stars=stars;start=start;started=started;starteng=starting;startid=started;starting=starting;starts=starts;stay=stay;stayd=stayed;stayed=stayed;stayeng=staying;stays=stays;ste=stay;sted=stayed;steing=staying;stel=still;stes=stays;stil=still;still=still;sting=staying;stop=stop;stopeng=stopping;stoping=stopping;stopped=stopped;stopping=stopping;stops=stops;stopt=stopped;stor=star;stori=story;stories=stories;storis=stories;stors=stars;stort=start;storted=started;storteng=starting;stortid=started;storting=starting;storts=starts;story=story;strang=strong;strangar=stronger;stranger=stronger;stranggar=stronger;strangger=stronger;strit=street;strits=streets;strong=strong;strongar=stronger;stronger=stronger;stronggar=stronger;strongger=stronger;sum=some;sumteng=something;sumting=something;sun=soon,sun;sung=sung;suns=suns;surely=surely;svit=sweet;svitar=sweeter;svitart=sweetheart;svitast=sweetest;sviteart=sweetheart;sviter=sweeter;svitest=sweetest;svitort=sweetheart;svitust=sweetest;ta=to;tach=touch;tachas=touches;tacheng=touching;taches=touches;taching=touching;tachis=touches;tacht=touched;tachus=touches;taday=today;tade=today;tagedar=together;tageder=together;taim=time;taims=times;tak=talk;take=take;taken=taken;takeng=talking;takes=takes;taking=taking,talking;taks=talks;takt=talked;talk=talk;talked=talked;talking=talking;talks=talks;tamaro=tomorrow;tamoro=tomorrow;tanait=tonight;tangk=thank;tangks=thanks;tank=thank;tanks=thanks;tarn=turn;tarnd=turned;tarneng=turning;tarning=turning;tarns=turns;tat=that,thought;tats=that's;taun=town;tauns=towns;tavn=town;tavns=towns;tayk=take;taykan=taken;taykeng=taking;tayking=taking;tayks=takes;taykun=taken;te=the,to;tear=tear;tears=tears;teir=their;teirs=theirs;tek=take;tekan=taken;tekeng=taking;teking=taking;teks=takes;tekun=taken;tel=tell;teleng=telling;teling=telling;tell=tell;telling=telling;tells=tells;tels=tells;tem=them;temselves=themselves;ten=then;teng=thing;tengk=thank,think;tengkeng=thinking;tengking=thinking;tengks=thanks,thinks;tengs=things;ter=tear;tere=there;teres=there's;tern=turn;ternd=turned;terneng=turning;terning=turning;terns=turns;ters=tears;tese=these;tey=they;teyd=they'd;teyll=they'll;teyre=they're;teyve=they've;ti=to;time=time;times=times;ting=thing;tingk=think;tingkeng=thinking;tingking=thinking;tingks=thinks;tings=things;tink=think;tinking=thinking;tinks=thinks;tir=tear;tirs=tears;tis=this;to=to;today=today;togeter=together;tok=talk;tokeng=talking;toking=talking;toks=talks;tokt=talked;told=told;tomorrov=tomorrow;tonait=tonight;tonigt=tonight;tose=those;tot=thought;touch=touch;touched=touched;touches=touches;touching=touching;tougt=thought;tovn=town;tovns=towns;trai=try;traid=tried;traieng=trying;train=train;traing=trying;trains=trains;trais=tries;trayn=train;trayns=trains;tren=train;trens=trains;tri=three;tried=tried;tries=tries;troug=through;tru=through,true;true=true;truli=truly;truly=truly;trut=truth;truts=truths;try=try;trying=trying;tu=to,two,too;tuch=touch;tuchas=touches;tucheng=touching;tuches=touches;tuching=touching;tuchis=touches;tucht=touched;tuchus=touches;tuday=today;tude=today;tugedar=together;tugeder=together;tuk=took;tumaro=tomorrow;tumoro=tomorrow;tunait=tonight;turn=turn;turned=turned;turning=turning;turns=turns;tvais=twice;tvice=twice;tvo=two;u=a,ooh,uh;ubaut=about;ubav=above;ubavt=about;ubuv=above;udar=other;uder=other;ugayn=again;ugaynst=against;ugen=again;ugenst=against;uh=ooh,uh;ulon=alone;um=i'm;umang=among;umung=among;un=an;unadar=another;unader=another;und=and;undar=under;under=under;unudar=another;unuder=another;up=up;upart=apart;uport=apart;us=us;uv=of;uvay=away;uve=away;vach=watch;vachas=watches;vacheng=watching;vaches=watches;vaching=watching;vachis=watches;vacht=watched;vachus=watches;vai=why;vaild=wild;vais=why's;vait=white;vak=walk;vake=wake;vakeng=walking;vakes=wakes;vaking=walking,waking;vaks=walks;vakt=walked;val=will,wall;valk=walk;valked=walked;valking=walking;valks=walks;vall=wall;valls=walls;vals=walls;van=one;vana=wanna;vaneng=wanting;vaning=wanting;vanna=wanna;vans=once;vant=want;vanted=wanted;vanteng=wanting;vantid=wanted;vanting=wanting;vants=wants;vanu=wanna;var=were,we're;varant=weren't;vard=word;vards=words;varld=world;varlds=worlds;varm=warm;varnt=weren't;vars=worse;varst=worst;varunt=weren't;vas=was;vasant=wasn't;vasnt=wasn't;vasunt=wasn't;vat=what;vatch=watch;vatched=watched;vatches=watches;vatching=watching;vats=what's;vay=way;vayk=wake;vaykeng=waking;vayking=waking;vayks=wakes;vays=ways;ve=we,way;veak=weak;vech=which;ved=with,we'd;vedaut=without;vedavt=without;vek=wake;vekeng=waking;veking=waking;veks=wakes;vel=will,we'll;vell=we'll;veman=women;vemun=women;ven=when;vendo=window;vendos=windows;vens=when's;vent=went;ver=where,were,we're;verant=weren't;verd=word;verds=words;vere=were,we're;verent=weren't;veri=very;verld=world;verlds=worlds;vernt=weren't;vers=worse,where's;verst=worst;verunt=weren't;very=very;ves=ways;vesh=wish;vesheng=wishing;veshes=wishes;veshing=wishing;veshis=wishes;vesht=wished;vet=with;vetaut=without;vetavt=without;veve=we've;vhat=what;vhats=what's;vhen=when;vhens=when's;vhere=where;vheres=where's;vhich=which;vhite=white;vho=who;vhoa=whoa;vhole=whole;vhom=whom;vhos=who's;vhose=whose;vhu=whoo;vhy=why;vhys=why's;vi=we;vich=which;vid=with,we'd;vidaut=without;vidavt=without;vik=weak;vil=will,we'll;vild=wild;vill=will;viman=women;vimun=women;vin=when;vindo=window;vindos=windows;vindov=window;vindovs=windows;vir=we're;vish=wish;vished=wished;visheng=wishing;vishes=wishes;vishing=wishing;vishis=wishes;visht=wished;vit=with;vitaut=without;vitavt=without;vitout=without;viv=we've;vo=whoa;voch=watch;vochas=watches;vocheng=watching;voches=watches;voching=watching;vochis=watches;vocht=watched;vochus=watches;voice=voice;voices=voices;vois=voice;voisas=voices;voises=voices;voisis=voices;voisus=voices;vok=walk,woke;voke=woke;vokeng=walking;voking=walking;voks=walks;vokt=walked;vol=wall;vols=walls;voman=woman;vomen=women;vona=wanna;voneng=wanting;voning=wanting;vont=want,won't;vonted=wanted;vonteng=wanting;vontid=wanted;vonting=wanting;vonts=wants;vonu=wanna;vord=word;vords=words;vorld=world;vorlds=worlds;vorm=warm;vorse=worse;vorst=worst;vos=was;vosant=wasn't;vosunt=wasn't;vot=what;vould=would;vouldnt=wouldn't;voys=voice;voysas=voices;voyses=voices;voysis=voices;voysus=voices;vrong=wrong;vu=woo,whoo;vud=would;vudant=wouldn't;vudunt=wouldn't;vul=will;vuman=woman;vumun=woman;vun=one;vuns=once;vus=was;vusant=wasn't;vusunt=wasn't;vut=what;vuts=what's;ya=yeah;yang=young;yanggar=younger;yangger=younger;yar=your;yars=yours,years;yarself=yourself;yarselvs=yourselves;yas=yes;yay=yea;ye=yeah,yea;yea=yea;yeah=yeah;year=year;years=years;yep=yep;yer=year;yers=yours,years;yerself=yourself;yes=yes;yestarday=yesterday;yestarde=yesterday;yestardi=yesterday;yesterday=yesterday;yesterde=yesterday;yesterdi=yesterday;yet=yet;yir=year;yirs=years;yo=yo;yor=your;yors=yours;yorself=yourself;yorselvs=yourselves;you=you;youd=you'd;youll=you'll;young=young;younger=younger;your=your;youre=you're;yours=yours;yourself=yourself;yourselves=yourselves;youve=you've;yu=you;yud=you'd;yues=us;yul=you'll;yung=young;yunggar=younger;yungger=younger;yur=your,you're;yurs=yours;yurself=yourself;yurselvs=yourselves;yuv=you've;iu=you;lab=love";
+    let indicEnglishPronunciationIndex = null;
+
+    function normalizeIndicEnglishSurface(value) {
+        return String(value || '')
+            .toLowerCase()
+            .replace(/[’‘]/g, "'")
+            .replace(/aayee|aayi|aai|ayee/g, 'ai')
+            .replace(/ayi/g, 'ai')
+            .replace(/aa/g, 'a')
+            .replace(/ee/g, 'i')
+            .replace(/^ayi$/, 'ai')
+            .replace(/oo/g, 'u')
+            .replace(/chh/g, 'ch')
+            .replace(/kh/g, 'k')
+            .replace(/gh/g, 'g')
+            .replace(/ph/g, 'f')
+            .replace(/bh/g, 'b')
+            .replace(/dh/g, 'd')
+            .replace(/th/g, 't')
+            .replace(/w/g, 'v')
+            .replace(/z/g, 's')
+            .replace(/([aeiou])\1+/g, '$1')
+            .replace(/[^a-z]/g, '');
+    }
+
+    function englishOrthographicKey(value) {
+        return String(value || '')
+            .toLowerCase()
+            .replace(/[’‘]/g, "'")
+            .replace(/[^a-z']/g, '')
+            .replace(/'/g, '');
+    }
+
+    function getIndicEnglishPronunciationIndex() {
+        if (indicEnglishPronunciationIndex) return indicEnglishPronunciationIndex;
+        const bySignature = new Map();
+        const words = new Set();
+        INDIC_ENGLISH_PRONUNCIATION_PACKED.split(';').forEach(record => {
+            if (!record) return;
+            const separator = record.indexOf('=');
+            if (separator <= 0) return;
+            const signature = record.slice(0, separator);
+            const candidates = record.slice(separator + 1).split(',').filter(Boolean);
+            if (!signature || !candidates.length) return;
+            bySignature.set(signature, candidates);
+            candidates.forEach(word => words.add(word));
+        });
+        indicEnglishPronunciationIndex = { bySignature, words };
+        return indicEnglishPronunciationIndex;
+    }
+
+    function scriptedEnglishCandidates(baseline) {
+        const signature = normalizeIndicEnglishSurface(baseline);
+        if (!signature) return [];
+        const index = getIndicEnglishPronunciationIndex();
+        const words = index.bySignature.get(signature) || [];
+        const orthographic = englishOrthographicKey(baseline);
+        return words.slice(0, 5).map((word, candidateIndex) => {
+            const canonicalKey = englishOrthographicKey(word);
+            let score = 0.86 - (candidateIndex * 0.045);
+            if (canonicalKey === orthographic) score += 0.26;
+            if (word === 'i' && /^(?:ai|aayi)$/i.test(String(baseline || ''))) score += 0.08;
+            return {
+                word,
+                signature,
+                score: Math.max(0, Math.min(1.25, score)),
+                orthographicMatch: canonicalKey === orthographic
+            };
+        });
+    }
+
+    const ENGLISH_RECOVERY_ARTICLES = Object.freeze(new Set(['a','an','the']));
+    const ENGLISH_RECOVERY_PRONOUNS = Object.freeze(new Set([
+        'i','me','you','he','him','she','it','we','us','they','them','who','whom'
+    ]));
+    const ENGLISH_RECOVERY_POSSESSIVES = Object.freeze(new Set([
+        'my','mine','your','yours','his','her','hers','its','our','ours','their','theirs','whose'
+    ]));
+    const ENGLISH_RECOVERY_CONJUNCTIONS = Object.freeze(new Set(['and','or','but','so']));
+    const ENGLISH_RECOVERY_AUXILIARIES = Object.freeze(new Set([
+        'am','is','are','was','were','be','been','have','has','had','do','does','did',
+        'can','could','may','might','must','shall','should','will','would'
+    ]));
+    const ENGLISH_RECOVERY_VERBS = Object.freeze(new Set([
+        'met','get','got','make','made','take','took','give','gave','come','came','go','went','stay','leave','left',
+        'run','ran','walk','move','turn','stop','start','hold','touch','kiss','hug','look','see','saw','watch','hear','heard',
+        'listen','say','said','tell','told','talk','speak','spoke','call','called','know','knew','think','thought','feel','felt',
+        'want','need','like','love','hate','miss','find','found','lose','lost','keep','kept','let','remember','forget','believe',
+        'hope','wish','dream','try','play','sing','sang','dance','smile','laugh','cry','live','die','breathe','sleep','wake','fall',
+        'fell','rise','rose','fly','flew','break','broke','fix','save','change','show','hide','shine','burn','light'
+    ]));
+
+    function englishRecoveryWordClass(word) {
+        const value = String(word || '').toLowerCase();
+        if (!value) return 'none';
+        if (ENGLISH_RECOVERY_ARTICLES.has(value)) return 'article';
+        if (ENGLISH_RECOVERY_PRONOUNS.has(value)) return 'pronoun';
+        if (ENGLISH_RECOVERY_POSSESSIVES.has(value)) return 'possessive';
+        if (ENGLISH_RECOVERY_CONJUNCTIONS.has(value)) return 'conjunction';
+        if (ENGLISH_RECOVERY_AUXILIARIES.has(value)) return 'auxiliary';
+        if (ENGLISH_RECOVERY_VERBS.has(value)) return 'verb';
+        if (/^(?:what|why|when|where|who|how|which)$/.test(value)) return 'question';
+        return 'content';
+    }
+
+    function englishRecoveryTransition(leftWord, rightWord) {
+        if (!leftWord || !rightWord) return 0;
+        const left = englishRecoveryWordClass(leftWord);
+        const right = englishRecoveryWordClass(rightWord);
+        let score = 0;
+
+        if (left === 'article' && (right === 'content' || right === 'verb')) score += 0.16;
+        if (left === 'article' && right === 'conjunction') score -= 0.18;
+        if (left === 'possessive' && (right === 'content' || right === 'verb')) score += 0.17;
+        if (left === 'pronoun' && (right === 'auxiliary' || right === 'verb')) score += 0.22;
+        if (left === 'auxiliary' && (right === 'pronoun' || right === 'article' || right === 'possessive' || right === 'content' || right === 'verb')) score += 0.10;
+        if ((left === 'content' || left === 'verb') && right === 'auxiliary') score += 0.15;
+        if ((left === 'content' || left === 'verb' || left === 'pronoun') && right === 'conjunction') score += 0.16;
+        if (left === 'conjunction' && (right === 'pronoun' || right === 'article' || right === 'possessive' || right === 'content' || right === 'verb')) score += 0.22;
+        if (left === 'question' && (right === 'auxiliary' || right === 'pronoun')) score += 0.16;
+
+        if (leftWord === 'name' && rightWord === 'is') score += 0.28;
+        if (leftWord === 'and' && ENGLISH_RECOVERY_POSSESSIVES.has(rightWord)) score += 0.12;
+        if (leftWord === 'the' && rightWord === 'end') score += 0.34;
+        return score;
+    }
+
+    function scriptedEnglishProtection(span, descriptor) {
+        const word = String(span && span.text || '');
+        if (descriptor.key === 'devanagari') {
+            if (DEVANAGARI_ENGLISH_CONTEXT_CONVERTIBLE.has(word)) return 'context-ambiguous';
+            if (devanagariLexiconEntry(word) || DEVANAGARI_NATIVE_GUARD_WORDS.has(word)) return 'native-strong';
+            return 'none';
+        }
+        if (descriptor.key === 'gurmukhi') {
+            return GURMUKHI_LYRIC_OVERRIDES[word] ? 'native-strong' : 'none';
+        }
+        if (descriptor.config && descriptor.config.overrides && descriptor.config.overrides[word]) {
+            return 'native-strong';
+        }
+        return 'none';
+    }
+
+    function isHardEnglishRecoveryBoundary(text) {
+        return /[.!?;:\n\r।॥]/u.test(String(text || ''));
+    }
+
+    function canonicalRecoveredEnglish(word, sentenceInitial) {
+        let value = String(word || '');
+        if (/^i(?:'|$)/.test(value)) value = `I${value.slice(1)}`;
+        if (sentenceInitial && /^[a-z]/.test(value)) {
+            value = value.charAt(0).toUpperCase() + value.slice(1);
+        }
+        return value;
+    }
+
+    const SCRIPTED_ENGLISH_RECOVERY_CACHE_MAX = 192;
+    const scriptedEnglishRecoveryCache = new Map();
+
+    function cacheScriptedEnglishPlan(text, value) {
+        if (scriptedEnglishRecoveryCache.has(text)) scriptedEnglishRecoveryCache.delete(text);
+        scriptedEnglishRecoveryCache.set(text, value);
+        while (scriptedEnglishRecoveryCache.size > SCRIPTED_ENGLISH_RECOVERY_CACHE_MAX) {
+            const oldest = scriptedEnglishRecoveryCache.keys().next();
+            if (oldest.done) break;
+            scriptedEnglishRecoveryCache.delete(oldest.value);
+        }
+        return value;
+    }
+
+    function getScriptedEnglishRecoveryPlan(input) {
+        const raw = String(input == null ? '' : input);
+        const text = typeof raw.normalize === 'function' ? raw.normalize('NFC') : raw;
+        if (scriptedEnglishRecoveryCache.has(text)) {
+            const cached = scriptedEnglishRecoveryCache.get(text);
+            scriptedEnglishRecoveryCache.delete(text);
+            scriptedEnglishRecoveryCache.set(text, cached);
+            return cached;
+        }
+
+        const spans = segmentText(text);
+        if (!spans.some(span => INDIC_ENGLISH_RECOVERY_SCRIPT_KEYS.has(span.key))) {
+            return cacheScriptedEnglishPlan(text, { active: false, text: null, spans, replacements: new Map(), recognitions: new Map(), tokens: [] });
+        }
+
+        const tokens = [];
+        let group = 0;
+        spans.forEach((span, spanIndex) => {
+            if (span.key === 'common') {
+                if (isHardEnglishRecoveryBoundary(span.text)) group += 1;
+                return;
+            }
+
+            const descriptor = scriptDescriptorForCharacter(span.text.charAt(0));
+            descriptor.key = span.key;
+            descriptor.language = span.language;
+            descriptor.script = span.script;
+            descriptor.dedicated = span.dedicated;
+
+            if (span.key === 'latin') {
+                const orthographic = englishOrthographicKey(span.text);
+                const index = getIndicEnglishPronunciationIndex();
+                tokens.push({
+                    span, spanIndex, descriptor, group,
+                    baseline: span.text,
+                    candidates: index.words.has(String(span.text || '').toLowerCase())
+                        ? [{ word: String(span.text || '').toLowerCase(), signature: orthographic, score: 1.1, orthographicMatch: true }]
+                        : [],
+                    protection: 'latin',
+                    latin: true,
+                    anchor: index.words.has(String(span.text || '').toLowerCase()) && orthographic.length > 1
+                });
+                return;
+            }
+
+            if (!INDIC_ENGLISH_RECOVERY_SCRIPT_KEYS.has(span.key)) return;
+            const baseline = romanizeBase(span.text);
+            const candidates = scriptedEnglishCandidates(baseline);
+            const protection = scriptedEnglishProtection(span, descriptor);
+            const anchor = !!(
+                candidates.length
+                && protection === 'none'
+                && candidates[0].score >= 0.78
+            );
+            tokens.push({
+                span, spanIndex, descriptor, group, baseline, candidates,
+                protection, latin: false, anchor
+            });
+        });
+
+        const activeTokenIndexes = new Set();
+        const groups = new Map();
+        tokens.forEach((token, tokenIndex) => {
+            if (!groups.has(token.group)) groups.set(token.group, []);
+            groups.get(token.group).push(tokenIndex);
+        });
+
+        groups.forEach(indexes => {
+            const anchors = indexes.filter(index => tokens[index].anchor);
+            if (anchors.length < 2) return;
+            let clusterStart = 0;
+            for (let cursor = 1; cursor <= anchors.length; cursor += 1) {
+                const split = cursor === anchors.length || (anchors[cursor] - anchors[cursor - 1]) > 4;
+                if (!split) continue;
+                const cluster = anchors.slice(clusterStart, cursor);
+                clusterStart = cursor;
+                if (cluster.length < 2) continue;
+                const groupFirst = indexes[0];
+                const groupLast = indexes[indexes.length - 1];
+                const first = Math.max(groupFirst, cluster[0] - 2);
+                const last = Math.min(groupLast, cluster[cluster.length - 1] + 3);
+                for (let index = first; index <= last; index += 1) {
+                    if (tokens[index] && tokens[index].group === tokens[cluster[0]].group) {
+                        activeTokenIndexes.add(index);
+                    }
+                }
+            }
+        });
+
+        const bestCandidateWord = token => {
+            if (!token) return '';
+            if (token.latin) return token.candidates.length ? token.candidates[0].word : '';
+            if (!token.candidates.length) return '';
+            return token.candidates[0].word;
+        };
+
+        const replacements = new Map();
+        const recognitions = new Map();
+        tokens.forEach((token, tokenIndex) => {
+            if (token.latin || !activeTokenIndexes.has(tokenIndex) || !token.candidates.length) return;
+            if (token.protection === 'native-strong') return;
+
+            const previousToken = tokenIndex > 0 && tokens[tokenIndex - 1].group === token.group
+                ? tokens[tokenIndex - 1]
+                : null;
+            const nextToken = tokenIndex + 1 < tokens.length && tokens[tokenIndex + 1].group === token.group
+                ? tokens[tokenIndex + 1]
+                : null;
+            const previousWord = bestCandidateWord(previousToken);
+            const nextWord = bestCandidateWord(nextToken);
+
+            let best = null;
+            token.candidates.forEach(candidate => {
+                let score = candidate.score + 0.16;
+                score += englishRecoveryTransition(previousWord, candidate.word);
+                score += englishRecoveryTransition(candidate.word, nextWord);
+                if (tokenIndex === 0 && candidate.word === 'i') score += 0.10;
+                if (candidate.word === 'end' && !nextWord) score += 0.08;
+                if (!best || score > best.score) best = Object.assign({}, candidate, { score });
+            });
+            if (!best) return;
+
+            const minimum = token.protection === 'context-ambiguous' ? 0.88 : 0.80;
+            if (best.score < minimum) return;
+
+            const recovered = canonicalRecoveredEnglish(best.word, tokenIndex === 0);
+            if (!recovered) return;
+            const decision = {
+                sourceStart: token.span.start,
+                sourceEnd: token.span.end,
+                source: token.span.text,
+                baseline: token.baseline,
+                text: recovered,
+                word: best.word,
+                signature: best.signature,
+                confidence: Number(Math.min(0.99, 0.78 + Math.max(0, best.score - 0.80) * 0.25).toFixed(3)),
+                protection: token.protection,
+                evidence: 'multi-anchor-scripted-english-context'
+            };
+            recognitions.set(token.span.start, decision);
+            if (recovered !== token.baseline) replacements.set(token.span.start, decision);
+        });
+
+        if (!replacements.size) {
+            return cacheScriptedEnglishPlan(text, { active: false, text: null, spans, replacements, recognitions, tokens });
+        }
+
+        let output = '';
+        spans.forEach(span => {
+            const replacement = replacements.get(span.start);
+            output += replacement && replacement.sourceEnd === span.end
+                ? replacement.text
+                : romanizeBase(span.text);
+        });
+        output = output
+            .replace(/[’‘]/g, "'")
+            .replace(/[ \t]+([,.;:!?])/g, '$1')
+            .replace(/([([{])\s+/g, '$1')
+            .replace(/\s+([)\]}])/g, '$1')
+            .replace(/[ \t]{2,}/g, ' ');
+
+        return cacheScriptedEnglishPlan(text, {
+            active: true,
+            text: output,
+            spans,
+            replacements,
+            recognitions,
+            tokens
+        });
+    }
+
+    function scriptedEnglishRecovery(input) {
+        const plan = getScriptedEnglishRecoveryPlan(input);
+        return {
+            active: !!plan.active,
+            text: plan.active ? plan.text : romanizeBase(input),
+            replacements: Array.from(plan.replacements.values()).map(item => Object.assign({}, item)),
+            recognitions: Array.from((plan.recognitions || new Map()).values()).map(item => Object.assign({}, item))
+        };
+    }
+
     function appendMapped(out, value, kind, previousKind) {
         if (!value) return out;
         if (kind === 'han' && previousKind === 'han' && out && !/\s$/.test(out)) {
@@ -2243,7 +2672,7 @@
         return out + value;
     }
 
-    function romanize(input) {
+    function romanizeBase(input) {
         const rawText = String(input == null ? '' : input);
         const text = typeof rawText.normalize === 'function' ? rawText.normalize('NFC') : rawText;
         const characters = Array.from(text);
@@ -2354,6 +2783,14 @@
             .replace(/([([{])\s+/g, '$1')
             .replace(/\s+([)\]}])/g, '$1')
             .replace(/[ \t]{2,}/g, ' ');
+    }
+
+
+    function romanize(input) {
+        const rawText = String(input == null ? '' : input);
+        const text = typeof rawText.normalize === 'function' ? rawText.normalize('NFC') : rawText;
+        const plan = getScriptedEnglishRecoveryPlan(text);
+        return plan.active ? plan.text : romanizeBase(text);
     }
 
     function wordRangeAtBoundary(text, sourceIndex, predicate) {
@@ -2481,6 +2918,117 @@
         return { starts, ends };
     }
 
+
+    function scriptedEnglishSpanBaseMaps(span) {
+        const descriptor = scriptDescriptorForCharacter(span.text.charAt(0));
+        descriptor.key = span.key;
+        descriptor.language = span.language;
+        descriptor.script = span.script;
+        descriptor.dedicated = span.dedicated;
+
+        if (descriptor.key === 'devanagari') {
+            return romanizeDevanagariWordDetailed(span.text);
+        }
+        if (descriptor.key === 'gurmukhi') {
+            return romanizeGurmukhiWordDetailed(span.text);
+        }
+        if (descriptor.config) {
+            return romanizeConfiguredIndicWordDetailed(span.text, descriptor.config);
+        }
+
+        const baseline = romanizeBase(span.text);
+        if (baseline === span.text) {
+            const startMap = new Array(span.text.length + 1);
+            const endMap = new Array(span.text.length + 1);
+            for (let index = 0; index <= span.text.length; index += 1) {
+                startMap[index] = index;
+                endMap[index] = index;
+            }
+            return { text: baseline, startMap, endMap };
+        }
+        const approximate = proportionalBoundaryMaps(span.text.length, baseline.length);
+        return { text: baseline, startMap: approximate.startMap, endMap: approximate.endMap };
+    }
+
+    function composeScriptedEnglishSpanMaps(baseMaps, replacement) {
+        const target = String(replacement || '');
+        const baseline = String(baseMaps && baseMaps.text || '');
+        if (target === baseline) return baseMaps;
+        const alignment = alignAsciiBoundaryMaps(baseline, target);
+        const sourceLength = Math.max(
+            0,
+            Math.min(
+                Array.isArray(baseMaps.startMap) ? baseMaps.startMap.length - 1 : 0,
+                Array.isArray(baseMaps.endMap) ? baseMaps.endMap.length - 1 : 0
+            )
+        );
+        const startMap = new Array(sourceLength + 1);
+        const endMap = new Array(sourceLength + 1);
+        for (let index = 0; index <= sourceLength; index += 1) {
+            const rawStart = Number(baseMaps.startMap[index]);
+            const rawEnd = Number(baseMaps.endMap[index]);
+            const baselineStart = Math.max(0, Math.min(baseline.length, Number.isFinite(rawStart) ? rawStart : 0));
+            const baselineEnd = Math.max(0, Math.min(baseline.length, Number.isFinite(rawEnd) ? rawEnd : baselineStart));
+            startMap[index] = alignment.startMap[baselineStart];
+            endMap[index] = alignment.endMap[baselineEnd];
+        }
+        monotonicClampBoundaryMap(startMap, target.length);
+        monotonicClampBoundaryMap(endMap, target.length);
+        return { text: target, startMap, endMap };
+    }
+
+    function buildScriptedEnglishBoundaryMaps(text, full, plan) {
+        const source = String(text || '');
+        const output = String(full || '');
+        const starts = new Array(source.length + 1).fill(null);
+        const ends = new Array(source.length + 1).fill(null);
+        let outputCursor = 0;
+        let assembled = '';
+
+        (plan.spans || []).forEach(span => {
+            const recovery = plan.replacements.get(span.start);
+            const baseMaps = scriptedEnglishSpanBaseMaps(span);
+            const chunk = recovery && recovery.sourceEnd === span.end
+                ? recovery.text
+                : String(baseMaps.text || '');
+            const localMaps = recovery && recovery.sourceEnd === span.end
+                ? composeScriptedEnglishSpanMaps(baseMaps, chunk)
+                : baseMaps;
+
+            for (let local = 0; local <= span.text.length; local += 1) {
+                const sourceBoundary = span.start + local;
+                const localStart = Number(localMaps.startMap[local]);
+                const localEnd = Number(localMaps.endMap[local]);
+                starts[sourceBoundary] = outputCursor + (Number.isFinite(localStart) ? localStart : 0);
+                ends[sourceBoundary] = outputCursor + (Number.isFinite(localEnd) ? localEnd : 0);
+            }
+
+            assembled += chunk;
+            outputCursor += chunk.length;
+        });
+
+        /* The span assembly is expected to be identical to the contextual
+         * renderer. If a future punctuation transform changes that invariant,
+         * fall back to monotonic proportional mapping instead of returning
+         * misleading cue offsets. */
+        if (assembled !== output) {
+            const approximate = proportionalBoundaryMaps(source.length, output.length);
+            return { starts: approximate.startMap, ends: approximate.endMap, approximate: true };
+        }
+
+        starts[0] = 0;
+        ends[0] = 0;
+        starts[source.length] = output.length;
+        ends[source.length] = output.length;
+        monotonicClampBoundaryMap(starts, output.length);
+        monotonicClampBoundaryMap(ends, output.length);
+        for (let index = 0; index <= source.length; index += 1) {
+            if (ends[index] < starts[index]) ends[index] = starts[index];
+        }
+        monotonicClampBoundaryMap(ends, output.length);
+        return { starts, ends, approximate: false };
+    }
+
     function getBoundaryCacheEntry(text, knownFull = null) {
         if (boundaryCache.has(text)) {
             const cached = boundaryCache.get(text);
@@ -2502,6 +3050,7 @@
             normalizationStable,
             normalizationMaps,
             genericMaps: null,
+            scriptedEnglishMaps: null,
             starts: new Map(),
             ends: new Map(),
             prefixes: new Map(),
@@ -2558,6 +3107,21 @@
                 : entry.normalizationMaps.ends;
             const normalizedIndex = normalizationMap[index];
             result = mapBoundary(entry.normalized, normalizedIndex, side);
+        }
+
+        if (result === null) {
+            const scriptedEnglishPlan = getScriptedEnglishRecoveryPlan(text);
+            if (scriptedEnglishPlan.active) {
+                if (!entry.scriptedEnglishMaps) {
+                    entry.scriptedEnglishMaps = buildScriptedEnglishBoundaryMaps(
+                        text, full, scriptedEnglishPlan
+                    );
+                }
+                const contextualMap = side === 'start'
+                    ? entry.scriptedEnglishMaps.starts
+                    : entry.scriptedEnglishMaps.ends;
+                result = contextualMap[index];
+            }
         }
 
         if (result === null) {
@@ -2773,7 +3337,7 @@
     /*
      * Shared-script language evidence. Script alone cannot distinguish Hindi,
      * Marathi, Bhojpuri and Nepali in Devanagari, or Urdu from Shahmukhi
-     * Punjabi in Perso-Arabic. LyricG2P 6.5.1 therefore reports conservative
+     * Punjabi in Perso-Arabic. LyricG2P 6.6.0 therefore reports conservative
      * language evidence instead of pretending the Unicode block is a language.
      * These profiles only become authoritative when the margin is strong.
      */
@@ -2923,7 +3487,9 @@
     }
 
     function detectLanguages(input) {
-        const spans = segmentText(input);
+        const source = String(input == null ? '' : input);
+        const spans = segmentText(source);
+        const scriptedEnglishPlan = getScriptedEnglishRecoveryPlan(source);
         const results = [];
         spans.forEach((span, index) => {
             if (span.key === 'common') return;
@@ -2933,17 +3499,28 @@
             descriptor.script = span.script;
             descriptor.dedicated = span.dedicated;
             const evidence = contextualLanguageEvidence(spans, index, descriptor);
+            const scriptedEnglish = (scriptedEnglishPlan.recognitions || scriptedEnglishPlan.replacements).get(span.start);
+            const recovered = !!(scriptedEnglish && scriptedEnglish.sourceEnd === span.end);
             results.push({
                 source: span.text,
                 sourceStart: span.start,
                 sourceEnd: span.end,
                 script: span.script,
                 scriptLanguage: span.language,
-                language: evidence.language,
-                confidence: evidence.confidence,
-                decisive: evidence.decisive,
-                contextInherited: !!evidence.contextInherited,
-                candidates: evidence.candidates
+                language: recovered ? 'en' : evidence.language,
+                confidence: recovered ? scriptedEnglish.confidence : evidence.confidence,
+                decisive: recovered ? true : evidence.decisive,
+                contextInherited: recovered ? true : !!evidence.contextInherited,
+                scriptedEnglish: recovered
+                    ? {
+                        recovered: scriptedEnglish.text,
+                        baseline: scriptedEnglish.baseline,
+                        evidence: scriptedEnglish.evidence
+                    }
+                    : null,
+                candidates: recovered
+                    ? [{ language: 'en', label: 'English (phonetic Indic spelling)', score: 1, reasons: [scriptedEnglish.evidence] }].concat(evidence.candidates || [])
+                    : evidence.candidates
             });
         });
         return results;
@@ -3162,11 +3739,11 @@
         }
 
         if (descriptor.key === 'devanagari') {
-            const value = DEVANAGARI_LYRIC_OVERRIDES[word];
-            return value
+            const entry = devanagariLexiconEntry(word);
+            return entry
                 ? {
-                    romanized: value,
-                    source: 'curated-lyric-lexicon',
+                    romanized: entry.text,
+                    source: entry.source,
                     confidence: 0.995
                 }
                 : null;
@@ -3683,6 +4260,7 @@
     function romanizeDetailed(input) {
         const source = String(input == null ? '' : input);
         const output = romanize(source);
+        const scriptedEnglishPlan = getScriptedEnglishRecoveryPlan(source);
         /* Seed the boundary cache with the Romanization we just computed.
          * mapBoundary() is used repeatedly below for spans and provenance; without
          * this hint the first lookup redundantly Romanized the complete line. */
@@ -3723,6 +4301,8 @@
                     Math.min(startOut, endOut),
                     Math.max(startOut, endOut)
                 );
+            const scriptedEnglish = (scriptedEnglishPlan.recognitions || scriptedEnglishPlan.replacements).get(span.start);
+            const recoveredEnglish = !!(scriptedEnglish && scriptedEnglish.sourceEnd === span.end);
             const lexicon =
                 exactLexiconRomanization(
                     span.text,
@@ -3733,11 +4313,18 @@
                     span.text,
                     descriptor
                 );
-            const tokenClass = tokenClassEvidence(
-                span.text, descriptor, lexicon, morphology
-            );
-            const confidence =
-                confidenceForDescriptor(
+            const tokenClass = recoveredEnglish
+                ? {
+                    class: 'scripted-english',
+                    originHints: ['phonetic-english-in-indic-script', scriptedEnglish.evidence],
+                    properName: 'unknown'
+                }
+                : tokenClassEvidence(
+                    span.text, descriptor, lexicon, morphology
+                );
+            const confidence = recoveredEnglish
+                ? scriptedEnglish.confidence
+                : confidenceForDescriptor(
                     descriptor,
                     romanized,
                     lexicon,
@@ -3779,7 +4366,7 @@
             confidenceTotal += confidence * weight;
             confidenceWeight += weight;
 
-            const wordTransform = descriptor.dedicated
+            const wordTransform = descriptor.dedicated && !recoveredEnglish
                 ? wordTransformForDescriptor(span.text, descriptor)
                 : null;
             const phonemes = phonemeLikeUnits(span.text, descriptor).map(unit => {
@@ -3816,6 +4403,7 @@
             const uncertainty = uncertaintyReasons(
                 descriptor, romanized, languageEvidence, morphology, lexicon
             );
+            if (recoveredEnglish) uncertainty.push('scripted-english-contextual-reconstruction');
 
             spans.push({
                 source: span.text,
@@ -3826,12 +4414,15 @@
                 outputEnd: endOut,
                 script: span.script,
                 scriptLanguage: span.language,
-                language: languageEvidence.language,
-                languageConfidence: languageEvidence.confidence,
-                languageDecisive: languageEvidence.decisive,
-                languageCandidates: languageEvidence.candidates,
-                path:
-                    pathForDescriptor(
+                language: recoveredEnglish ? 'en' : languageEvidence.language,
+                languageConfidence: recoveredEnglish ? scriptedEnglish.confidence : languageEvidence.confidence,
+                languageDecisive: recoveredEnglish ? true : languageEvidence.decisive,
+                languageCandidates: recoveredEnglish
+                    ? [{ language: 'en', label: 'English (phonetic Indic spelling)', score: 1, reasons: [scriptedEnglish.evidence] }].concat(languageEvidence.candidates || [])
+                    : languageEvidence.candidates,
+                path: recoveredEnglish
+                    ? 'scripted-english-recovery'
+                    : pathForDescriptor(
                         descriptor,
                         lexicon,
                         romanized,
@@ -3854,8 +4445,17 @@
                         next
                             ? next.language
                             : null,
-                    codeSwitched
+                    codeSwitched,
+                    scriptedEnglish: recoveredEnglish
                 },
+                scriptedEnglish: recoveredEnglish
+                    ? {
+                        baseline: scriptedEnglish.baseline,
+                        recovered: scriptedEnglish.text,
+                        signature: scriptedEnglish.signature,
+                        evidence: scriptedEnglish.evidence
+                    }
+                    : null,
                 lexicon:
                     lexicon
                         ? {
@@ -4283,7 +4883,7 @@
             {
                 engine: `LyricG2P ${VERSION}`,
                 strategy:
-                    'targeted-learned-schwa+language-evidence+phonological-ir+production-morphology+lexicon+context+confidence+provenance'
+                    'scripted-english-recovery+targeted-learned-schwa+language-evidence+phonological-ir+production-morphology+lexicon+context+confidence+provenance'
             },
             detailed
         );
@@ -4301,6 +4901,7 @@
         version: VERSION,
         romanize,
         romanizeDetailed,
+        scriptedEnglishRecovery,
         segmentText,
         detectLanguages,
         phonologicalIR,
@@ -4312,13 +4913,17 @@
         mapBoundary,
         canRomanize,
         containsNativeScript,
-        strategy: 'offline-lyricg2p-v6.5.1+targeted-learned-schwa+language-evidence+phonological-ir+production-morphology+context+nbest+boundary-provenance+lazy-icu-fallback',
+        strategy: 'offline-lyricg2p-v6.6.0+scripted-english-recovery+loanword-pronunciation+targeted-learned-schwa+language-evidence+phonological-ir+production-morphology+context+nbest+boundary-provenance+lazy-icu-fallback',
         supportedLanguageFamilies: SUPPORTED_LANGUAGE_FAMILIES,
         offlineOnly: true,
         romanizationStyle: ROMANIZATION_STYLE,
         confidenceSemantics: 'evidence-score-not-probability',
         learnedModelBundled: false,
         learnedTransliterationModelBundled: false,
+        scriptedEnglishRecoveryBundled: true,
+        scriptedEnglishRecoveryPolicy: 'multi-anchor-context+native-lexicon-guards+phonetic-pronunciation-signatures',
+        loanwordPronunciationBundled: true,
+        loanwordPronunciationPolicy: 'curated-nukta-omission+lexicalized-compounds+native-aspiration-guards',
         targetedLearnedAdvisorsBundled: true,
         learnedComponentsBundled: true,
         learnedComponents: Object.freeze([

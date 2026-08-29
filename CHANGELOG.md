@@ -4,8 +4,16 @@ All notable public changes are documented here. The project follows Semantic Ver
 
 ## [Unreleased] — planned 3.2.6
 
+### Added
+
+- LyricG2P `6.6.0` scripted-English recovery for English lyrics written phonetically in first-class vowel-bearing Indic scripts. The decoder uses compact offline pronunciation signatures, multi-anchor context, native-word guards and local syntax scoring; it also carries reconstructed spellings through ELRC boundary mapping and diagnostics.
+- Public `scriptedEnglishRecovery()` diagnostics expose recognized/replaced tokens without any network dependency.
+- LyricG2P `6.6.0` also adds a curated Devanagari loanword-pronunciation layer for common lyrics that omit nukta marks, plus lexicalized compound pronunciations such as `हमसफर -> humsafar` without globally weakening native aspiration rules.
+
 ### Fixed
 
+- Devanagari loanwords written without nukta marks no longer force native `ph` where the established lyric pronunciation is `/f/` (`सफर -> safar`, `वफा -> wafa`, `फिक्र -> fikr`), while genuine native aspiration such as `फूल -> phool` and `फिर -> phir` remains protected.
+- Lexicalized `हमसफर` / `हमसफ़र` now Romanize as `humsafar` instead of `hamasphar` / `hamasfar`.
 - Album/folder-inherited covers applied late through a now-playing `background-image` style are now discovered continuously on static/untimed lyric pages instead of being missed after the initial probe window.
 - Plain untimed LRC lyrics now use the same LyricMotion typography and script-aware font fallbacks as synchronized lyrics while retaining native static behavior.
 - Non-glow-qualified ELRC words now stay on the normal neutral sweep instead of receiving a stray rise/drag jump without bloom.
