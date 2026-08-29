@@ -12,7 +12,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '6.6.0';
+    const VERSION = '6.8.1';
 
     const ROMANIZATION_STYLE = Object.freeze({
         id: 'lyricmotion-song-ascii-1',
@@ -140,6 +140,21 @@
     const SMALL_Y = Object.freeze({
         'ゃ':'ya','ゅ':'yu','ょ':'yo','ャ':'ya','ュ':'yu','ョ':'yo'
     });
+    const SMALL_VOWEL = Object.freeze({
+        'ぁ':'a','ぃ':'i','ぅ':'u','ぇ':'e','ぉ':'o',
+        'ァ':'a','ィ':'i','ゥ':'u','ェ':'e','ォ':'o'
+    });
+    const KANA_SMALL_VOWEL_COMPOUNDS = Object.freeze({
+        'ウィ':'wi','ウェ':'we','ウォ':'wo','ヴァ':'va','ヴィ':'vi','ヴェ':'ve','ヴォ':'vo',
+        'ファ':'fa','フィ':'fi','フェ':'fe','フォ':'fo','ティ':'ti','トゥ':'tu',
+        'ディ':'di','ドゥ':'du','チェ':'che','シェ':'she','ジェ':'je',
+        'ツァ':'tsa','ツィ':'tsi','ツェ':'tse','ツォ':'tso'
+    });
+
+    function isKanaCharacter(character) {
+        return !!(KANA[character] || SMALL_Y[character] || SMALL_VOWEL[character]
+            || character === 'っ' || character === 'ッ' || character === 'ー');
+    }
 
 
     /*
@@ -222,6 +237,14 @@
         return previous + small;
     }
 
+    function combineSmallVowel(previous, vowel) {
+        if (!previous) return vowel;
+        const match = previous.match(/[aeiou](?!.*[aeiou])/i);
+        return match
+            ? previous.slice(0, match.index) + vowel + previous.slice(match.index + 1)
+            : previous + vowel;
+    }
+
     function firstConsonant(value) {
         const match = String(value || '').match(/[bcdfghjklmnpqrstvwxyz]/i);
         return match ? match[0].toLowerCase() : '';
@@ -234,7 +257,7 @@
 
         while (index < characters.length) {
             const ch = characters[index];
-            if (!(KANA[ch] || SMALL_Y[ch] || ch === 'っ' || ch === 'ッ' || ch === 'ー')) break;
+            if (!isKanaCharacter(ch)) break;
 
             if (ch === 'っ' || ch === 'ッ') {
                 geminate = true;
@@ -252,6 +275,16 @@
                 continue;
             }
 
+            if (SMALL_VOWEL[ch]) {
+                if (parts.length) {
+                    parts[parts.length - 1] = combineSmallVowel(parts[parts.length - 1], SMALL_VOWEL[ch]);
+                } else {
+                    parts.push(SMALL_VOWEL[ch]);
+                }
+                index += 1;
+                continue;
+            }
+
             if (ch === 'ー') {
                 const previous = parts[parts.length - 1] || '';
                 const vowel = (previous.match(/[aeiou](?!.*[aeiou])/i) || [''])[0];
@@ -264,6 +297,10 @@
             const next = characters[index + 1];
             if (SMALL_Y[next]) {
                 value = combineSmallY(value, SMALL_Y[next]);
+                index += 1;
+            } else if (SMALL_VOWEL[next]) {
+                value = KANA_SMALL_VOWEL_COMPOUNDS[`${ch}${next}`]
+                    || combineSmallVowel(value, SMALL_VOWEL[next]);
                 index += 1;
             }
             if (geminate) {
@@ -481,6 +518,10 @@
         'हमें':'hamein','तुम्हें':'tumhein','उन्हें':'unhein','इन्हें':'inhein','कहीं':'kahin','यहीं':'yahin','वहीं':'wahin',
         'क्या':'kya','प्यार':'pyaar','प्यारा':'pyaara','प्यारी':'pyaari','प्यारे':'pyaare',
         'ये':'ye','यह':'yeh','वो':'wo','वह':'woh','और':'aur','है':'hai','था':'tha','थी':'thi','थे':'the',
+        /* Function words are conventionally written with single vowels in
+         * singable Roman Hindi.  Their spelling is lexical, rather than a
+         * cue to shorten every long-vowel Devanagari word. */
+        'तू':'tu','भी':'bhi',
         'गया':'gaya','गई':'gayi','गये':'gaye','हुआ':'hua','हुई':'hui','हुए':'hue',
         'लिया':'liya','लिए':'liye','दिया':'diya','दिए':'diye','किया':'kiya','किए':'kiye',
         'आया':'aaya','आई':'aayi','आए':'aaye','जाए':'jaaye','जाये':'jaaye','जाना':'jaana',
@@ -1620,6 +1661,13 @@
             independentVowels: Object.freeze({'அ':'a','ஆ':'aa','இ':'i','ஈ':'ee','உ':'u','ஊ':'oo','எ':'e','ஏ':'e','ஐ':'ai','ஒ':'o','ஓ':'o','ஔ':'au'}),
             vowelSigns: Object.freeze({'ா':'aa','ி':'i','ீ':'ee','ு':'u','ூ':'oo','ெ':'e','ே':'e','ை':'ai','ொ':'o','ோ':'o','ௌ':'au'}),
             marks: Object.freeze({'ஃ':'h'}), inherent: 'a', tamilVoicing: true,
+            normalizationRules: Object.freeze([
+                Object.freeze({ pattern: /ngg/g, replacement: 'ng' }),
+                Object.freeze({ pattern: /njj/g, replacement: 'nj' }),
+                Object.freeze({ pattern: /mbb/g, replacement: 'mb' }),
+                Object.freeze({ pattern: /nddh/g, replacement: 'ndh' }),
+                Object.freeze({ pattern: /nndr/g, replacement: 'ndr' })
+            ]),
             clusters: Object.freeze({'ஃப':'f','ங்க':'ng','ஞ்ச':'nj','ண்ட':'nd','ந்த':'ndh','ம்ப':'mb','ன்ற':'ndr','ற்ற':'tr','க்க':'kk','ச்ச':'ch','ட்ட':'tt','த்த':'th','ப்ப':'pp','ள்ள':'ll','ல்ல':'ll','ன்ன':'nn','ண்ண':'nn'}),
             overrides: Object.freeze({
                 'வணக்கம்':'vanakkam','காதலே':'kaadhale','காதல்':'kaadhal','தமிழ்':'tamil','என்னை':'ennai','உன்னை':'unnai','நீ':'nee','நான்':'naan','என்':'en','உன்':'un','உயிரே':'uyire',
@@ -1673,6 +1721,15 @@
             marks: Object.freeze({'ഃ':'h'}), nasalMarks: 'ഁം', finalNasal: 'm',
             terminalConsonants: Object.freeze({'ൺ':'n','ൻ':'n','ർ':'r','ൽ':'l','ൾ':'l','ൿ':'k'}),
             inherent: 'a', malayalamStyle: true, malayalamContextVoicing: true, anusvaraContinuantM: true,
+            normalizationRules: Object.freeze([
+                Object.freeze({ pattern: /ngng/g, replacement: 'ng' }),
+                Object.freeze({ pattern: /ngg/g, replacement: 'ng' }),
+                Object.freeze({ pattern: /njnj/g, replacement: 'nj' }),
+                Object.freeze({ pattern: /njch/g, replacement: 'nch' }),
+                Object.freeze({ pattern: /sv/g, replacement: 'sw' }),
+                Object.freeze({ pattern: /thw/g, replacement: 'thw' }),
+                Object.freeze({ pattern: /([aeiou])y([aeiou])/g, replacement: '$1y$2' })
+            ]),
             clusters: Object.freeze({
                 'റ്റ':'tt','ന്റ':'nt','ണ്ട':'nd','ണ്ണ':'nn','ന്ന':'nn','ള്ള':'ll','ല്ല':'ll','ക്ക':'kk','ങ്ങ':'ng','ച്ച':'ch','ച്ഛ':'ch','ഞ്ഞ':'nj','ഞ്ച':'nch','മ്പ':'mp','മ്മ':'mm','പ്പ':'pp','ത്ത':'th','ദ്ദ':'dd','വ്വ':'vv',
                 'ക്ഷ':'ksh','ജ്ഞ':'jn','ത്ര':'thr','ദ്ര':'dr','പ്ര':'pr','ബ്ര':'br','ക്ര':'kr','ഗ്ര':'gr','ശ്ര':'shr','സ്വ':'sw','ദ്വ':'dw','ത്വ':'thw'
@@ -2068,27 +2125,20 @@
 
     function normalizeConfiguredIndicRoman(value, config) {
         let result = String(value || '');
-        if (config.malayalamStyle) {
-            result = result
-                .replace(/ngng/g, 'ng')
-                .replace(/ngg/g, 'ng')
-                .replace(/njnj/g, 'nj')
-                .replace(/njch/g, 'nch')
-                .replace(/sv/g, 'sw')
-                .replace(/thw/g, 'thw')
-                .replace(/([aeiou])y([aeiou])/g, '$1y$2');
-        }
-        if (config.name === 'tamil') {
-            result = result
-                .replace(/ngg/g, 'ng')
-                .replace(/njj/g, 'nj')
-                .replace(/mbb/g, 'mb')
-                .replace(/nddh/g, 'ndh')
-                .replace(/nndr/g, 'ndr');
-        }
+        (config.normalizationRules || []).forEach(rule => {
+            if (!rule || !(rule.pattern instanceof RegExp)) return;
+            result = result.replace(rule.pattern, String(rule.replacement || ''));
+        });
         return result
             .replace(/([aeiou])\1\1+/g, '$1$1')
             .replace(/-{2,}/g, '-');
+    }
+
+    function configuredIndicOverride(config, word) {
+        if (!config || !config.overrides) return '';
+        return Object.prototype.hasOwnProperty.call(config.overrides, word)
+            ? config.overrides[word]
+            : '';
     }
 
     function romanizeConfiguredIndicWordDetailed(word, config) {
@@ -2096,7 +2146,7 @@
         const chunks = configuredIndicTokenChunks(tokens, config);
         const baseline = normalizeConfiguredIndicRoman(chunks.join(''), config);
         const baselineMaps = buildIndicWordBoundaryMaps(word, tokens, chunks, baseline);
-        const override = config.overrides && config.overrides[word];
+        const override = configuredIndicOverride(config, word);
         const descriptor = descriptorForConfiguredIndic(config);
         const morphologyDecision = override
             ? null
@@ -2115,7 +2165,7 @@
         const tokens = applyConfiguredIndicSchwa(configuredIndicTokenizeWord(word, config), config);
         const chunks = configuredIndicTokenChunks(tokens, config);
         const baseline = normalizeConfiguredIndicRoman(chunks.join(''), config);
-        const override = config.overrides && config.overrides[word];
+        const override = configuredIndicOverride(config, word);
         if (override) return override;
         const descriptor = descriptorForConfiguredIndic(config);
         const productionHints = morphologyProductionHints(word, descriptor);
@@ -2273,6 +2323,147 @@
         return { value: out, nextIndex: index };
     }
 
+    /*
+     * Script routing is deliberately data driven.  Earlier revisions encoded
+     * this same priority list in romanizeBase(), scriptDescriptorForCharacter()
+     * and the diagnostics path.  That made a new script profile easy to route
+     * in one place but accidentally leave as a fallback in another.  A handler
+     * now owns recognition, conversion and diagnostics together.
+     *
+     * The order is significant: explicit pronunciation engines must win over
+     * the broad ICU table, while the latter remains the final coverage path.
+     */
+    const INDIC_PROFILE_LANGUAGES = Object.freeze({
+        bengali: 'bn-as', gujarati: 'gu', odia: 'or', tamil: 'ta',
+        telugu: 'te', kannada: 'kn', malayalam: 'ml'
+    });
+
+    function latinDescriptor() {
+        return { key: 'latin', script: 'Latin', language: 'preserve', dedicated: false };
+    }
+
+    function configuredIndicDescriptor(config) {
+        const key = configuredIndicKeyForConfig(config);
+        return {
+            key: key || config.name,
+            script: config.name,
+            language: INDIC_PROFILE_LANGUAGES[key] || config.name,
+            dedicated: true,
+            config
+        };
+    }
+
+    const ROMANIZATION_PIPELINE = Object.freeze([
+        Object.freeze({
+            id: 'latin-preserve',
+            matches: ch => isAsciiOrLatin(ch),
+            run: (characters, index) => ({ value: characters[index], nextIndex: index + 1, kind: 'latin' }),
+            describe: latinDescriptor
+        }),
+        Object.freeze({
+            id: 'urdu-shahmukhi',
+            matches: ch => isUrduWordCharacter(ch),
+            run: (characters, index) => Object.assign(romanizeUrduRun(characters, index), { kind: 'urdu-shahmukhi' }),
+            describe: () => ({ key: 'urdu-shahmukhi', script: 'Arabic', language: 'ur-pa', dedicated: true })
+        }),
+        Object.freeze({
+            id: 'explicit-script-map',
+            matches: ch => scriptRomanEntry(ch) !== null,
+            run: (characters, index) => ({ value: scriptRomanEntry(characters[index]), nextIndex: index + 1, kind: 'script-map' })
+        }),
+        Object.freeze({
+            id: 'kana',
+            matches: ch => isKanaCharacter(ch),
+            run: (characters, index) => Object.assign(romanizeKanaRun(characters, index), { kind: 'kana' }),
+            describe: () => ({ key: 'kana', script: 'Kana', language: 'ja', dedicated: true })
+        }),
+        Object.freeze({
+            id: 'hangul',
+            matches: (_ch, cp) => isHangulSyllable(cp),
+            run: (characters, index) => ({ value: romanizeHangul(characters[index]), nextIndex: index + 1, kind: 'hangul' }),
+            describe: () => ({ key: 'hangul', script: 'Hangul', language: 'ko', dedicated: true })
+        }),
+        Object.freeze({
+            id: 'devanagari',
+            matches: (ch, cp) => cp >= 0x0900 && cp <= 0x097f && isDevanagariWordCharacter(ch),
+            run: (characters, index) => Object.assign(romanizeDevanagariRun(characters, index), { kind: 'devanagari' }),
+            describe: () => ({ key: 'devanagari', script: 'Devanagari', language: 'hi-mr-bho-ne', dedicated: true })
+        }),
+        Object.freeze({
+            id: 'gurmukhi',
+            matches: (ch, cp) => cp >= 0x0a00 && cp <= 0x0a7f && ch !== 'ੱ' && isGurmukhiWordCharacter(ch),
+            run: (characters, index) => Object.assign(romanizeGurmukhiRun(characters, index), { kind: 'gurmukhi' }),
+            describe: () => ({ key: 'gurmukhi', script: 'Gurmukhi', language: 'pa', dedicated: true })
+        }),
+        Object.freeze({
+            id: 'configured-indic',
+            matches: (ch, cp) => {
+                const config = configuredIndicForCodePoint(cp);
+                return !!(config && isConfiguredIndicWordCharacter(ch, config));
+            },
+            run: (characters, index) => {
+                const config = configuredIndicForCodePoint(characters[index].codePointAt(0));
+                return Object.assign(romanizeConfiguredIndicRun(characters, index, config), { kind: config.name });
+            },
+            describe: (_ch, cp) => configuredIndicDescriptor(configuredIndicForCodePoint(cp))
+        }),
+        Object.freeze({
+            id: 'generic-brahmic',
+            matches: (_ch, cp) => !!brahmicBase(cp),
+            run: (characters, index) => Object.assign(
+                romanizeBrahmicRun(characters, index, brahmicBase(characters[index].codePointAt(0))),
+                { kind: 'brahmic' }
+            ),
+            describe: () => ({ key: 'brahmic-generic', script: 'Brahmic', language: 'unknown-brahmic', dedicated: false })
+        }),
+        Object.freeze({
+            id: 'sinhala',
+            matches: (_ch, cp) => cp >= 0x0d80 && cp <= 0x0dff,
+            run: (characters, index) => Object.assign(romanizeSinhalaRun(characters, index), { kind: 'sinhala' }),
+            describe: () => ({ key: 'sinhala', script: 'Sinhala', language: 'si', dedicated: true })
+        }),
+        Object.freeze({
+            id: 'han-fallback',
+            matches: (_ch, cp) => isHan(cp),
+            run: (characters, index) => ({ value: fallbackRoman(characters[index]), nextIndex: index + 1, kind: 'han' }),
+            describe: () => ({ key: 'han', script: 'Han', language: 'zh', dedicated: false })
+        })
+    ]);
+
+    function resolveRomanizationHandler(character) {
+        const ch = String(character || '');
+        const cp = ch.codePointAt(0);
+        if (!ch || !Number.isFinite(cp)) return null;
+        for (let index = 0; index < ROMANIZATION_PIPELINE.length; index += 1) {
+            const handler = ROMANIZATION_PIPELINE[index];
+            if (handler.matches(ch, cp)) return handler;
+        }
+        return null;
+    }
+
+    function normalizeRomanizedText(value) {
+        return String(value || '')
+            .replace(/[’‘]/g, "'")
+            .replace(/[ \t]+([,.;:!?])/g, '$1')
+            .replace(/([([{])\s+/g, '$1')
+            .replace(/\s+([)\]}])/g, '$1')
+            .replace(/[ \t]{2,}/g, ' ');
+    }
+
+    function validateRomanizationPipeline() {
+        const ids = new Set();
+        ROMANIZATION_PIPELINE.forEach((handler, index) => {
+            if (!handler || !handler.id || ids.has(handler.id)
+                || typeof handler.matches !== 'function' || typeof handler.run !== 'function') {
+                throw new Error(`Invalid LyricG2P script handler at position ${index}`);
+            }
+            ids.add(handler.id);
+        });
+        return Object.freeze({ handlerCount: ROMANIZATION_PIPELINE.length, ids: Object.freeze(Array.from(ids)) });
+    }
+
+    const ROMANIZATION_PIPELINE_STATUS = validateRomanizationPipeline();
+
 
     /*
      * LyricG2P 6.6 scripted-English recovery.
@@ -2296,10 +2487,50 @@
      * Only the derived signatures needed at runtime are bundled; no model,
      * network lookup or dictionary parser is required in the browser.
      */
-    const INDIC_ENGLISH_RECOVERY_SCRIPT_KEYS = Object.freeze(new Set([
+    const PHONETIC_ENGLISH_RECOVERY_SCRIPT_KEYS = Object.freeze(new Set([
         'devanagari', 'gurmukhi', 'bengali', 'gujarati', 'odia',
-        'tamil', 'telugu', 'kannada', 'malayalam'
+        'tamil', 'telugu', 'kannada', 'malayalam', 'kana', 'hangul'
     ]));
+
+    /*
+     * A phonetic English spelling is filtered through the host script before
+     * it reaches the Romanizer.  These small, declarative adapters model only
+     * predictable host-script accommodation (epenthetic vowels, r/l and
+     * voiced-stop substitutions); a phrase still needs independent English
+     * evidence before any conversion is permitted.
+     */
+    const ENGLISH_PHONETIC_ADAPTERS = Object.freeze({
+        devanagari: Object.freeze([
+            Object.freeze({ pattern: /^vh/g, replacement: 'v' }),
+            Object.freeze({ pattern: /ay/g, replacement: 'ai' })
+        ]),
+        tamil: Object.freeze([
+            Object.freeze({ pattern: /p/g, replacement: 'b' })
+        ]),
+        malayalam: Object.freeze([
+            Object.freeze({ pattern: /([bcdfghjklmnpqrstvwxyz])u$/g, replacement: '$1' }),
+            Object.freeze({ pattern: /d/g, replacement: 't' })
+        ]),
+        bengali: Object.freeze([
+            Object.freeze({ pattern: /^oy/g, replacement: 'v' }),
+            Object.freeze({ pattern: /^ui/g, replacement: 'vi' })
+        ]),
+        kana: Object.freeze([
+            Object.freeze({ pattern: /~/g, replacement: '' }),
+            Object.freeze({ pattern: /([bcdfghjklmnpqrstvwxyz])u$/g, replacement: '$1' }),
+            Object.freeze({ pattern: /([bcdfghjklmnpqrstvwxyz])o$/g, replacement: '$1' }),
+            Object.freeze({ pattern: /^wo/g, replacement: 'wa' }),
+            Object.freeze({ pattern: /r/g, replacement: 'l' }),
+            Object.freeze({ pattern: /b/g, replacement: 'v' }),
+            Object.freeze({ pattern: /s$/g, replacement: 'th' })
+        ]),
+        hangul: Object.freeze([
+            Object.freeze({ pattern: /eu$/g, replacement: '' }),
+            Object.freeze({ pattern: /eo/g, replacement: 'o' }),
+            Object.freeze({ pattern: /r/g, replacement: 'l' }),
+            Object.freeze({ pattern: /b/g, replacement: 'v' })
+        ])
+    });
 
     const DEVANAGARI_ENGLISH_CONTEXT_CONVERTIBLE = Object.freeze(new Set([
         'आई', 'आइ', 'अ', 'इस', 'से'
@@ -2350,6 +2581,7 @@
         if (indicEnglishPronunciationIndex) return indicEnglishPronunciationIndex;
         const bySignature = new Map();
         const words = new Set();
+        const signaturesByLength = new Map();
         INDIC_ENGLISH_PRONUNCIATION_PACKED.split(';').forEach(record => {
             if (!record) return;
             const separator = record.indexOf('=');
@@ -2358,30 +2590,133 @@
             const candidates = record.slice(separator + 1).split(',').filter(Boolean);
             if (!signature || !candidates.length) return;
             bySignature.set(signature, candidates);
+            const length = signature.length;
+            if (!signaturesByLength.has(length)) signaturesByLength.set(length, []);
+            signaturesByLength.get(length).push(signature);
             candidates.forEach(word => words.add(word));
         });
-        indicEnglishPronunciationIndex = { bySignature, words };
+        indicEnglishPronunciationIndex = {
+            bySignature,
+            words,
+            signatures: Object.freeze(Array.from(bySignature.keys())),
+            signaturesByLength
+        };
         return indicEnglishPronunciationIndex;
     }
 
-    function scriptedEnglishCandidates(baseline) {
-        const signature = normalizeIndicEnglishSurface(baseline);
-        if (!signature) return [];
-        const index = getIndicEnglishPronunciationIndex();
-        const words = index.bySignature.get(signature) || [];
-        const orthographic = englishOrthographicKey(baseline);
-        return words.slice(0, 5).map((word, candidateIndex) => {
-            const canonicalKey = englishOrthographicKey(word);
-            let score = 0.86 - (candidateIndex * 0.045);
-            if (canonicalKey === orthographic) score += 0.26;
-            if (word === 'i' && /^(?:ai|aayi)$/i.test(String(baseline || ''))) score += 0.08;
-            return {
-                word,
-                signature,
-                score: Math.max(0, Math.min(1.25, score)),
-                orthographicMatch: canonicalKey === orthographic
-            };
+    function englishPhoneticForms(baseline, descriptor) {
+        const initial = normalizeIndicEnglishSurface(baseline);
+        if (!initial) return [];
+        const key = descriptor && descriptor.key;
+        const rules = ENGLISH_PHONETIC_ADAPTERS[key] || [];
+        const forms = new Set([initial]);
+        rules.forEach(rule => {
+            Array.from(forms).forEach(form => {
+                const adapted = normalizeIndicEnglishSurface(
+                    form.replace(rule.pattern, rule.replacement)
+                );
+                if (adapted) forms.add(adapted);
+            });
         });
+        return Array.from(forms).slice(0, 12);
+    }
+
+    function englishPhoneticSubstitutionCost(left, right) {
+        if (left === right) return 0;
+        if (/[aeiou]/.test(left) && /[aeiou]/.test(right)) return 0.34;
+        if ((left === 'r' && right === 'l') || (left === 'l' && right === 'r')) return 0.20;
+        if ('bpvf'.includes(left) && 'bpvf'.includes(right)) return 0.28;
+        if ('td'.includes(left) && 'td'.includes(right)) return 0.28;
+        if ('kg'.includes(left) && 'kg'.includes(right)) return 0.32;
+        if ('sz'.includes(left) && 'sz'.includes(right)) return 0.25;
+        if ('iy'.includes(left) && 'iy'.includes(right)) return 0.34;
+        return 1;
+    }
+
+    function englishPhoneticSignatureDistance(left, right) {
+        const source = String(left || '');
+        const target = String(right || '');
+        const previous = new Array(target.length + 1);
+        for (let column = 0; column <= target.length; column += 1) previous[column] = column * 0.72;
+        for (let row = 1; row <= source.length; row += 1) {
+            const current = [row * 0.72];
+            for (let column = 1; column <= target.length; column += 1) {
+                const deletion = previous[column] + (/[aeiou]/.test(source[row - 1]) ? 0.45 : 0.72);
+                const insertion = current[column - 1] + (/[aeiou]/.test(target[column - 1]) ? 0.45 : 0.72);
+                const substitution = previous[column - 1]
+                    + englishPhoneticSubstitutionCost(source[row - 1], target[column - 1]);
+                current[column] = Math.min(deletion, insertion, substitution);
+            }
+            for (let column = 0; column <= target.length; column += 1) previous[column] = current[column];
+        }
+        return previous[target.length];
+    }
+
+    const SCRIPTED_ENGLISH_CANDIDATE_CACHE_MAX = 768;
+    const scriptedEnglishCandidateCache = new Map();
+
+    function cacheScriptedEnglishCandidates(key, candidates) {
+        if (scriptedEnglishCandidateCache.has(key)) scriptedEnglishCandidateCache.delete(key);
+        scriptedEnglishCandidateCache.set(key, candidates);
+        while (scriptedEnglishCandidateCache.size > SCRIPTED_ENGLISH_CANDIDATE_CACHE_MAX) {
+            const oldest = scriptedEnglishCandidateCache.keys().next();
+            if (oldest.done) break;
+            scriptedEnglishCandidateCache.delete(oldest.value);
+        }
+        return candidates;
+    }
+
+    function scriptedEnglishCandidates(baseline, descriptor) {
+        const cacheKey = `${descriptor && descriptor.key || 'unknown'}\u0000${String(baseline || '')}`;
+        if (scriptedEnglishCandidateCache.has(cacheKey)) {
+            const cached = scriptedEnglishCandidateCache.get(cacheKey);
+            scriptedEnglishCandidateCache.delete(cacheKey);
+            scriptedEnglishCandidateCache.set(cacheKey, cached);
+            return cached;
+        }
+        const forms = englishPhoneticForms(baseline, descriptor);
+        if (!forms.length) return cacheScriptedEnglishCandidates(cacheKey, []);
+        const index = getIndicEnglishPronunciationIndex();
+        const candidates = new Map();
+        const add = (word, signature, score, distance, form) => {
+            const existing = candidates.get(word);
+            if (existing && existing.score >= score) return;
+            candidates.set(word, {
+                word, signature, score: Math.max(0, Math.min(1.15, score)),
+                distance, form,
+                orthographicMatch: englishOrthographicKey(word) === englishOrthographicKey(baseline)
+            });
+        };
+
+        forms.forEach((form, formIndex) => {
+            const direct = index.bySignature.get(form) || [];
+            direct.slice(0, 6).forEach((word, candidateIndex) => {
+                let score = 0.88 - (formIndex * 0.025) - (candidateIndex * 0.018);
+                if (word === 'i' && form === 'ai') score += 0.08;
+                add(word, form, score, 0, form);
+            });
+        });
+
+        /* Exact signature lookup is preferred.  Fuzzy search is deliberately
+         * bounded and only supplies a weak candidate for the phrase decoder;
+         * it can never activate recovery by itself. */
+        if (!candidates.size) {
+            forms.forEach((form, formIndex) => {
+                const maximum = form.length <= 3 ? 0.82 : 1.32;
+                for (let length = Math.max(1, form.length - 2); length <= form.length + 2; length += 1) {
+                    (index.signaturesByLength.get(length) || []).forEach(signature => {
+                        const distance = englishPhoneticSignatureDistance(form, signature);
+                        if (distance > maximum) return;
+                        (index.bySignature.get(signature) || []).slice(0, 3).forEach((word, candidateIndex) => {
+                            add(word, signature, 0.69 - (distance * 0.10) - (formIndex * 0.02) - (candidateIndex * 0.015), distance, form);
+                        });
+                    });
+                }
+            });
+        }
+        return cacheScriptedEnglishCandidates(cacheKey, Array.from(candidates.values())
+            .sort((left, right) => right.score - left.score || left.distance - right.distance)
+            .slice(0, 6));
     }
 
     const ENGLISH_RECOVERY_ARTICLES = Object.freeze(new Set(['a','an','the']));
@@ -2450,10 +2785,21 @@
         if (descriptor.key === 'gurmukhi') {
             return GURMUKHI_LYRIC_OVERRIDES[word] ? 'native-strong' : 'none';
         }
-        if (descriptor.config && descriptor.config.overrides && descriptor.config.overrides[word]) {
+        if (configuredIndicOverride(descriptor.config, word)) {
             return 'native-strong';
         }
         return 'none';
+    }
+
+    function isDevanagariIzafatMarker(text, span, descriptor) {
+        if (!span || !descriptor || descriptor.key !== 'devanagari' || span.text !== 'ए') return false;
+        const source = String(text || '');
+        const before = source.charAt(span.start - 1);
+        const after = source.charAt(span.end);
+        if (!/[-–—]/u.test(before) || !/[-–—]/u.test(after)) return false;
+        const left = source.charAt(span.start - 2);
+        const right = source.charAt(span.end + 1);
+        return isDevanagariWordCharacter(left) && isDevanagariWordCharacter(right);
     }
 
     function isHardEnglishRecoveryBoundary(text) {
@@ -2483,6 +2829,113 @@
         return value;
     }
 
+    const ENGLISH_RECOVERY_BIGRAM_WEIGHTS = Object.freeze({
+        'i|love': 0.24, 'love|you': 0.36, 'i|want': 0.26, 'want|to': 0.42,
+        'to|be': 0.38, 'be|or': 0.34, 'or|not': 0.34, 'not|to': 0.30,
+        'be|with': 0.30, 'with|you': 0.34, 'i|will': 0.25,
+        'will|always': 0.34, 'always|love': 0.34, 'why|did': 0.34,
+        'did|you': 0.32, 'you|leave': 0.26, 'leave|me': 0.30,
+        'what|is': 0.36, 'is|your': 0.28, 'your|name': 0.34,
+        'my|name': 0.30, 'name|is': 0.38, 'the|end': 0.40, 'all|the': 0.32,
+        'you|are': 0.38, 'are|my': 0.34, 'my|everything': 0.32,
+        'i|am': 0.30, 'am|not': 0.28, 'not|alone': 0.34,
+        'we|will': 0.32, 'will|be': 0.40, 'be|alright': 0.30,
+        'when|you': 0.34, 'are|here': 0.38, 'can|you': 0.34,
+        'you|feel': 0.28, 'feel|the': 0.26, 'the|love': 0.34,
+        'love|tonight': 0.30
+    });
+
+    function englishRecoveryBigramScore(leftWord, rightWord) {
+        return ENGLISH_RECOVERY_BIGRAM_WEIGHTS[`${leftWord}|${rightWord}`] || 0;
+    }
+
+    function decodeEnglishPhrase(tokens, indexes) {
+        if (!indexes.length) return new Map();
+        let states = [];
+        indexes.forEach((tokenIndex, position) => {
+            const token = tokens[tokenIndex];
+            if (!token || !token.candidates.length) return;
+            const nextStates = [];
+            token.candidates.forEach(candidate => {
+                if (position === 0 || !states.length) {
+                    nextStates.push({
+                        score: candidate.score,
+                        candidate,
+                        tokenIndex,
+                        previous: null
+                    });
+                    return;
+                }
+                states.forEach(previous => {
+                    const transition = englishRecoveryTransition(previous.candidate.word, candidate.word)
+                        + englishRecoveryBigramScore(previous.candidate.word, candidate.word);
+                    nextStates.push({
+                        score: previous.score + candidate.score + transition,
+                        candidate,
+                        tokenIndex,
+                        previous
+                    });
+                });
+            });
+            states = nextStates
+                .sort((left, right) => right.score - left.score)
+                .slice(0, 16);
+        });
+
+        if (!states.length) return new Map();
+        const result = new Map();
+        let state = states[0];
+        while (state) {
+            result.set(state.tokenIndex, state.candidate);
+            state = state.previous;
+        }
+        return result;
+    }
+
+    function decodeActiveEnglishPhrases(tokens, activeTokenIndexes) {
+        const choices = new Map();
+        const active = Array.from(activeTokenIndexes).sort((left, right) => left - right);
+        let run = [];
+        const flush = () => {
+            if (!run.length) return;
+            const decoded = decodeEnglishPhrase(tokens, run);
+            let explicitPhraseEvidence = 0;
+            for (let index = 1; index < run.length; index += 1) {
+                const left = decoded.get(run[index - 1]);
+                const right = decoded.get(run[index]);
+                if (left && right) {
+                    explicitPhraseEvidence += englishRecoveryBigramScore(left.word, right.word);
+                }
+            }
+
+            /* Individual Hindi/Punjabi lyric syllables often coincide with
+             * short English words (ता -> to, धिन -> the). Syntax-class scores
+             * alone cannot distinguish a percussion refrain from a sentence.
+             * Require at least one explicit phrase-model relation before a
+             * fully phonetic run is allowed to replace native text. */
+            if (explicitPhraseEvidence >= 0.20) {
+                decoded.forEach((candidate, tokenIndex) => choices.set(tokenIndex, candidate));
+            }
+            run = [];
+        };
+        active.forEach(tokenIndex => {
+            const token = tokens[tokenIndex];
+            const previousIndex = run.length ? run[run.length - 1] : -1;
+            const compatible = token
+                && token.candidates.length
+                && token.protection !== 'native-strong'
+                && token.protection !== 'native-izafat'
+                && (!run.length || (
+                    tokenIndex === previousIndex + 1
+                    && token.group === tokens[previousIndex].group
+                ));
+            if (!compatible) flush();
+            if (compatible) run.push(tokenIndex);
+        });
+        flush();
+        return choices;
+    }
+
     function getScriptedEnglishRecoveryPlan(input) {
         const raw = String(input == null ? '' : input);
         const text = typeof raw.normalize === 'function' ? raw.normalize('NFC') : raw;
@@ -2494,15 +2947,21 @@
         }
 
         const spans = segmentText(text);
-        if (!spans.some(span => INDIC_ENGLISH_RECOVERY_SCRIPT_KEYS.has(span.key))) {
+        if (!spans.some(span => PHONETIC_ENGLISH_RECOVERY_SCRIPT_KEYS.has(span.key))) {
             return cacheScriptedEnglishPlan(text, { active: false, text: null, spans, replacements: new Map(), recognitions: new Map(), tokens: [] });
         }
 
         const tokens = [];
         let group = 0;
         spans.forEach((span, spanIndex) => {
+            /* Danda and other non-ASCII sentence terminators can be classified
+             * as script fallback spans, not Common.  Boundary detection must
+             * therefore precede the Common fast path so an English phrase
+             * never leaks its activation into the next native sentence. */
+            const hardBoundary = isHardEnglishRecoveryBoundary(span.text);
+            const tokenGroup = group;
+            if (hardBoundary) group += 1;
             if (span.key === 'common') {
-                if (isHardEnglishRecoveryBoundary(span.text)) group += 1;
                 return;
             }
 
@@ -2516,7 +2975,7 @@
                 const orthographic = englishOrthographicKey(span.text);
                 const index = getIndicEnglishPronunciationIndex();
                 tokens.push({
-                    span, spanIndex, descriptor, group,
+                    span, spanIndex, descriptor, group: tokenGroup,
                     baseline: span.text,
                     candidates: index.words.has(String(span.text || '').toLowerCase())
                         ? [{ word: String(span.text || '').toLowerCase(), signature: orthographic, score: 1.1, orthographicMatch: true }]
@@ -2528,17 +2987,19 @@
                 return;
             }
 
-            if (!INDIC_ENGLISH_RECOVERY_SCRIPT_KEYS.has(span.key)) return;
+            if (!PHONETIC_ENGLISH_RECOVERY_SCRIPT_KEYS.has(span.key)) return;
             const baseline = romanizeBase(span.text);
-            const candidates = scriptedEnglishCandidates(baseline);
-            const protection = scriptedEnglishProtection(span, descriptor);
+            const candidates = scriptedEnglishCandidates(baseline, descriptor);
+            const protection = isDevanagariIzafatMarker(text, span, descriptor)
+                ? 'native-izafat'
+                : scriptedEnglishProtection(span, descriptor);
             const anchor = !!(
                 candidates.length
                 && protection === 'none'
                 && candidates[0].score >= 0.78
             );
             tokens.push({
-                span, spanIndex, descriptor, group, baseline, candidates,
+                span, spanIndex, descriptor, group: tokenGroup, baseline, candidates,
                 protection, latin: false, anchor
             });
         });
@@ -2572,41 +3033,34 @@
             }
         });
 
-        const bestCandidateWord = token => {
-            if (!token) return '';
-            if (token.latin) return token.candidates.length ? token.candidates[0].word : '';
-            if (!token.candidates.length) return '';
-            return token.candidates[0].word;
-        };
+        const decodedChoices = decodeActiveEnglishPhrases(tokens, activeTokenIndexes);
 
         const replacements = new Map();
         const recognitions = new Map();
         tokens.forEach((token, tokenIndex) => {
-            if (token.latin || !activeTokenIndexes.has(tokenIndex) || !token.candidates.length) return;
-            if (token.protection === 'native-strong') return;
-
-            const previousToken = tokenIndex > 0 && tokens[tokenIndex - 1].group === token.group
-                ? tokens[tokenIndex - 1]
-                : null;
-            const nextToken = tokenIndex + 1 < tokens.length && tokens[tokenIndex + 1].group === token.group
-                ? tokens[tokenIndex + 1]
-                : null;
-            const previousWord = bestCandidateWord(previousToken);
-            const nextWord = bestCandidateWord(nextToken);
-
-            let best = null;
-            token.candidates.forEach(candidate => {
-                let score = candidate.score + 0.16;
-                score += englishRecoveryTransition(previousWord, candidate.word);
-                score += englishRecoveryTransition(candidate.word, nextWord);
-                if (tokenIndex === 0 && candidate.word === 'i') score += 0.10;
-                if (candidate.word === 'end' && !nextWord) score += 0.08;
-                if (!best || score > best.score) best = Object.assign({}, candidate, { score });
-            });
+            if (token.latin || !activeTokenIndexes.has(tokenIndex)) return;
+            const best = decodedChoices.get(tokenIndex);
             if (!best) return;
 
+            const previous = decodedChoices.get(tokenIndex - 1);
+            const next = decodedChoices.get(tokenIndex + 1);
+            const phraseSupport = (previous
+                ? englishRecoveryTransition(previous.word, best.word) + englishRecoveryBigramScore(previous.word, best.word)
+                : 0) + (next
+                ? englishRecoveryTransition(best.word, next.word) + englishRecoveryBigramScore(best.word, next.word)
+                : 0);
+            const localScore = best.score + 0.16 + phraseSupport;
             const minimum = token.protection === 'context-ambiguous' ? 0.88 : 0.80;
-            if (best.score < minimum) return;
+            if (localScore < minimum) return;
+
+            /* Do not rewrite a readable phonetic surface solely because the
+             * English index happens to contain a nearby spelling.  A changed
+             * spelling needs actual phrase evidence; this preserves lyric
+             * vocables such as "yeh" while allowing "want to" and "love you". */
+            if (!best.orthographicMatch
+                && englishOrthographicKey(best.word) !== englishOrthographicKey(token.baseline)
+                && englishOrthographicKey(token.baseline).length >= 3
+                && phraseSupport < 0.12) return;
 
             const recovered = canonicalRecoveredEnglish(best.word, tokenIndex === 0);
             if (!recovered) return;
@@ -2618,9 +3072,9 @@
                 text: recovered,
                 word: best.word,
                 signature: best.signature,
-                confidence: Number(Math.min(0.99, 0.78 + Math.max(0, best.score - 0.80) * 0.25).toFixed(3)),
+                confidence: Number(Math.min(0.99, 0.78 + Math.max(0, localScore - 0.80) * 0.25).toFixed(3)),
                 protection: token.protection,
-                evidence: 'multi-anchor-scripted-english-context'
+                evidence: 'multi-anchor-phrase-viterbi-context'
             };
             recognitions.set(token.span.start, decision);
             if (recovered !== token.baseline) replacements.set(token.span.start, decision);
@@ -2637,12 +3091,7 @@
                 ? replacement.text
                 : romanizeBase(span.text);
         });
-        output = output
-            .replace(/[’‘]/g, "'")
-            .replace(/[ \t]+([,.;:!?])/g, '$1')
-            .replace(/([([{])\s+/g, '$1')
-            .replace(/\s+([)\]}])/g, '$1')
-            .replace(/[ \t]{2,}/g, ' ');
+        output = normalizeRomanizedText(output);
 
         return cacheScriptedEnglishPlan(text, {
             active: true,
@@ -2682,92 +3131,12 @@
 
         while (index < characters.length) {
             const ch = characters[index];
-            const cp = ch.codePointAt(0);
-
-            if (isAsciiOrLatin(ch)) {
-                output += ch;
-                previousKind = 'latin';
-                index += 1;
-                continue;
-            }
-
-            if (isUrduWordCharacter(ch)) {
-                const result = romanizeUrduRun(characters, index);
-                output += result.value;
-                previousKind = 'urdu-shahmukhi';
+            const handler = resolveRomanizationHandler(ch);
+            if (handler) {
+                const result = handler.run(characters, index);
+                output = appendMapped(output, result.value, result.kind, previousKind);
+                previousKind = result.kind;
                 index = result.nextIndex;
-                continue;
-            }
-
-            const scriptMapped = scriptRomanEntry(ch);
-            if (scriptMapped !== null) {
-                output += scriptMapped;
-                previousKind = 'script-map';
-                index += 1;
-                continue;
-            }
-
-            if (KANA[ch] || SMALL_Y[ch] || ch === 'っ' || ch === 'ッ' || ch === 'ー') {
-                const result = romanizeKanaRun(characters, index);
-                output += result.value;
-                previousKind = 'kana';
-                index = result.nextIndex;
-                continue;
-            }
-
-            if (isHangulSyllable(cp)) {
-                output += romanizeHangul(ch);
-                previousKind = 'hangul';
-                index += 1;
-                continue;
-            }
-
-            if (cp >= 0x0900 && cp <= 0x097f && isDevanagariWordCharacter(ch)) {
-                const result = romanizeDevanagariRun(characters, index);
-                output += result.value;
-                previousKind = 'devanagari';
-                index = result.nextIndex;
-                continue;
-            }
-
-            if (cp >= 0x0a00 && cp <= 0x0a7f && ch !== 'ੱ' && isGurmukhiWordCharacter(ch)) {
-                const result = romanizeGurmukhiRun(characters, index);
-                output += result.value;
-                previousKind = 'gurmukhi';
-                index = result.nextIndex;
-                continue;
-            }
-
-            const indicConfig = configuredIndicForCodePoint(cp);
-            if (indicConfig && isConfiguredIndicWordCharacter(ch, indicConfig)) {
-                const result = romanizeConfiguredIndicRun(characters, index, indicConfig);
-                output += result.value;
-                previousKind = indicConfig.name;
-                index = result.nextIndex;
-                continue;
-            }
-
-            const base = brahmicBase(cp);
-            if (base) {
-                const result = romanizeBrahmicRun(characters, index, base);
-                output += result.value;
-                previousKind = 'brahmic';
-                index = result.nextIndex;
-                continue;
-            }
-
-            if (cp >= 0x0d80 && cp <= 0x0dff) {
-                const result = romanizeSinhalaRun(characters, index);
-                output += result.value;
-                previousKind = 'sinhala';
-                index = result.nextIndex;
-                continue;
-            }
-
-            if (isHan(cp)) {
-                output = appendMapped(output, fallbackRoman(ch), 'han', previousKind);
-                previousKind = 'han';
-                index += 1;
                 continue;
             }
 
@@ -2777,12 +3146,7 @@
             index += 1;
         }
 
-        return output
-            .replace(/[’‘]/g, "'")
-            .replace(/[ \t]+([,.;:!?])/g, '$1')
-            .replace(/([([{])\s+/g, '$1')
-            .replace(/\s+([)\]}])/g, '$1')
-            .replace(/[ \t]{2,}/g, ' ');
+        return normalizeRomanizedText(output);
     }
 
 
@@ -2910,8 +3274,13 @@
         const starts = new Array(source.length + 1).fill(0);
         const ends = new Array(source.length + 1).fill(0);
         for (let index = 0; index <= source.length; index += 1) {
-            starts[index] = output.length - romanize(source.slice(index)).length;
-            ends[index] = romanize(source.slice(0, index)).length;
+            /* Generic boundary maps must be context-invariant. A prefix of a
+             * native line can coincidentally resemble an English phrase even
+             * though the complete line does not. Contextual English recovery
+             * has its own complete-line map above; using base G2P here keeps
+             * fallback prefix/suffix measurements stable and monotonic. */
+            starts[index] = output.length - romanizeBase(source.slice(index)).length;
+            ends[index] = romanizeBase(source.slice(0, index)).length;
         }
         monotonicClampBoundaryMap(starts, output.length);
         monotonicClampBoundaryMap(ends, output.length);
@@ -3562,106 +3931,9 @@
             };
         }
 
-        if (isUrduWordCharacter(ch)) {
-            return {
-                key: 'urdu-shahmukhi',
-                script: 'Arabic',
-                language: 'ur-pa',
-                dedicated: true
-            };
-        }
-
-        if (cp >= 0x0900 && cp <= 0x097f && isDevanagariWordCharacter(ch)) {
-            return {
-                key: 'devanagari',
-                script: 'Devanagari',
-                language: 'hi-mr-bho-ne',
-                dedicated: true
-            };
-        }
-
-        if (cp >= 0x0a00 && cp <= 0x0a7f && isGurmukhiWordCharacter(ch)) {
-            return {
-                key: 'gurmukhi',
-                script: 'Gurmukhi',
-                language: 'pa',
-                dedicated: true
-            };
-        }
-
-        const config = configuredIndicForCodePoint(cp);
-        if (config && isConfiguredIndicWordCharacter(ch, config)) {
-            const configKey = configuredIndicKeyForConfig(config);
-            const languageMap = {
-                malayalam: 'ml',
-                tamil: 'ta',
-                telugu: 'te',
-                kannada: 'kn',
-                bengali: 'bn-as',
-                gujarati: 'gu',
-                odia: 'or'
-            };
-            return {
-                key: configKey || config.name,
-                script: config.name,
-                language: languageMap[configKey] || config.name,
-                dedicated: true,
-                config
-            };
-        }
-
-        if (KANA[ch] || SMALL_Y[ch] || ch === 'っ' || ch === 'ッ' || ch === 'ー') {
-            return {
-                key: 'kana',
-                script: 'Kana',
-                language: 'ja',
-                dedicated: true
-            };
-        }
-
-        if (isHangulSyllable(cp)) {
-            return {
-                key: 'hangul',
-                script: 'Hangul',
-                language: 'ko',
-                dedicated: true
-            };
-        }
-
-        if (isHan(cp)) {
-            return {
-                key: 'han',
-                script: 'Han',
-                language: 'zh',
-                dedicated: false
-            };
-        }
-
-        if (isAsciiOrLatin(ch)) {
-            return {
-                key: 'latin',
-                script: 'Latin',
-                language: 'preserve',
-                dedicated: false
-            };
-        }
-
-        if (brahmicBase(cp)) {
-            return {
-                key: 'brahmic-generic',
-                script: 'Brahmic',
-                language: 'unknown-brahmic',
-                dedicated: false
-            };
-        }
-
-        if (cp >= 0x0d80 && cp <= 0x0dff) {
-            return {
-                key: 'sinhala',
-                script: 'Sinhala',
-                language: 'si',
-                dedicated: true
-            };
+        const handler = resolveRomanizationHandler(ch);
+        if (handler && typeof handler.describe === 'function') {
+            return handler.describe(ch, cp);
         }
 
         return {
@@ -3779,7 +4051,7 @@
             )
         ) {
             return {
-                romanized: config.overrides[word],
+                romanized: configuredIndicOverride(config, word),
                 source: 'curated-lyric-lexicon',
                 confidence: 0.995
             };
@@ -4913,7 +5185,8 @@
         mapBoundary,
         canRomanize,
         containsNativeScript,
-        strategy: 'offline-lyricg2p-v6.6.0+scripted-english-recovery+loanword-pronunciation+targeted-learned-schwa+language-evidence+phonological-ir+production-morphology+context+nbest+boundary-provenance+lazy-icu-fallback',
+        pipeline: ROMANIZATION_PIPELINE_STATUS,
+        strategy: 'offline-lyricg2p-v6.8.1+phrase-viterbi-scripted-english-decoder+phonetic-script-adapters+validated-script-handler-pipeline+declarative-profile-normalization+function-word-lyric-spelling+loanword-pronunciation+targeted-learned-schwa+language-evidence+phonological-ir+production-morphology+context+nbest+boundary-provenance+lazy-icu-fallback',
         supportedLanguageFamilies: SUPPORTED_LANGUAGE_FAMILIES,
         offlineOnly: true,
         romanizationStyle: ROMANIZATION_STYLE,

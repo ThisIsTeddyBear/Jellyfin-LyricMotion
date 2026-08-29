@@ -33,7 +33,7 @@ Examples:
 
 ```text
 ऑल द अनजाना से येह येह येह
--> All the anajaana say yeh yeh yeh
+-> All the anajaana se yeh yeh yeh
 
 आई मेट अ बॉय एंड हिस नेम इस अनजाना
 -> I met a boy and his name is anajaana

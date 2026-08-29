@@ -1,17 +1,28 @@
 # Changelog
 
+## LyricG2P 6.8.1
+
+- Correct readable Hindi lyric spellings for high-frequency function words: `तू → tu` and `भी → bhi`. The rule is lexical and does not globally collapse the `ू`/`ी` vowel signs.
+
 All notable public changes are documented here. The project follows Semantic Versioning.
 
 ## [Unreleased] — planned 3.2.6
 
 ### Added
 
+- LyricG2P `6.8.0` replaces independent scripted-English word selection with a bounded phrase-level Viterbi decoder. It evaluates candidate sequences using phonetic fit, local syntax and common lyric bigrams, fixing context-sensitive forms such as `टू -> to` before `बी -> be`.
+- The English-recovery layer now supports Kana and Hangul phonetic-English runs alongside first-class Indic scripts. Declarative script adapters account for predictable epenthetic vowels and r/l, b/v, t/d substitutions; recovery remains confidence-gated and local.
+- Regression coverage now includes adversarial multilingual phonetic-English phrases, native false-positive controls, Danda sentence boundaries, punctuation, mixed native/English lines and source-boundary reconstruction.
+- LyricG2P `6.7.0` introduces a validated, data-driven script-handler pipeline. Each handler now declares its own recognition, conversion and diagnostic metadata, so a language profile cannot be routed through display conversion but accidentally reported as a fallback elsewhere.
+- Tamil and Malayalam surface normalization is now declared on the language profile rather than embedded in branching runtime code. The existing curated lexicons remain an explicit high-confidence pronunciation layer.
 - LyricG2P `6.6.0` scripted-English recovery for English lyrics written phonetically in first-class vowel-bearing Indic scripts. The decoder uses compact offline pronunciation signatures, multi-anchor context, native-word guards and local syntax scoring; it also carries reconstructed spellings through ELRC boundary mapping and diagnostics.
 - Public `scriptedEnglishRecovery()` diagnostics expose recognized/replaced tokens without any network dependency.
 - LyricG2P `6.6.0` also adds a curated Devanagari loanword-pronunciation layer for common lyrics that omit nukta marks, plus lexicalized compound pronunciations such as `हमसफर -> humsafar` without globally weakening native aspiration rules.
 
 ### Fixed
 
+- Devanagari Persian izāfat markers written as `-ए-` (including en/em-dash forms) are protected from phonetic-English recovery. Repeated `जान-ए-मन` now remains `jaan-e-man` instead of being misidentified as repeated English `a` anchors.
+- Repeated Hindi lyric vocables and percussion syllables (`ता रा रम पम`, `धिन ता`, `ला ला ला`) no longer activate phonetic-English recovery merely because their individual sounds resemble English words. Recovery now requires explicit phrase-model evidence, while real sequences such as `टू बी ऑर नॉट टू बी` still reconstruct normally.
 - Devanagari loanwords written without nukta marks no longer force native `ph` where the established lyric pronunciation is `/f/` (`सफर -> safar`, `वफा -> wafa`, `फिक्र -> fikr`), while genuine native aspiration such as `फूल -> phool` and `फिर -> phir` remains protected.
 - Lexicalized `हमसफर` / `हमसफ़र` now Romanize as `humsafar` instead of `hamasphar` / `hamasfar`.
 - Album/folder-inherited covers applied late through a now-playing `background-image` style are now discovered continuously on static/untimed lyric pages instead of being missed after the initial probe window.

@@ -102,6 +102,10 @@ grep -Fq "const VERSION = '$LYRICG2P_VERSION';" "$ROMANIZER_SOURCE" || {
   echo "Romanizer JavaScript VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
   exit 1
 }
+grep -Fq "const LYRICG2P_VERSION = '$LYRICG2P_VERSION';" "$JS_SOURCE" || {
+  echo "Runtime LYRICG2P_VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
+  exit 1
+}
 
 INDEX="$WEB_DIR/index.html"
 BACKUP_BASE="$WEB_DIR/index.html.before-jellyfin-lyric-motion-$(date +%Y%m%d-%H%M%S)"

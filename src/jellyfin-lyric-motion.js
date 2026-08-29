@@ -9,7 +9,7 @@
     'use strict';
 
     const VERSION = '3.2.5';
-    const LYRICG2P_VERSION = '6.6.0';
+    const LYRICG2P_VERSION = '6.8.1';
 
     /*
      * A duplicated script tag used to create a second DOM observer, route-hook

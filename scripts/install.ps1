@@ -184,6 +184,12 @@ if (-not [regex]::IsMatch(
 )) {
     throw "Romanizer JavaScript VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
 }
+if (-not [regex]::IsMatch(
+    [IO.File]::ReadAllText($JsSource),
+    "const\s+LYRICG2P_VERSION\s*=\s*'" + [regex]::Escape($LyricG2PVersion) + "'\s*;"
+)) {
+    throw "Runtime LYRICG2P_VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
+}
 
 Write-Host ""
 Write-Host "Jellyfin LyricMotion v$Version / LyricG2P $LyricG2PVersion" -ForegroundColor Cyan

@@ -1,7 +1,7 @@
 # Offline LyricG2P Romanization
 
 Release: `3.2.5`
-Romanizer: `6.6.0`
+Romanizer: `6.8.1`
 
 ## Goal
 
@@ -33,7 +33,19 @@ The design was informed by publicly documented Indian-language transliteration w
 - **Dakshina** is particularly relevant to the product goal because it contains attested Romanization lexicons and full-sentence native/Latin parallel data for major South Asian languages.
 - Published Hindi/Punjabi G2P work identifies schwa deletion as a central pronunciation problem that naive Devanagari transliterators get wrong.
 
-No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P keeps deterministic production output with mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. Any future learned model would require independent evidence of improvement and acceptable browser cost. See [LyricG2P 6.6.0](LYRICG2P-6.6.0.md).
+No Aksharantar, IndicXlit or Dakshina model weights/datasets are bundled in this build. LyricG2P keeps deterministic production output with mixed-script segmentation, phoneme-like diagnostics, morphology evidence, confidence and candidate ranking. Any future learned model would require independent evidence of improvement and acceptable browser cost. See [LyricG2P 6.8.1](LYRICG2P-6.8.1.md).
+
+## LyricG2P 6.8 phrase-level phonetic-English recovery
+
+6.8 decodes a nearby multi-word phonetic-English run as a whole rather than greedily deciding one word at a time. Candidate spellings are generated from the normal Roman output plus a bounded script-adaptation profile, then a Viterbi decoder ranks complete phrases with pronunciation fit, English syntax and common lyric bigrams. This resolves contextual choices such as `to` versus `too` and `be` versus `pee`.
+
+The recovery layer now includes Kana and Hangul where their vowel-bearing phonetic spellings provide enough evidence. Perso-Arabic remains excluded from automatic English reconstruction because unmarked short vowels make the spelling underdetermined; it continues to receive normal Romanization. A hard sentence boundary, including `।` / `॥`, always ends recovery context.
+
+## LyricG2P 6.7 data-driven routing
+
+6.7 replaces the duplicated, branch-heavy script dispatch with one ordered, validated handler pipeline. A handler owns script recognition, complete-run conversion and diagnostic identity. This keeps display output, `segmentText()`, `detectLanguages()` and `romanizeDetailed()` on the same language route.
+
+Language-specific surface cleanup is also declarative profile data. Curated lexical pronunciations remain a separate explicit override layer; they are not used as a substitute for the grapheme-to-pronunciation parser. This makes new language/profile work additive and testable while keeping Romanization fully offline.
 
 
 ## LyricG2P 6.6 scripted-English recovery
@@ -42,7 +54,7 @@ Lyric providers sometimes encode **English pronunciation in an Indic script** in
 
 ```text
 ऑल द अनजाना से येह येह येह
--> All the anajaana say yeh yeh yeh
+-> All the anajaana se yeh yeh yeh
 
 आई मेट अ बॉय एंड हिस नेम इस अनजाना
 -> I met a boy and his name is anajaana
