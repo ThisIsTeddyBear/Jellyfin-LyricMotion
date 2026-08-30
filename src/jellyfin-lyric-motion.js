@@ -9,6 +9,9 @@
     'use strict';
 
     const VERSION = '3.2.8';
+    /* The Indic LyricG2P implementation is intentionally pinned to the
+     * user-selected Aug 28 baseline. */
+    const LYRICG2P_VERSION = '6.5.1';
 
     /*
      * A duplicated script tag used to create a second DOM observer, route-hook
@@ -970,10 +973,13 @@
 
     const PERFORMANCE_STORAGE_KEY = 'appleKaraokePerformanceMode';
 
-    // PC/mobile-only Google Romanization. Requests begin only after the user
-    // selects Romanized view for a native-script song.
+    // PC/mobile-only hybrid romanization. Indic scripts use the bundled
+    // LyricG2P engine; all other native scripts use Google on demand.
     const LEGACY_ROMANIZATION_STORAGE_KEY = 'appleKaraokeRomanizationMode';
     const SONG_PREFERENCES_STORAGE_KEY = 'appleKaraokeSongPreferencesV2';
+    const ROMANIZER_ASSET = 'jellyfin-lyric-romanizer.js';
+    const ROMANIZER_LOAD_TIMEOUT_MS = 8000;
+    const ROMANIZATION_CACHE_MAX_ENTRIES = 1800;
     const GOOGLE_ROMANIZATION_CACHE_MAX_ENTRIES = 1800;
     const GOOGLE_ROMANIZATION_MAX_TEXT_CHARS = 1500;
     const GOOGLE_ROMANIZATION_MAX_RETRIES = 3;
@@ -1141,6 +1147,7 @@
         romanizationLoadError: '',
         romanizationSource: 'none',
         romanizationToggle: null,
+        romanizationCache: new Map(),
         googleRomanizationCache: new Map(),
         googleRomanizationFragmentCache: new Map(),
         googleRomanizationAttempted: new Set(),
@@ -3742,6 +3749,9 @@
         state.backgroundVocalCount = 0;
         state.romanizationAvailable = false;
         state.romanizationCandidate = false;
+        if (state.romanizationCache && typeof state.romanizationCache.clear === 'function') {
+            state.romanizationCache.clear();
+        }
         if (state.googleRomanizationCache && typeof state.googleRomanizationCache.clear === 'function') {
             state.googleRomanizationCache.clear();
         }
@@ -4534,6 +4544,102 @@
         });
     }
 
+    /* Keep the routing boundary script-based and unambiguous: Indian Brahmic
+     * scripts use the offline LyricG2P asset. Arabic-script text remains on
+     * Google because script alone cannot reliably distinguish Urdu from
+     * Arabic, Persian, and other languages. */
+    function usesIndicRomanizer(text) {
+        const value = String(text || '');
+        return /[\u0900-\u0d7f\u1cd0-\u1cff\ua8e0-\ua8ff]/u.test(value);
+    }
+
+    let romanizerLoadPromise = null;
+
+    function romanizerAssetUrl() {
+        let source = '';
+        try {
+            const scripts = document.getElementsByTagName('script');
+            for (let index = scripts.length - 1; index >= 0; index -= 1) {
+                const candidate = String(scripts[index].src || '');
+                if (candidate.indexOf('jellyfin-lyric-motion.js') >= 0) {
+                    source = candidate;
+                    break;
+                }
+            }
+        } catch {
+            source = '';
+        }
+        if (source) {
+            const clean = source.split('#', 1)[0].split('?', 1)[0];
+            return clean.replace(/jellyfin-lyric-motion\.js$/i, ROMANIZER_ASSET)
+                + `?v=${encodeURIComponent(LYRICG2P_VERSION)}`;
+        }
+        return `${ROMANIZER_ASSET}?v=${encodeURIComponent(LYRICG2P_VERSION)}`;
+    }
+
+    function getRomanizer() {
+        const candidate = window.JellyfinLyricRomanizer;
+        return candidate
+            && String(candidate.version || '') === LYRICG2P_VERSION
+            && typeof candidate.romanize === 'function'
+            && typeof candidate.canRomanize === 'function'
+            ? candidate
+            : null;
+    }
+
+    function ensureRomanizerLoaded() {
+        const existing = getRomanizer();
+        if (existing) return Promise.resolve(existing);
+        if (romanizerLoadPromise) return romanizerLoadPromise;
+
+        romanizerLoadPromise = new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.async = true;
+            script.src = romanizerAssetUrl();
+            script.dataset.akRomanizerLoader = '1';
+            let settled = false;
+            const finish = (error, loaded = null) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                if (script.parentNode) script.parentNode.removeChild(script);
+                if (error) reject(error);
+                else resolve(loaded);
+            };
+            const timeoutId = setTimeout(() => finish(new Error('Romanizer asset load timed out')), ROMANIZER_LOAD_TIMEOUT_MS);
+            script.onload = () => {
+                const loaded = getRomanizer();
+                finish(loaded ? null : new Error('Romanizer asset loaded without API'), loaded);
+            };
+            script.onerror = () => finish(new Error('Romanizer asset failed to load'));
+            (document.head || document.documentElement).appendChild(script);
+        }).catch(error => {
+            romanizerLoadPromise = null;
+            throw error;
+        });
+        return romanizerLoadPromise;
+    }
+
+    function romanizeIndicCached(text) {
+        const value = String(text == null ? '' : text);
+        if (!value) return value;
+        if (state.romanizationCache.has(value)) return state.romanizationCache.get(value);
+        const romanizer = getRomanizer();
+        let result = value;
+        try {
+            if (romanizer) result = romanizer.romanize(value) || value;
+        } catch {
+            result = value;
+        }
+        state.romanizationCache.set(value, result);
+        while (state.romanizationCache.size > ROMANIZATION_CACHE_MAX_ENTRIES) {
+            const oldest = state.romanizationCache.keys().next();
+            if (oldest.done) break;
+            state.romanizationCache.delete(oldest.value);
+        }
+        return result;
+    }
+
     function googleRomanizationUrl(text) {
         return 'https://translate.googleapis.com/translate_a/single'
             + `?client=gtx&sl=auto&tl=en&dt=rm&q=${encodeURIComponent(text)}`;
@@ -4660,6 +4766,7 @@
             fragment
             && fragment !== sourceText
             && hasNativeScriptCandidate(fragment)
+            && !usesIndicRomanizer(fragment)
             && fragment.length <= GOOGLE_ROMANIZATION_MAX_TEXT_CHARS
         );
     }
@@ -4680,6 +4787,7 @@
                 && !seen.has(text)
                 && !state.googleRomanizationAttempted.has(text)
                 && hasNativeScriptCandidate(text)
+                && !usesIndicRomanizer(text)
                 && text.length <= GOOGLE_ROMANIZATION_MAX_TEXT_CHARS
             ) {
                 seen.add(text);
@@ -4964,7 +5072,7 @@
         /* Keep generated separators after the cue that just ended. */
     }
 
-    function romanizedLyricView(lyric) {
+    function googleRomanizedLyricView(lyric) {
         if (!lyric) return lyric;
 
         const profile = lyricTextProfile(lyric);
@@ -4975,12 +5083,28 @@
         const convertedLine = state.googleRomanizationCache.get(sourceText);
         if (!convertedLine) return lyric;
         return romanizedLyricViewFromConvertedLine(
-            lyric, profile, marker, sourceText, convertedLine
+            lyric, profile, marker, sourceText, convertedLine, true
+        );
+    }
+
+    function indicRomanizedLyricView(lyric) {
+        if (!lyric) return lyric;
+        const romanizer = getRomanizer();
+        const profile = lyricTextProfile(lyric);
+        const sourceText = profile.text;
+        if (!romanizer || !romanizer.canRomanize(sourceText)) return lyric;
+        const convertedLine = romanizeIndicCached(sourceText);
+        if (!convertedLine || convertedLine === sourceText) return lyric;
+        const marker = profile.positionOffset > 0
+            ? profile.rawText.slice(0, profile.positionOffset)
+            : '';
+        return romanizedLyricViewFromConvertedLine(
+            lyric, profile, marker, sourceText, convertedLine, false
         );
     }
 
     function romanizedLyricViewFromConvertedLine(
-        lyric, profile, marker, sourceText, convertedLine
+        lyric, profile, marker, sourceText, convertedLine, preserveCuePhrases
     ) {
         if (!convertedLine || convertedLine === sourceText) return lyric;
 
@@ -4998,12 +5122,14 @@
         const boundaryMap = buildRomanizedBoundaryMap(
             sourceText,
             convertedLine,
-            googleRomanizedCueAnchors(
-                sourceText,
-                convertedLine,
-                ranges,
-                profile.positionOffset
-            )
+            preserveCuePhrases
+                ? googleRomanizedCueAnchors(
+                    sourceText,
+                    convertedLine,
+                    ranges,
+                    profile.positionOffset
+                )
+                : []
         );
         const rangeByCueIndex = new Map(
             ranges.map(range => [range.cueIndex, range])
@@ -5037,9 +5163,11 @@
                 profile.positionOffset + romanizedBoundary(boundaryMap, sourceStart),
                 profile.positionOffset + romanizedBoundary(boundaryMap, sourceEnd)
             );
-            /* Runtime-only marker: the renderer must keep this ELRC phrase as
-             * one visual token even though Google has made it Latin text. */
-            convertedCue.__akRomanizedPhraseCue = true;
+            if (preserveCuePhrases) {
+                /* Google returns phrase-level readings rather than a token
+                 * alignment table, so retain the source cue as one sweep. */
+                convertedCue.__akRomanizedPhraseCue = true;
+            }
             return convertedCue;
         });
 
@@ -5052,7 +5180,9 @@
             state.romanizationMode === 'romanized'
             && state.romanizationAvailable
         ) {
-            return romanizedLyricView(lyric);
+            return usesIndicRomanizer(lyricTextProfile(lyric).text)
+                ? indicRomanizedLyricView(lyric)
+                : googleRomanizedLyricView(lyric);
         }
         return lyric;
     }
@@ -6352,8 +6482,13 @@
 
     function prepareRomanizationForLyrics() {
         const lyrics = state.lyrics;
+        const generation = state.generation;
         const nativeCandidate = lyricsHaveNativeScript(lyrics);
+        const needsIndicRomanizer = (lyrics || []).some(lyric =>
+            usesIndicRomanizer(lyricTextProfile(lyric).text)
+        );
 
+        state.romanizationCache.clear();
         state.googleRomanizationCache.clear();
         state.googleRomanizationFragmentCache.clear();
         state.googleRomanizationAttempted.clear();
@@ -6376,15 +6511,36 @@
             return;
         }
 
-        state.romanizationLoadState = 'ready';
+        /* Google is ready on demand, while the local asset is loaded only for
+         * an Indian-script lyric. The control never waits for either provider. */
+        state.romanizationLoadState = needsIndicRomanizer ? 'loading' : 'ready';
         state.romanizationLoadError = '';
         state.romanizationAvailable = true;
-        state.romanizationSource = 'google-dt-rm';
+        state.romanizationSource = needsIndicRomanizer
+            ? 'lyricg2p-indic+google-dt-rm'
+            : 'google-dt-rm';
         ensureRomanizationToggle();
         if (state.romanizationMode === 'romanized') {
             redecorateForRomanization();
             requestGoogleRomanizationForLyrics();
         }
+
+        if (!needsIndicRomanizer) return;
+        ensureRomanizerLoaded().then(romanizer => {
+            if (generation !== state.generation || lyrics !== state.lyrics) return;
+            state.romanizationLoadState = 'ready';
+            state.romanizationLoadError = '';
+            state.romanizationSource = romanizer.strategy
+                ? `${romanizer.strategy}+google-dt-rm`
+                : 'lyricg2p-indic+google-dt-rm';
+            if (state.romanizationMode === 'romanized') redecorateForRomanization();
+        }).catch(error => {
+            if (generation !== state.generation || lyrics !== state.lyrics) return;
+            state.romanizationLoadState = 'error';
+            state.romanizationLoadError = String(error && error.message || error);
+            state.romanizationSource = 'google-dt-rm (Indic asset unavailable)';
+            warn('Indic LyricG2P asset unavailable; leaving Indic text unchanged:', error && error.message || error);
+        });
     }
 
     loadSongPreferences();
@@ -12769,6 +12925,7 @@
 
     const publicApi = Object.freeze({
         version: VERSION,
+        lyricG2PVersion: LYRICG2P_VERSION,
         redecorate: queueDecoration,
         accents() {
             return PREMIUM_ACCENTS.map(accent => ({
@@ -12795,8 +12952,11 @@
                 source: state.romanizationSource,
                 transformedLines: state.romanizationLineCount,
                 toggleCount: state.romanizationToggleCount,
-                provider: 'google-translate-dt-rm',
+                provider: 'lyricg2p-indic + google-translate-dt-rm',
                 networkSources: true,
+                localRomanizerVersion: getRomanizer()
+                    ? getRomanizer().version
+                    : null,
                 googleState: state.googleRomanizationState,
                 googleError: state.googleRomanizationError,
                 googleTransformedLines: state.googleRomanizationLineCount,

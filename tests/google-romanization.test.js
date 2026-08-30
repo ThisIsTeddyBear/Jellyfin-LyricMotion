@@ -11,7 +11,17 @@ const source = fs.readFileSync(
 );
 const start = source.indexOf('function googleRomanizationUrl(text)');
 const end = source.indexOf('function cacheGoogleRomanization', start);
-assert(start >= 0 && end > start, 'Google-only service must be embedded in the runtime');
+assert(start >= 0 && end > start, 'Google service must be embedded in the runtime');
+
+const routeStart = source.indexOf('function usesIndicRomanizer(text)');
+const routeEnd = source.indexOf('let romanizerLoadPromise', routeStart);
+assert(routeStart >= 0 && routeEnd > routeStart, 'Indic routing must be embedded in the runtime');
+const routeContext = {};
+vm.createContext(routeContext);
+vm.runInContext(`${source.slice(routeStart, routeEnd)}\nthis.usesIndicRomanizer = usesIndicRomanizer;`, routeContext);
+assert.strictEqual(routeContext.usesIndicRomanizer('\u0924\u0942'), true, 'Indian Brahmic scripts use LyricG2P');
+assert.strictEqual(routeContext.usesIndicRomanizer('\u8a18\u61b6'), false, 'Japanese uses Google Romanization');
+assert.strictEqual(routeContext.usesIndicRomanizer('\u0627\u0644\u0639\u0631\u0628\u064a\u0629'), false, 'Arabic uses Google Romanization');
 
 const context = {
     AbortController,
@@ -157,9 +167,10 @@ async function run() {
         /no Latin reading/
     );
 
-    assert(!source.includes('jellyfin-lyric-romanizer.js'));
-    assert(!source.includes('JellyfinLyricRomanizer'));
-    console.log('Google-only Romanization regression suite passed.');
+    assert(source.includes('jellyfin-lyric-romanizer.js'));
+    assert(source.includes('JellyfinLyricRomanizer'));
+    assert(source.includes('&& !usesIndicRomanizer(text)'));
+    console.log('Hybrid Romanization regression suite passed.');
 }
 
 run().catch(error => {
