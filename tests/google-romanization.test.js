@@ -26,7 +26,28 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(
-    `${source.slice(start, end)}\nthis.googleApi = { googleRomanizationUrl, parseGoogleRomanization, googleRomanizeLine };`,
+    `${source.slice(start, end)}\nthis.googleApi = { googleRomanizationUrl, parseGoogleRomanization, simplifyGoogleRomanization, googleRomanizeLine };`,
+    context
+);
+
+const boundaryStart = source.indexOf('function romanizedTextChunks(text)');
+const boundaryEnd = source.indexOf('function cloneCueWithPositions', boundaryStart);
+assert(
+    boundaryStart >= 0 && boundaryEnd > boundaryStart,
+    'Romanized ELRC cue-boundary mapper must be embedded in the runtime'
+);
+vm.runInContext(
+    `${source.slice(boundaryStart, boundaryEnd)}\nthis.boundaryApi = { buildRomanizedBoundaryMap, romanizedBoundary };`,
+    context
+);
+
+const tokenStart = source.indexOf('function cueDerivedTokenRanges(text, cueRecords)');
+const tokenEnd = source.indexOf('function cueRecordStart(record)', tokenStart);
+assert(tokenStart >= 0 && tokenEnd > tokenStart, 'Romanized phrase token renderer must be present');
+context.detectScriptProfile = () => 'latin';
+context.usesCueTokenization = () => false;
+vm.runInContext(
+    `${source.slice(tokenStart, tokenEnd)}\nthis.tokenApi = { getWordRanges };`,
     context
 );
 
@@ -36,6 +57,85 @@ async function run() {
     assert.strictEqual(
         context.googleApi.parseGoogleRomanization([[['', '記憶', null, 'Kioku']]]),
         'Kioku'
+    );
+    assert.strictEqual(
+        context.googleApi.simplifyGoogleRomanization("Masatī’ca masatā'ī zahirī javānī"),
+        "Masati'ca masata'i zahiri javani",
+        'academic diacritics and curly apostrophes become readable ASCII'
+    );
+    assert.strictEqual(
+        context.googleApi.simplifyGoogleRomanization('Mainnē tō tērē nāla nacaṇā'),
+        'Mainne to tere nala nacana'
+    );
+    assert.strictEqual(
+        context.googleApi.simplifyGoogleRomanization(
+            "Masatī’ca masatā'ī zahirī javānī",
+            'ਮਸਤੀ ’ਚ ਮਸਤਾਈ ਜ਼ਹਿਰੀ ਜਵਾਨੀ'
+        ),
+        "Masati'ch masata'i zahiri javani",
+        'Indic scholarly c and Gurmukhi apostrophe contractions become ch'
+    );
+    assert.strictEqual(
+        context.googleApi.simplifyGoogleRomanization('nacaṇā', 'ਨੱਚਣਾ'),
+        'nachana'
+    );
+
+    const compactCjkMap = context.boundaryApi.buildRomanizedBoundaryMap(
+        '\u4f60\u597d\u4e16\u754c',
+        'ni hao shi jie'
+    );
+    assert.deepStrictEqual(
+        Array.from(compactCjkMap),
+        [0, 4, 7, 11, 14],
+        'every adjacent compact-script cue gets a shared, non-overlapping boundary'
+    );
+    for (let index = 1; index < compactCjkMap.length; index += 1) {
+        assert(
+            compactCjkMap[index] >= compactCjkMap[index - 1],
+            'Romanized cue boundaries never move backward'
+        );
+    }
+
+    const wordAnchoredMap = context.boundaryApi.buildRomanizedBoundaryMap(
+        '\u0924\u0942 \u0939\u0948',
+        'tu hai'
+    );
+    assert.deepStrictEqual(
+        Array.from(wordAnchoredMap),
+        [0, 1, 2, 3, 5, 6],
+        'matching whitespace anchors preserve word starts and generated word widths'
+    );
+
+    const songSource = '\u8a18\u61b6\u3092\u8f9f\u3063\u3066 \u4e0d\u610f\u306b\u898b\u3048\u305f \u305d\u306e\u8996\u7dda\u306f';
+    const songReading = 'Kioku o tadotte fui ni mieta sono shisen wa';
+    const secondPhraseEnd = songReading.indexOf('sono');
+    const phraseAnchoredMap = context.boundaryApi.buildRomanizedBoundaryMap(
+        songSource,
+        songReading,
+        [
+            { source: 0, target: 0 },
+            { source: 7, target: 16 },
+            { source: 14, target: secondPhraseEnd },
+            { source: 19, target: songReading.length }
+        ]
+    );
+    assert.deepStrictEqual(
+        [phraseAnchoredMap[0], phraseAnchoredMap[7], phraseAnchoredMap[14], phraseAnchoredMap[19]],
+        [0, 16, secondPhraseEnd, songReading.length],
+        'the supplied RASEN ELRC phrase boundaries land on their actual Google Romanized phrases'
+    );
+    const romanizedPhraseRanges = context.tokenApi.getWordRanges(
+        songReading,
+        [
+            { startPos: 0, endPos: 16, cue: { __akRomanizedPhraseCue: true } },
+            { startPos: 16, endPos: secondPhraseEnd, cue: { __akRomanizedPhraseCue: true } },
+            { startPos: secondPhraseEnd, endPos: songReading.length, cue: { __akRomanizedPhraseCue: true } }
+        ]
+    );
+    assert.deepStrictEqual(
+        Array.from(romanizedPhraseRanges, range => range.text),
+        ['Kioku o tadotte', 'fui ni mieta', 'sono shisen wa'],
+        'Romanized RASEN phrases remain one timed sweep each, rather than separate simultaneous Latin-word sweeps'
     );
 
     let attempts = 0;

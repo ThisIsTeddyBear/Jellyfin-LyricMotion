@@ -1,6 +1,6 @@
 # Jellyfin LyricMotion
 
-> **3.2.7 Google Romanization build:** one Google Translate Romanization path for every native-script lyric, without gating the control.
+> **3.2.8 Google Romanization build:** plain-ASCII, listener-friendly Google readings for every native-script lyric, without gating the control.
 
 [![Release](https://img.shields.io/github/v/release/ThisIsTeddyBear/Jellyfin-LyricMotion?display_name=tag)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
@@ -13,9 +13,9 @@ An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and 
 > [!NOTE]
 > **TV policy:** LyricMotion intentionally hard-bypasses TV-class clients. Detected TVs use Jellyfin's stock lyrics experience with no LyricMotion fetch/XHR interception, observers, media hooks, lyric DOM decoration, Google Romanization requests, or timing controls. Desktop and mobile remain enhanced. See [TV Stock Bypass](docs/TV-STOCK-BYPASS.md).
 
-## What's new in 3.2.7
+## What's new in 3.2.8
 
-The in-house Romanizer has been removed. Every native-script lyric, including Indian languages, now uses Google Translate's `dt=rm` Romanization response after you select Romanized view. A timeout, rejection or offline client leaves that native line unchanged, but can never hide the Romanization control or interrupt lyrics. Do not activate this mode for private lyrics that must remain entirely on-device.
+The in-house Romanizer has been removed. Every native-script lyric, including Indian languages, now uses Google Translate's `dt=rm` Romanization response after you select Romanized view. Scholarly diacritics and typographic apostrophes from that response are converted to plain ASCII for easier reading. A timeout, rejection or offline client leaves that native line unchanged, but can never hide the Romanization control or interrupt lyrics. Do not activate this mode for private lyrics that must remain entirely on-device.
 
 - **One Romanization provider.** Japanese, Korean, Chinese, Thai, Arabic, Indic scripts and every other native script use Google `dt=rm` directly on demand with a six-second timeout and bounded retries.
 - **Dynamic is the only atmosphere engine.** Legacy atmosphere preferences are ignored; removed modes have no runtime branches or persistent setting path to reactivate them.
@@ -265,7 +265,7 @@ The uninstaller surgically removes LyricMotion loader tags/assets and normally d
 
 ## Compatibility
 
-The 3.2.7 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients remain a hard stock-Jellyfin bypass.
+The 3.2.8 release targets Jellyfin Web 10.11.x and modern desktop/mobile browsers. TV-class clients remain a hard stock-Jellyfin bypass.
 
 Real behavior can still vary by Jellyfin build, browser/WebView, available fonts and source lyric quality.
 

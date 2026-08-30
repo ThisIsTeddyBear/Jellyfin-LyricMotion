@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.2.8] - 2026-08-30
+
+### Changed
+
+- Google `dt=rm` output now removes scholarly diacritics and normalizes typographic punctuation into readable plain ASCII before display.
+
 ## [3.2.7] - 2026-08-30
 
 ### Changed

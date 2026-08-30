@@ -8,7 +8,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.2.7';
+    const VERSION = '3.2.8';
 
     /*
      * A duplicated script tag used to create a second DOM observer, route-hook
@@ -1142,6 +1142,7 @@
         romanizationSource: 'none',
         romanizationToggle: null,
         googleRomanizationCache: new Map(),
+        googleRomanizationFragmentCache: new Map(),
         googleRomanizationAttempted: new Set(),
         googleRomanizationRequest: null,
         googleRomanizationState: 'idle',
@@ -2212,14 +2213,24 @@
 
     function getWordRanges(text, cueRecords) {
         const profile = detectScriptProfile(text);
+        const preservesRomanizedCuePhrases =
+            Array.isArray(cueRecords)
+            && cueRecords.some(record =>
+                record
+                && record.cue
+                && record.cue.__akRomanizedPhraseCue === true
+            );
 
         /*
          * CJK and several naturally space-less scripts must not have word
          * boundaries invented by LyricMotion. If ELRC/Jellyfin supplies
-         * multiple timing tokens, preserve those exact token spans.
+         * multiple timing tokens, preserve those exact token spans. Google
+         * Romanization retains those same source phrase cues: splitting their
+         * Latin display text again would make several unrelated words sweep
+         * and glow at one shared timestamp.
          */
         if (
-            usesCueTokenization(profile)
+            (usesCueTokenization(profile) || preservesRomanizedCuePhrases)
             && Array.isArray(cueRecords)
             && cueRecords.length > 1
         ) {
@@ -3734,6 +3745,9 @@
         if (state.googleRomanizationCache && typeof state.googleRomanizationCache.clear === 'function') {
             state.googleRomanizationCache.clear();
         }
+        if (state.googleRomanizationFragmentCache && typeof state.googleRomanizationFragmentCache.clear === 'function') {
+            state.googleRomanizationFragmentCache.clear();
+        }
         if (state.googleRomanizationAttempted && typeof state.googleRomanizationAttempted.clear === 'function') {
             state.googleRomanizationAttempted.clear();
         }
@@ -4548,14 +4562,47 @@
         }
     }
 
-    function parseGoogleRomanization(payload) {
+    function parseGoogleRomanization(payload, sourceText = '') {
         const segments = Array.isArray(payload) && Array.isArray(payload[0])
             ? payload[0]
             : [];
-        return segments
+        const reading = segments
             .map(segment => Array.isArray(segment) ? segment[3] : '')
             .filter(value => typeof value === 'string' && value.trim())
             .join('');
+        return simplifyGoogleRomanization(reading, sourceText);
+    }
+
+    function simplifyGoogleRomanization(reading, sourceText = '') {
+        let value = String(reading || '');
+        if (typeof value.normalize === 'function') {
+            value = value.normalize('NFKD');
+        }
+
+        /* Google returns scholarly Latin transliteration for many Indic and
+         * Arabic-family scripts (macrons, dots and modifier apostrophes).
+         * Strip only presentation marks, retain the provider's word choices,
+         * and normalize punctuation so the result is ordinary ASCII people
+         * can read aloud without knowing a transliteration standard. */
+        value = value
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[’‘`´]/g, "'")
+            .replace(/[‐‑–—]/g, '-')
+            .replace(/\s*'\s*/g, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        /* ISO-style Indic output uses c for the everyday ch sound. Apply that
+         * convention only when the source itself is Indic, never to Chinese
+         * Pinyin or another Latin-based reading. Gurmukhi contractions such
+         * as ’ਚ are similarly written as ordinary 'ch. */
+        if (/[\u0900-\u0d7f]/u.test(String(sourceText || ''))) {
+            value = value.replace(/c/g, 'ch');
+            if (/[’']\s*ਚ/u.test(String(sourceText || ''))) {
+                value = value.replace(/'cha\b/gi, "'ch");
+            }
+        }
+        return value;
     }
 
     async function googleRomanizeLine(text) {
@@ -4563,7 +4610,7 @@
         for (let attempt = 0; attempt < GOOGLE_ROMANIZATION_MAX_RETRIES; attempt += 1) {
             try {
                 const response = await googleFetchWithTimeout(googleRomanizationUrl(source));
-                const reading = parseGoogleRomanization(await response.json());
+                const reading = parseGoogleRomanization(await response.json(), source);
                 if (reading && !hasNativeScriptCandidate(reading)) return reading;
                 throw new Error('Google romanization response had no Latin reading');
             } catch (error) {
@@ -4596,6 +4643,27 @@
         return true;
     }
 
+    function romanizationCueFragments(lyric) {
+        const profile = lyricTextProfile(lyric);
+        const sourceText = profile.text;
+        const rawCues = lyricValue(lyric, 'Cues', 'cues');
+        if (!sourceText || !Array.isArray(rawCues) || rawCues.length < 2) return [];
+
+        const ranges = normalizedCueTextRanges(
+            orderedCuesBySourcePosition(rawCues),
+            profile.rawText.length
+        );
+        return ranges.map(range => sourceText.slice(
+            Math.max(0, range.startPosition - profile.positionOffset),
+            Math.max(0, range.endPosition - profile.positionOffset)
+        ).trim()).filter(fragment =>
+            fragment
+            && fragment !== sourceText
+            && hasNativeScriptCandidate(fragment)
+            && fragment.length <= GOOGLE_ROMANIZATION_MAX_TEXT_CHARS
+        );
+    }
+
     function requestGoogleRomanizationForLyrics() {
         const lyrics = state.lyrics;
         if (
@@ -4621,33 +4689,58 @@
         });
         if (!sourceLines.length) return;
 
+        /* ELRC cue positions describe source-script phrases.  A full Google
+         * reading does not expose their target offsets, so obtain readings for
+         * the actual timed phrases too.  These are used strictly as alignment
+         * anchors; the displayed line remains Google's whole-line reading. */
+        const fragmentSources = [];
+        const seenFragments = new Set();
+        lyrics.forEach(lyric => romanizationCueFragments(lyric).forEach(fragment => {
+            if (!seenFragments.has(fragment) && !state.googleRomanizationFragmentCache.has(fragment)) {
+                seenFragments.add(fragment);
+                fragmentSources.push(fragment);
+            }
+        }));
+
         const generation = state.generation;
         state.googleRomanizationState = 'loading';
         state.googleRomanizationError = '';
         const results = new Array(sourceLines.length);
-        let nextLine = 0;
+        const fragmentResults = new Array(fragmentSources.length);
+        const jobs = sourceLines.map((text, index) => ({ text, index, fragment: false }))
+            .concat(fragmentSources.map((text, index) => ({ text, index, fragment: true })));
+        let nextJob = 0;
         const worker = async () => {
-            while (nextLine < sourceLines.length) {
-                const index = nextLine;
-                nextLine += 1;
+            while (nextJob < jobs.length) {
+                const job = jobs[nextJob];
+                nextJob += 1;
                 try {
-                    results[index] = await googleRomanizeLine(sourceLines[index]);
+                    const reading = await googleRomanizeLine(job.text);
+                    if (job.fragment) fragmentResults[job.index] = reading;
+                    else results[job.index] = reading;
                 } catch {
-                    results[index] = sourceLines[index];
+                    if (job.fragment) fragmentResults[job.index] = job.text;
+                    else results[job.index] = job.text;
                 }
             }
         };
         state.googleRomanizationRequest = Promise.all(
             Array.from(
-                { length: Math.min(GOOGLE_ROMANIZATION_CONCURRENCY, sourceLines.length) },
+                { length: Math.min(GOOGLE_ROMANIZATION_CONCURRENCY, jobs.length) },
                 worker
             )
-        ).then(() => results)
-            .then(results => {
+        ).then(() => ({ results, fragmentResults }))
+            .then(payload => {
                 if (generation !== state.generation || lyrics !== state.lyrics) return;
                 let applied = 0;
                 sourceLines.forEach((source, index) => {
-                    if (cacheGoogleRomanization(source, results && results[index])) applied += 1;
+                    if (cacheGoogleRomanization(source, payload.results && payload.results[index])) applied += 1;
+                });
+                fragmentSources.forEach((source, index) => {
+                    const reading = String(payload.fragmentResults && payload.fragmentResults[index] || '').trim();
+                    if (reading && reading !== source && !hasNativeScriptCandidate(reading)) {
+                        state.googleRomanizationFragmentCache.set(source, reading);
+                    }
                 });
                 state.googleRomanizationLineCount += applied;
                 state.googleRomanizationState = applied ? 'ready' : 'fallback-native';
@@ -4672,15 +4765,150 @@
             });
     }
 
-    function proportionalRomanizedBoundary(sourceText, sourceIndex, convertedLine, bias) {
-        const sourceLength = Math.max(1, String(sourceText || '').length);
-        const targetLength = String(convertedLine || '').length;
-        const ratio = Math.max(0, Math.min(sourceLength, Number(sourceIndex) || 0))
-            / sourceLength;
-        const mapped = bias === 'start'
-            ? Math.floor(ratio * targetLength)
-            : Math.ceil(ratio * targetLength);
-        return Math.max(0, Math.min(targetLength, mapped));
+    function romanizedTextChunks(text) {
+        const chunks = [];
+        const expression = /\S+|\s+/gu;
+        let match;
+
+        while ((match = expression.exec(String(text || ''))) !== null) {
+            chunks.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                whitespace: /^\s+$/u.test(match[0])
+            });
+        }
+
+        return chunks;
+    }
+
+    /*
+     * Google returns a single Romanized string, not a word-alignment table.
+     * The former floor/ceil mapping independently rounded each cue and made
+     * adjacent cue spans overlap after expansion (for example a CJK glyph to
+     * several Latin letters). The renderer treats overlaps as unsafe, which
+     * looked like skipped or prematurely sweeping lyrics.
+     *
+     * Build one shared boundary map instead: every occurrence of the same
+     * source boundary has exactly the same target boundary. When both lines
+     * have the same whitespace structure, word and separator edges are hard
+     * anchors; only characters inside a token are proportionally mapped.
+     */
+    function buildRomanizedBoundaryMap(sourceText, convertedLine, alignmentAnchors = []) {
+        const source = String(sourceText || '');
+        const target = String(convertedLine || '');
+        const sourceLength = source.length;
+        const targetLength = target.length;
+        const boundaries = new Array(sourceLength + 1).fill(0);
+        const sourceChunks = romanizedTextChunks(source);
+        const targetChunks = romanizedTextChunks(target);
+        const hasMatchingStructure =
+            sourceChunks.length === targetChunks.length
+            && sourceChunks.every((chunk, index) =>
+                chunk.whitespace === targetChunks[index].whitespace
+            );
+
+        const mapChunk = (sourceStart, sourceEnd, targetStart, targetEnd) => {
+            const sourceWidth = sourceEnd - sourceStart;
+            const targetWidth = targetEnd - targetStart;
+            if (sourceWidth <= 0) return;
+
+            for (let index = sourceStart; index <= sourceEnd; index += 1) {
+                const ratio = (index - sourceStart) / sourceWidth;
+                boundaries[index] = Math.max(
+                    targetStart,
+                    Math.min(targetEnd, Math.round(targetStart + ratio * targetWidth))
+                );
+            }
+        };
+
+        const anchors = [{ source: 0, target: 0 }]
+            .concat(Array.isArray(alignmentAnchors) ? alignmentAnchors : [])
+            .concat([{ source: sourceLength, target: targetLength }])
+            .filter(anchor => anchor && Number.isFinite(anchor.source) && Number.isFinite(anchor.target))
+            .map(anchor => ({
+                source: Math.max(0, Math.min(sourceLength, Math.round(anchor.source))),
+                target: Math.max(0, Math.min(targetLength, Math.round(anchor.target)))
+            }))
+            .sort((left, right) => left.source - right.source || left.target - right.target)
+            .reduce((valid, anchor) => {
+                const previous = valid[valid.length - 1];
+                if (!previous || (anchor.source > previous.source && anchor.target >= previous.target)) {
+                    valid.push(anchor);
+                }
+                return valid;
+            }, []);
+
+        if (anchors.length > 2) {
+            for (let index = 1; index < anchors.length; index += 1) {
+                mapChunk(
+                    anchors[index - 1].source,
+                    anchors[index].source,
+                    anchors[index - 1].target,
+                    anchors[index].target
+                );
+            }
+        } else if (hasMatchingStructure && sourceChunks.length) {
+            sourceChunks.forEach((chunk, index) => {
+                const targetChunk = targetChunks[index];
+                mapChunk(chunk.start, chunk.end, targetChunk.start, targetChunk.end);
+            });
+        } else {
+            mapChunk(0, sourceLength, 0, targetLength);
+        }
+
+        /* A malformed string must never yield backward ELRC positions. */
+        boundaries[0] = 0;
+        for (let index = 1; index <= sourceLength; index += 1) {
+            boundaries[index] = Math.max(boundaries[index - 1], boundaries[index]);
+        }
+        boundaries[sourceLength] = targetLength;
+
+        return boundaries;
+    }
+
+    function romanizedBoundary(boundaries, sourceIndex) {
+        const map = Array.isArray(boundaries) ? boundaries : [0];
+        const index = Math.max(0, Math.min(map.length - 1, Number(sourceIndex) || 0));
+        return map[index] || 0;
+    }
+
+    function googleRomanizedCueAnchors(sourceText, convertedLine, ranges, positionOffset) {
+        const source = String(sourceText || '');
+        const target = String(convertedLine || '');
+        const targetFolded = target.toLocaleLowerCase();
+        const anchors = [];
+        let cursor = 0;
+
+        (ranges || []).forEach(range => {
+            const start = Math.max(0, range.startPosition - positionOffset);
+            const end = Math.max(start, Math.min(source.length, range.endPosition - positionOffset));
+            const rawFragment = source.slice(start, end);
+            const fragment = rawFragment.trim();
+            const reading = state.googleRomanizationFragmentCache.get(fragment);
+            if (!fragment || !reading) return;
+
+            const targetStart = targetFolded.indexOf(
+                String(reading).toLocaleLowerCase(),
+                cursor
+            );
+            if (targetStart < cursor) return;
+
+            let targetEnd = targetStart + reading.length;
+            /* ELRC phrase spans commonly include their following source
+             * space. Attach the generated Latin separator to that same cue so
+             * its next cue begins at one exact shared boundary. */
+            if (/\s$/u.test(rawFragment)) {
+                while (targetEnd < target.length && /\s/u.test(target.charAt(targetEnd))) {
+                    targetEnd += 1;
+                }
+            }
+
+            anchors.push({ source: start, target: targetStart });
+            anchors.push({ source: end, target: targetEnd });
+            cursor = targetEnd;
+        });
+
+        return anchors;
     }
 
     function cloneCueWithPositions(cue, position, endPosition) {
@@ -4708,7 +4936,10 @@
         if (index <= 0) return 0;
         if (index >= sourceText.length) return convertedLine.length;
 
-        return proportionalRomanizedBoundary(sourceText, index, convertedLine, 'start');
+        return romanizedBoundary(
+            buildRomanizedBoundaryMap(sourceText, convertedLine),
+            index
+        );
 
         /*
          * Bias inserted transliteration separators toward the cue that begins
@@ -4725,7 +4956,10 @@
         if (index <= 0) return 0;
         if (index >= sourceText.length) return convertedLine.length;
 
-        return proportionalRomanizedBoundary(sourceText, index, convertedLine, 'end');
+        return romanizedBoundary(
+            buildRomanizedBoundaryMap(sourceText, convertedLine),
+            index
+        );
 
         /* Keep generated separators after the cue that just ended. */
     }
@@ -4761,6 +4995,16 @@
             sorted,
             profile.rawText.length
         );
+        const boundaryMap = buildRomanizedBoundaryMap(
+            sourceText,
+            convertedLine,
+            googleRomanizedCueAnchors(
+                sourceText,
+                convertedLine,
+                ranges,
+                profile.positionOffset
+            )
+        );
         const rangeByCueIndex = new Map(
             ranges.map(range => [range.cueIndex, range])
         );
@@ -4788,11 +5032,15 @@
                 end - profile.positionOffset
             ));
 
-            return cloneCueWithPositions(
+            const convertedCue = cloneCueWithPositions(
                 cue,
-                profile.positionOffset + romanizedBoundaryStart(sourceText, sourceStart, convertedLine),
-                profile.positionOffset + romanizedBoundaryEnd(sourceText, sourceEnd, convertedLine)
+                profile.positionOffset + romanizedBoundary(boundaryMap, sourceStart),
+                profile.positionOffset + romanizedBoundary(boundaryMap, sourceEnd)
             );
+            /* Runtime-only marker: the renderer must keep this ELRC phrase as
+             * one visual token even though Google has made it Latin text. */
+            convertedCue.__akRomanizedPhraseCue = true;
+            return convertedCue;
         });
 
         state.romanizationLineCount += 1;
@@ -6107,6 +6355,7 @@
         const nativeCandidate = lyricsHaveNativeScript(lyrics);
 
         state.googleRomanizationCache.clear();
+        state.googleRomanizationFragmentCache.clear();
         state.googleRomanizationAttempted.clear();
         state.googleRomanizationRequest = null;
         state.googleRomanizationState = 'idle';
