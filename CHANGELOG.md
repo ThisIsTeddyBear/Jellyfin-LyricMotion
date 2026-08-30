@@ -4,7 +4,6 @@
 
 ### Changed
 
-- Restored the Aug 28 LyricG2P 6.5.1 asset for Indian-script romanization. Google `dt=rm` remains the on-demand path for every non-Indic native script.
 - Google `dt=rm` output now removes scholarly diacritics and normalizes typographic punctuation into readable plain ASCII before display.
 
 ## [3.2.7] - 2026-08-30

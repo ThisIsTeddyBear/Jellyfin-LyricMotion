@@ -52,16 +52,10 @@ $Root = Split-Path -Parent $Here
 $VersionPath = Join-Path $Root "VERSION"
 if (-not (Test-Path -LiteralPath $VersionPath -PathType Leaf)) { throw "Missing $VersionPath" }
 $Version = ([IO.File]::ReadAllText($VersionPath)).Trim()
-$LyricG2PVersionPath = Join-Path $Root "LYRICG2P_VERSION"
-if (-not (Test-Path -LiteralPath $LyricG2PVersionPath -PathType Leaf)) { throw "Missing $LyricG2PVersionPath" }
-$LyricG2PVersion = ([IO.File]::ReadAllText($LyricG2PVersionPath)).Trim()
 if ([string]::IsNullOrWhiteSpace($Version)) { throw "VERSION is empty" }
 if ($Version -notmatch '^[A-Za-z0-9._+\-]+$') { throw "VERSION contains unsafe characters" }
-if ([string]::IsNullOrWhiteSpace($LyricG2PVersion)) { throw "LYRICG2P_VERSION is empty" }
-if ($LyricG2PVersion -notmatch '^[A-Za-z0-9._+\-]+$') { throw "LYRICG2P_VERSION contains unsafe characters" }
 $JsSource = Join-Path $Root "src\jellyfin-lyric-motion.js"
 $CssSource = Join-Path $Root "src\jellyfin-lyric-motion.css"
-$RomanizerSource = Join-Path $Root "src\jellyfin-lyric-romanizer.js"
 $JsCacheKey = (Get-FileHash -Algorithm SHA256 -LiteralPath $JsSource).Hash.Substring(0, 12).ToLowerInvariant()
 $CssCacheKey = (Get-FileHash -Algorithm SHA256 -LiteralPath $CssSource).Hash.Substring(0, 12).ToLowerInvariant()
 
@@ -171,22 +165,15 @@ $IndexPath = Join-Path $WebDir "index.html"
 
 if (-not (Test-Path -LiteralPath $JsSource -PathType Leaf)) { throw "Missing $JsSource" }
 if (-not (Test-Path -LiteralPath $CssSource -PathType Leaf)) { throw "Missing $CssSource" }
-if (-not (Test-Path -LiteralPath $RomanizerSource -PathType Leaf)) { throw "Missing $RomanizerSource" }
 if (-not [regex]::IsMatch(
     [IO.File]::ReadAllText($JsSource),
     "const\s+VERSION\s*=\s*'" + [regex]::Escape($Version) + "'\s*;"
 )) {
     throw "Runtime JavaScript VERSION does not match VERSION; refusing to install a mismatched release."
 }
-if (-not [regex]::IsMatch(
-    [IO.File]::ReadAllText($RomanizerSource),
-    "const\s+VERSION\s*=\s*'" + [regex]::Escape($LyricG2PVersion) + "'\s*;"
-)) {
-    throw "Romanizer JavaScript VERSION does not match LYRICG2P_VERSION; refusing to install a mismatched release."
-}
 
 Write-Host ""
-Write-Host "Jellyfin LyricMotion v$Version / LyricG2P $LyricG2PVersion" -ForegroundColor Cyan
+Write-Host "Jellyfin LyricMotion v$Version / Google Romanization" -ForegroundColor Cyan
 Write-Host "Web directory: $WebDir"
 
 $content = Remove-LyricMotionTags ([IO.File]::ReadAllText($IndexPath))
@@ -199,7 +186,7 @@ if (-not $runtime.Success) {
     throw "runtime.bundle.js was not found. Jellyfin Web was not modified."
 }
 
-$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '&build=' + $CssCacheKey + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '&build=' + $JsCacheKey + '&g2p=' + $LyricG2PVersion + '"></script>'
+$inject = '<link rel="stylesheet" href="jellyfin-lyric-motion.css?v=' + $Version + '&build=' + $CssCacheKey + '"><script defer="defer" src="jellyfin-lyric-motion.js?v=' + $Version + '&build=' + $JsCacheKey + '"></script>'
 $content = $content.Insert($runtime.Index, $inject)
 
 $BackupName = "index.html.before-jellyfin-lyric-motion-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff")
@@ -211,16 +198,14 @@ while (Test-Path -LiteralPath $BackupPath) {
 }
 Copy-Item -LiteralPath $IndexPath -Destination $BackupPath -Force
 
-# Stage all three assets before replacing any live file. The complete previous
+# Stage both assets before replacing any live file. The complete previous
 # asset set is snapshotted as same-directory rollback files before commit. If
 # any asset or index replacement fails, every live file is restored so Jellyfin
 # never remains in a mixed-version LyricMotion state.
 $JsDestination = Join-Path $WebDir "jellyfin-lyric-motion.js"
 $CssDestination = Join-Path $WebDir "jellyfin-lyric-motion.css"
-$RomanizerDestination = Join-Path $WebDir "jellyfin-lyric-romanizer.js"
 $JsTemporary = $null
 $CssTemporary = $null
-$RomanizerTemporary = $null
 $RollbackEntries = @()
 
 function New-RollbackEntry([string]$Destination) {
@@ -269,20 +254,16 @@ function Remove-RollbackEntries([object[]]$Entries) {
 try {
     $JsTemporary = Stage-AtomicFile $JsSource $JsDestination
     $CssTemporary = Stage-AtomicFile $CssSource $CssDestination
-    $RomanizerTemporary = Stage-AtomicFile $RomanizerSource $RomanizerDestination
 
     $RollbackEntries = @(
         (New-RollbackEntry $JsDestination),
-        (New-RollbackEntry $CssDestination),
-        (New-RollbackEntry $RomanizerDestination)
+        (New-RollbackEntry $CssDestination)
     )
 
     Commit-AtomicReplacement $JsTemporary $JsDestination
     $JsTemporary = $null
     Commit-AtomicReplacement $CssTemporary $CssDestination
     $CssTemporary = $null
-    Commit-AtomicReplacement $RomanizerTemporary $RomanizerDestination
-    $RomanizerTemporary = $null
 
     # Commit the HTML injection last. Restoring the persistent index backup is
     # part of the same transaction if this final step fails.
@@ -297,7 +278,7 @@ try {
     }
     throw $failure
 } finally {
-    foreach ($temporary in @($JsTemporary, $CssTemporary, $RomanizerTemporary)) {
+    foreach ($temporary in @($JsTemporary, $CssTemporary)) {
         if ($temporary -and (Test-Path -LiteralPath $temporary)) {
             Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         }
@@ -307,6 +288,7 @@ try {
 
 Remove-Item -LiteralPath (Join-Path $WebDir "apple-karaoke.js") -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $WebDir "apple-karaoke.css") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $WebDir "jellyfin-lyric-romanizer.js") -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "Installed successfully." -ForegroundColor Green

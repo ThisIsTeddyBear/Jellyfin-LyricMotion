@@ -24,7 +24,7 @@ With no input argument, the converter batch-converts every supported source in t
 
 ## Background-vocal transport
 
-LRC/ELRC has no standard field for a vocal role. The converter prefixes a background line with the ASCII token `[ak:bg]` immediately after its line timestamp. Unlike Unicode format controls, this survives Jellyfin server parsing. LyricMotion removes it before display and corrects cue positions by the token length. Background-role lines retain their own timing and use the same sweep, glow, and layout treatment as every other lyric line, with a smaller type size to identify the role.
+LRC/ELRC has no standard field for a vocal role. The converter prefixes a background line with the ASCII token `[ak:bg]` immediately after its line timestamp. Unlike Unicode format controls, this survives Jellyfin server parsing. LyricMotion removes it before display, corrects cue positions by the token length, and renders the smaller background line aligned to its attached lead's rendered left edge. It compares the nearest preceding and following lead by same-start timing, overlap, then gap, placing the backing line immediately before or after the better match.
 
 The remaining timing text uses the selected LRC or ELRC format. The token may be visible in players that do not run LyricMotion, which is the necessary tradeoff for reliable transport through Jellyfin.
 

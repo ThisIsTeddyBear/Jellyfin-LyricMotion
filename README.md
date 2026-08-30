@@ -1,11 +1,11 @@
 # Jellyfin LyricMotion
 
-> **3.2.8 hybrid Romanization build:** LyricG2P 6.5.1 readings for Indian scripts and Google readings for other native-script lyrics.
+> **3.2.8 Google Romanization build:** plain-ASCII, listener-friendly Google readings for every native-script lyric, without gating the control.
 
 [![Release](https://img.shields.io/github/v/release/ThisIsTeddyBear/Jellyfin-LyricMotion?display_name=tag)](https://github.com/ThisIsTeddyBear/Jellyfin-LyricMotion/releases)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
-An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and mobile: ELRC karaoke motion, overlapping/background vocals, **time-synced instrumental-break progress**, hybrid Romanization, per-song lyric timing correction, multilingual Classic Bloom, and adaptive album atmosphere.
+An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and mobile: ELRC karaoke motion, overlapping/background vocals, **time-synced instrumental-break progress**, Google Romanization, per-song lyric timing correction, multilingual Classic Bloom, and adaptive album atmosphere.
 
 > [!IMPORTANT]
 > LyricMotion is a community project. It is not affiliated with or endorsed by the Jellyfin Project or Apple Inc. It patches only the Jellyfin Web client installed on your own server.
@@ -15,9 +15,9 @@ An unofficial Jellyfin Web enhancement for fluid enhanced lyrics on desktop and 
 
 ## What's new in 3.2.8
 
-Indian-script lyrics use the restored offline LyricG2P 6.5.1 engine from the Aug 28 baseline. Japanese, Korean, Chinese, Thai, Arabic, and other non-Indic native scripts continue to use Google Translate's `dt=rm` response after you select Romanized view. A failed Google request leaves only its affected line native and can never hide the control or interrupt lyrics.
+The in-house Romanizer has been removed. Every native-script lyric, including Indian languages, now uses Google Translate's `dt=rm` Romanization response after you select Romanized view. Scholarly diacritics and typographic apostrophes from that response are converted to plain ASCII for easier reading. A timeout, rejection or offline client leaves that native line unchanged, but can never hide the Romanization control or interrupt lyrics. Do not activate this mode for private lyrics that must remain entirely on-device.
 
-- **Two purpose-built Romanization routes.** Indian scripts use local LyricG2P 6.5.1; Japanese, Korean, Chinese, Thai, Arabic, and all other non-Indic scripts use Google `dt=rm` on demand with a six-second timeout and bounded retries.
+- **One Romanization provider.** Japanese, Korean, Chinese, Thai, Arabic, Indic scripts and every other native script use Google `dt=rm` directly on demand with a six-second timeout and bounded retries.
 - **Dynamic is the only atmosphere engine.** Legacy atmosphere preferences are ignored; removed modes have no runtime branches or persistent setting path to reactivate them.
 - **Album artwork is the color source.** The Dynamic mode does not synthesize a palette. Artwork is uploaded directly to WebGL, tinted only in dark regions, blurred through eight 128 x 128 Kawase passes when the image changes, then animated with simplex-noise domain warping.
 - **Reference shader character preserved.** Warp intensity 1.0, eight blur passes, animation speed 1.8, saturation 1.7, opacity 0.75, dithering 0, and audio responsiveness off follow the theme's shader configuration.
@@ -46,9 +46,11 @@ For a trustworthy vocal gap of at least two seconds, the completed lyric becomes
 
 The fill and wave phase are derived from media time rather than a standalone CSS timer, so pause, seek and playback-rate changes stay locked to the song. Standard LRC without a real line-end timestamp remains conservative and does not synthesize breaks. Reduced-motion keeps the timing fill with decorative wave motion disabled.
 
-### Concurrent lines and background-vocal roles
+### Concurrent lines and left-anchored background vocals
 
-LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content retains its independent timing and shared sweep, glow, and layout treatment, with a smaller type size to identify the backing-vocal role.
+![Two lead lines with compact left-anchored background vocals attached to their nearest lead lines](docs/screenshots/overlap-background-vocals.png)
+
+LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content is rendered in a slightly smaller backing-vocal line aligned to its attached lead's rendered left edge. It compares the nearest preceding and following lead by same-start timing, overlap, then gap, placing the backing line immediately before or after the better match.
 
 ## Supported lyric inputs
 
@@ -129,11 +131,11 @@ Hard-refresh Jellyfin Web, clear site data, or use a private window. Fully close
 
 ## Romanization
 
-For native-script lyrics on desktop/mobile, **Romanize** uses the bundled LyricG2P 6.5.1 engine for Indian scripts and sends other native-script lines to Google Translate's `dt=rm` endpoint. Google requests begin only after you enable the view.
+For native-script lyrics on desktop/mobile, **Romanize** sends each lyric line to Google Translate's `dt=rm` Romanization endpoint. Requests begin only after you enable the view.
 
-Both routes convert a complete lyric line. Jellyfin's existing ELRC cue positions are remapped into the Romanized text; cue timestamps are not modified.
+Google returns a Romanized complete lyric line. Jellyfin's existing ELRC cue positions are reprojected proportionally; cue timestamps are not modified.
 
-The bundled LyricG2P engine is loaded only for Indian-script lyrics. See [Google Romanization](docs/GOOGLE-ROMANIZATION.md).
+There is no bundled transliteration engine, fallback table, pronunciation lexicon, or language-specific route. See [Google Romanization](docs/GOOGLE-ROMANIZATION.md).
 
 ## Smart lyric timing assistant
 

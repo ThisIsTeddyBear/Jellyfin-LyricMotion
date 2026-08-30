@@ -12,7 +12,7 @@ remove swipe/glow/motion features. See `MULTILINGUAL-RENDERING.md`.
 
 ## Romanization on desktop/mobile
 
-Romanization is an optional hybrid display layer over the same captured Jellyfin lyric payload. Indian scripts use the bundled LyricG2P 6.5.1 engine; other native scripts request Google only after the user enables the view. Switching modes rebuilds cue character positions but never changes media/cue time. See `GOOGLE-ROMANIZATION.md`.
+Romanization is an optional Google-backed display layer over the same captured Jellyfin lyric payload. Requests begin only after a native-script song is detected and the user enables the view. Switching modes rebuilds cue character positions but never changes media/cue time. See `GOOGLE-ROMANIZATION.md`.
 
 ## TV-class clients
 
