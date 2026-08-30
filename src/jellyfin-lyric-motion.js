@@ -4931,39 +4931,6 @@
         return clone;
     }
 
-    function romanizedBoundaryStart(sourceText, sourceIndex, convertedLine) {
-        const index = Math.max(0, Math.min(sourceText.length, Number(sourceIndex) || 0));
-        if (index <= 0) return 0;
-        if (index >= sourceText.length) return convertedLine.length;
-
-        return romanizedBoundary(
-            buildRomanizedBoundaryMap(sourceText, convertedLine),
-            index
-        );
-
-        /*
-         * Bias inserted transliteration separators toward the cue that begins
-         * after the source boundary. For example 你好 -> "ni hao": the second
-         * cue starts at 3 (after the generated space), while the first ends at
-         * 2. Romanizing the complete line first also preserves word context for
-         * Indic schwa/nasal/conjunct rules instead of transliterating each cue
-         * as an isolated fragment.
-         */
-    }
-
-    function romanizedBoundaryEnd(sourceText, sourceIndex, convertedLine) {
-        const index = Math.max(0, Math.min(sourceText.length, Number(sourceIndex) || 0));
-        if (index <= 0) return 0;
-        if (index >= sourceText.length) return convertedLine.length;
-
-        return romanizedBoundary(
-            buildRomanizedBoundaryMap(sourceText, convertedLine),
-            index
-        );
-
-        /* Keep generated separators after the cue that just ended. */
-    }
-
     function romanizedLyricView(lyric) {
         if (!lyric) return lyric;
 
@@ -10396,15 +10363,6 @@
             mediaSeconds
             - clampTimingOffsetSeconds(state.timingOffsetSeconds);
         return sourceSeconds * TICKS_PER_SECOND;
-    }
-
-    function removeUserTimingOffsetTicks(ticks) {
-        const sourceSeconds =
-            finiteNumber(ticks, 0) / TICKS_PER_SECOND;
-        const mediaSeconds =
-            sourceSeconds
-            + clampTimingOffsetSeconds(state.timingOffsetSeconds);
-        return mediaSeconds * TICKS_PER_SECOND;
     }
 
     function sourceTimelineTicks(
