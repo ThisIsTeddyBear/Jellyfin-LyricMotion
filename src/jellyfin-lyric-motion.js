@@ -180,7 +180,6 @@
     const BASE_WIPE_GRADIENT_EM = 0.75;
     const LONG_WORD_WIPE_EXTRA_EM = 0.45;
     const SHORT_WORD_GLOW_MIN_DURATION_MS = 1320;
-    const MOTION_FINAL_RISE_EM = -0.035;
     const MOTION_HANDOFF_TICKS = 3200000; // 320 ms previous-line glow decay
     const LINE_CLASS_NEIGHBORHOOD = 6;
     const ZERO_PROGRESS_EPSILON = 0.0025;
@@ -2606,20 +2605,6 @@
             * glowDurFactor
             * glowLenFactor;
 
-        const normalizedGrowth =
-            (maxScale - 1) / 0.1;
-
-        const peakMultiplier =
-            Math.min(
-                1,
-                Math.max(0.3, durationMs / 2000)
-            );
-
-        const peakYEm =
-            -0.0625
-            * normalizedGrowth
-            * peakMultiplier;
-
         const position =
             (glyphIndex + 0.5) / glyphCount;
 
@@ -2631,7 +2616,6 @@
         return {
             maxScale: maxScale * 0.98,
             shadowIntensity,
-            peakYEm,
             offsetXEm: offsetXEm * 0.98
         };
     }
@@ -10812,11 +10796,8 @@
     function growPhase(t) {
         if (t <= 0) {
             return {
-                peak: 0,
                 scaleMix: 0,
-                xMix: 0,
-                yPeakMix: 0,
-                settleMix: 0
+                xMix: 0
             };
         }
 
@@ -10824,21 +10805,15 @@
             const e = easeMotion(t / 0.25);
 
             return {
-                peak: e,
                 scaleMix: e,
-                xMix: e,
-                yPeakMix: e,
-                settleMix: 0
+                xMix: e
             };
         }
 
         if (t <= 0.30) {
             return {
-                peak: 1,
                 scaleMix: 1,
-                xMix: 1,
-                yPeakMix: 1,
-                settleMix: 0
+                xMix: 1
             };
         }
 
@@ -10847,20 +10822,14 @@
                 easeMotion((t - 0.30) / 0.45);
 
             return {
-                peak: 1 - e,
                 scaleMix: 1 - e,
-                xMix: 1 - e,
-                yPeakMix: 1 - e,
-                settleMix: e
+                xMix: 1 - e
             };
         }
 
         return {
-            peak: 0,
             scaleMix: 0,
-            xMix: 0,
-            yPeakMix: 0,
-            settleMix: 1
+            xMix: 0
         };
     }
 
@@ -11085,14 +11054,10 @@
                 * phase.xMix
                 * continuityGain;
 
-            const yEm =
-                (
-                    metrics.peakYEm
-                        * phase.yPeakMix
-                    + MOTION_FINAL_RISE_EM
-                        * phase.settleMix
-                )
-                * continuityGain;
+            /* Keep the karaoke sweep on its text baseline. A vertical lift
+             * compounded with the background-vocal line scale, making those
+             * words appear to drift upward as their sweep progressed. */
+            const yEm = 0;
 
             glyph.style.transform =
                 `translate3d(${xEm.toFixed(4)}em, ${yEm.toFixed(4)}em, 0) `
@@ -11152,14 +11117,8 @@
             * 0.78
             * continuityGain;
 
-        const yEm =
-            (
-                metrics.peakYEm
-                    * phase.yPeakMix * 0.82
-                + MOTION_FINAL_RISE_EM
-                    * phase.settleMix
-            )
-            * continuityGain;
+        /* Whole-word and per-glyph motion must share the same baseline. */
+        const yEm = 0;
 
         word.element.style.transform =
             `translate3d(0, ${yEm.toFixed(4)}em, 0) `

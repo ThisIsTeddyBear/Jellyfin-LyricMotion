@@ -46,11 +46,9 @@ For a trustworthy vocal gap of at least two seconds, the completed lyric becomes
 
 The fill and wave phase are derived from media time rather than a standalone CSS timer, so pause, seek and playback-rate changes stay locked to the song. Standard LRC without a real line-end timestamp remains conservative and does not synthesize breaks. Reduced-motion keeps the timing fill with decorative wave motion disabled.
 
-### Concurrent lines and left-anchored background vocals
+### Concurrent lines and background-vocal roles
 
-![Two lead lines with compact left-anchored background vocals attached to their nearest lead lines](docs/screenshots/overlap-background-vocals.png)
-
-LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content is rendered in a slightly smaller backing-vocal line aligned to its attached lead's rendered left edge. It compares the nearest preceding and following lead by same-start timing, overlap, then gap, placing the backing line immediately before or after the better match.
+LyricMotion tracks an active set instead of a single current line. Overlapping lead/response lines keep independent timing, wipe, glow, and completion. TTML `ttm:role="x-bg"` content retains its independent timing and shared sweep, glow, and layout treatment, with a smaller type size to identify the backing-vocal role.
 
 ## Supported lyric inputs
 
