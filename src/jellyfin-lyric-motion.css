@@ -240,9 +240,9 @@
 
     /* A restrained role cue: approximately 9% smaller than lead lyrics. */
     font-size: clamp(2rem, 3.65vw, 4.1rem);
-    font-weight: 650;
-    line-height: 1.14;
-    letter-spacing: -0.018em;
+    font-weight: 725;
+    line-height: 1.17;
+    letter-spacing: -0.026em;
     text-align: left !important;
     opacity: 0.82;
 }
@@ -489,9 +489,9 @@
 
     /* Match the plain-line background-vocal size. */
     font-size: clamp(2rem, 3.65vw, 4.1rem);
-    font-weight: 625;
-    line-height: 1.12;
-    letter-spacing: -0.018em;
+    font-weight: 725;
+    line-height: 1.17;
+    letter-spacing: -0.026em;
     text-align: left !important;
     transform-origin: left center;
 
@@ -1044,7 +1044,7 @@
         margin-left: 0;
         margin-right: auto;
         font-size: clamp(1.75rem, 7.3vw, 2.85rem);
-        line-height: 1.14;
+        line-height: 1.18;
     }
 
     .lyricPage .ak-instrumental-gap-line {
@@ -1059,7 +1059,7 @@
         margin-left: 0;
         margin-right: auto;
         font-size: clamp(1.75rem, 7.3vw, 2.85rem);
-        line-height: 1.14;
+        line-height: 1.18;
     }
 }
 
