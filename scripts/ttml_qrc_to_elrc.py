@@ -22,10 +22,11 @@ import stat
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, ROUND_HALF_UP
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
+from urllib.parse import quote
 
 
 TTML_NS = "http://www.w3.org/ns/ttml"
@@ -50,6 +51,9 @@ SUPPORTED_INPUT_SUFFIXES = {".ttml", ".dfxp", ".qrc"}
 # Jellyfin's cue positions back by exactly its length. This token sits before
 # the first enhanced cue, leaving every word timestamp untouched.
 BACKGROUND_SENTINEL = "[ak:bg]"
+AGENT_TOKEN_PREFIX = "[ak:agent="
+GROUP_TOKEN_PREFIX = "[ak:group="
+SECTION_TOKEN_PREFIX = "[ak:section="
 
 WHITESPACE_RE = re.compile(r"\s+")
 OFFSET_TIME_RE = re.compile(
@@ -86,10 +90,65 @@ class LyricLine:
     kind: str
     source_order: int
     lane_order: int
+    agent: str | None = None
+    section: str | None = None
 
     @property
     def text(self) -> str:
         return normalize_line_text("".join(token.text for token in self.tokens))
+
+
+@dataclass(frozen=True)
+class LyricAgent:
+    """A TTML vocal agent, retained in ELRC's custom metadata headers."""
+
+    identifier: str
+    kind: str | None = None
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class LyricSection:
+    """A timed TTML container such as an Apple ``Verse`` or ``Chorus``."""
+
+    start_ms: int | None
+    end_ms: int | None
+    part: str
+    agent: str | None = None
+
+
+@dataclass(frozen=True)
+class LyricMetadata:
+    """Source metadata which ELRC can retain without changing lyric timings."""
+
+    source_format: str
+    language: str | None = None
+    timing: str | None = None
+    duration_ms: int | None = None
+    leading_silence_ms: int | None = None
+    title: str | None = None
+    artists: tuple[str, ...] = ()
+    album: str | None = None
+    lyricists: tuple[str, ...] = ()
+    songwriters: tuple[str, ...] = ()
+    agents: tuple[LyricAgent, ...] = ()
+    sections: tuple[LyricSection, ...] = ()
+
+
+@dataclass(frozen=True)
+class LrcMetadataTag:
+    """One safe, document-level ``[name:value]`` ELRC/LRC header."""
+
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class SourceContext:
+    """Inherited TTML singer and song-part information for a source node."""
+
+    agent: str | None = None
+    section: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,12 +160,59 @@ class ConversionResult:
     timing_mode: str = "elrc"
     word_synced_line_count: int = 0
     qrc_timing_mode: str | None = None
+    metadata: LyricMetadata = field(
+        default_factory=lambda: LyricMetadata(source_format="ttml")
+    )
 
 
 def local_name(tag: str) -> str:
     """Return the local part of an ElementTree expanded name."""
 
     return tag.rsplit("}", 1)[-1]
+
+
+def attribute_by_local_name(element: ET.Element, name: str) -> str | None:
+    """Return an XML attribute without coupling metadata support to a prefix."""
+
+    for attribute, value in element.attrib.items():
+        if local_name(attribute) == name:
+            return value
+    return None
+
+
+def element_text(element: ET.Element) -> str:
+    """Return compact metadata text without inheriting lyric timing semantics."""
+
+    return normalize_line_text("".join(element.itertext()))
+
+
+def distinct_nonempty(values: Iterable[str | None]) -> tuple[str, ...]:
+    """Keep metadata in source order while removing blank/duplicate values."""
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = normalize_line_text(value or "")
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return tuple(result)
+
+
+def safe_lrc_metadata_value(value: str) -> str:
+    """Keep arbitrary XML text inside one non-timed LRC metadata header."""
+
+    # A closing bracket or newline could manufacture a second LRC row. The
+    # source TTML remains the lossless master, so replacement is safer than
+    # emitting ambiguous/broken ELRC syntax.
+    return WHITESPACE_RE.sub(" ", value).replace("[", "(").replace("]", ")").strip()
+
+
+def metadata_time(milliseconds: int) -> str:
+    """Use the exact ELRC clock in custom metadata without altering cues."""
+
+    return elrc_time(milliseconds)
 
 
 def display_input(value: str, *, limit: int = 160) -> str:
@@ -388,6 +494,26 @@ def is_auxiliary_text(element: ET.Element) -> bool:
 
     roles = set(element_role(element).split())
     return bool(roles & AUXILIARY_ROLES)
+
+
+def collect_source_contexts(root: ET.Element) -> dict[int, SourceContext]:
+    """Resolve inherited TTML agent/song-part ownership for every element."""
+
+    contexts: dict[int, SourceContext] = {}
+
+    def visit(
+        element: ET.Element,
+        inherited_agent: str | None,
+        inherited_section: str | None,
+    ) -> None:
+        agent = attribute_by_local_name(element, "agent") or inherited_agent
+        section = attribute_by_local_name(element, "songPart") or inherited_section
+        contexts[id(element)] = SourceContext(agent=agent, section=section)
+        for child in element:
+            visit(child, agent, section)
+
+    visit(root, None, None)
+    return contexts
 
 
 def inherited_space_mode(element: ET.Element, parent_mode: str) -> str:
@@ -684,6 +810,8 @@ def make_line(
     kind: str,
     source_order: int,
     lane_order: int,
+    agent: str | None = None,
+    section: str | None = None,
 ) -> LyricLine | None:
     compacted = compact_tokens(tokens)
     if not compacted or not normalize_line_text("".join(t.text for t in compacted)):
@@ -701,7 +829,16 @@ def make_line(
         raise ConversionError(
             f"{kind.title()} line ends before it starts at {elrc_time(start)}"
         )
-    return LyricLine(start, end, compacted, kind, source_order, lane_order)
+    return LyricLine(
+        start,
+        end,
+        compacted,
+        kind,
+        source_order,
+        lane_order,
+        agent=agent,
+        section=section,
+    )
 
 
 def line_is_word_synced(line: LyricLine) -> bool:
@@ -733,6 +870,198 @@ def timing_mode_for(lines: Sequence[LyricLine]) -> tuple[str, int]:
     return "mixed", word_synced_count
 
 
+def parse_optional_seconds(value: str | None) -> int | None:
+    """Parse an Apple metadata seconds value without making it a lyric offset."""
+
+    if value is None or not value.strip():
+        return None
+    try:
+        seconds = Decimal(value.strip())
+    except DecimalException:
+        return None
+    if not seconds.is_finite() or seconds < 0:
+        return None
+    return decimal_milliseconds(seconds)
+
+
+def first_metadata_value(root: ET.Element, *names: str) -> str | None:
+    wanted = {name.casefold() for name in names}
+    for element in root.iter():
+        if local_name(element.tag).casefold() in wanted:
+            value = element_text(element)
+            if value:
+                return value
+    return None
+
+
+def collect_ttml_metadata(
+    root: ET.Element,
+    *,
+    timing_contexts: dict[int, tuple[int | None, int | None, str]],
+) -> LyricMetadata:
+    """Collect Apple/TTML metadata that has a safe representation in ELRC.
+
+    TTML's exact layout/style tree cannot be represented in Enhanced LRC, but
+    its document identity, people, language, timing mode and timed sections
+    can be retained as non-timed header tags.  We intentionally *do not* emit
+    an LRC ``[offset:]`` from ``leadingSilence``: the word timestamps are
+    already absolute and applying that offset again would desynchronise them.
+    """
+
+    language = root.get(f"{{{XML_NS}}}lang") or root.get("lang")
+    timing = attribute_by_local_name(root, "timing")
+    title = first_metadata_value(root, "title")
+    album = first_metadata_value(root, "album", "albumtitle")
+    artists = distinct_nonempty(
+        element_text(element)
+        for element in root.iter()
+        if local_name(element.tag).casefold()
+        in {"artist", "artistname", "performer"}
+    )
+    lyricists = distinct_nonempty(
+        element_text(element)
+        for element in root.iter()
+        if local_name(element.tag).casefold() in {"lyricist", "author"}
+    )
+    songwriters = distinct_nonempty(
+        element_text(element)
+        for element in root.iter()
+        if local_name(element.tag).casefold() in {"songwriter", "composer"}
+    )
+
+    agents: list[LyricAgent] = []
+    for element in root.iter():
+        if local_name(element.tag).casefold() != "agent":
+            continue
+        identifier = (
+            element.get(f"{{{XML_NS}}}id")
+            or element.get("xml:id")
+            or element.get("id")
+        )
+        if not identifier:
+            continue
+        name = attribute_by_local_name(element, "name")
+        if not name:
+            name = first_metadata_value(element, "name")
+        agents.append(
+            LyricAgent(
+                identifier=identifier,
+                kind=attribute_by_local_name(element, "type"),
+                name=name,
+            )
+        )
+
+    sections: list[LyricSection] = []
+    for element in root.iter():
+        part = attribute_by_local_name(element, "songPart")
+        if not part:
+            continue
+        begin, end, _ = timing_contexts.get(id(element), (None, None, "default"))
+        # Apple commonly assigns the vocalist on each ``p`` rather than on
+        # its ``div songPart`` container. Preserve that association at the
+        # section level when there is no explicit container agent.
+        section_agent = attribute_by_local_name(element, "agent")
+        if not section_agent:
+            nested_agents = distinct_nonempty(
+                attribute_by_local_name(descendant, "agent")
+                for descendant in element.iter()
+            )
+            section_agent = ",".join(nested_agents) or None
+        sections.append(
+            LyricSection(
+                start_ms=begin,
+                end_ms=end,
+                part=part,
+                agent=section_agent,
+            )
+        )
+
+    body = next(
+        (element for element in root.iter() if local_name(element.tag).casefold() == "body"),
+        None,
+    )
+    duration_ms = None
+    if body is not None:
+        body_begin, body_end, _ = timing_contexts.get(id(body), (None, None, "default"))
+        if body_end is not None:
+            duration_ms = body_end - (body_begin or 0)
+
+    itunes_metadata = next(
+        (
+            element
+            for element in root.iter()
+            if local_name(element.tag).casefold() == "itunesmetadata"
+        ),
+        None,
+    )
+    leading_silence_ms = (
+        parse_optional_seconds(attribute_by_local_name(itunes_metadata, "leadingSilence"))
+        if itunes_metadata is not None
+        else None
+    )
+
+    return LyricMetadata(
+        source_format="ttml",
+        language=normalize_line_text(language or "") or None,
+        timing=normalize_line_text(timing or "") or None,
+        duration_ms=duration_ms,
+        leading_silence_ms=leading_silence_ms,
+        title=title,
+        artists=artists,
+        album=album,
+        lyricists=lyricists,
+        songwriters=songwriters,
+        agents=tuple(agents),
+        sections=tuple(sections),
+    )
+
+
+def metadata_tags(metadata: LyricMetadata) -> tuple[LrcMetadataTag, ...]:
+    """Serialize all ELRC-representable source metadata as safe header tags."""
+
+    tags: list[LrcMetadataTag] = []
+
+    def add(name: str, value: str | None) -> None:
+        safe_value = safe_lrc_metadata_value(value or "")
+        if safe_value:
+            tags.append(LrcMetadataTag(name, safe_value))
+
+    add("ti", metadata.title)
+    add("ar", " / ".join(metadata.artists))
+    add("al", metadata.album)
+    add("au", " / ".join(distinct_nonempty((*metadata.lyricists, *metadata.songwriters))))
+    add("la", metadata.language)
+    add("ak-source", metadata.source_format)
+    add("ak-timing", metadata.timing)
+    if metadata.duration_ms is not None:
+        add("length", metadata_time(metadata.duration_ms))
+        add("ak-duration", metadata_time(metadata.duration_ms))
+    if metadata.leading_silence_ms is not None:
+        add("ak-leading-silence", str(metadata.leading_silence_ms))
+
+    for agent in metadata.agents:
+        identifier = safe_lrc_metadata_value(agent.identifier)
+        if not identifier:
+            continue
+        value = agent.kind or "person"
+        if agent.name:
+            value = f"{value}|{agent.name}"
+        add(f"ak-agent-{identifier}", value)
+
+    for section in metadata.sections:
+        if section.start_ms is None:
+            continue
+        interval = metadata_time(section.start_ms)
+        if section.end_ms is not None:
+            interval = f"{interval}-{metadata_time(section.end_ms)}"
+        value = f"{interval}|{section.part}"
+        if section.agent:
+            value = f"{value}|{section.agent}"
+        add("ak-section", value)
+
+    return tuple(tags)
+
+
 def convert_tree(
     root: ET.Element,
     *,
@@ -757,6 +1086,7 @@ def convert_tree(
         tick_rate=tick_rate,
         include_background=include_background,
     )
+    source_contexts = collect_source_contexts(root)
 
     lines: list[LyricLine] = []
     paragraph_count = 0
@@ -782,6 +1112,7 @@ def convert_tree(
                     background_end,
                     background_space_mode,
                 ) = timing_contexts[id(background)]
+                background_context = source_contexts[id(background)]
                 line = make_line(
                     walk_text(
                         background,
@@ -797,11 +1128,14 @@ def convert_tree(
                     kind="background",
                     source_order=source_order,
                     lane_order=lane_order,
+                    agent=background_context.agent,
+                    section=background_context.section,
                 )
                 if line is not None:
                     lines.append(line)
                     background_count += 1
 
+        paragraph_context = source_contexts[id(paragraph)]
         main_line = make_line(
             walk_text(
                 paragraph,
@@ -817,6 +1151,8 @@ def convert_tree(
             kind="main",
             source_order=source_order,
             lane_order=len(backgrounds),
+            agent=paragraph_context.agent,
+            section=paragraph_context.section,
         )
         if main_line is not None and not is_background(paragraph):
             lines.append(main_line)
@@ -835,6 +1171,7 @@ def convert_tree(
         )
     )
     timing_mode, word_synced_count = timing_mode_for(lines)
+    metadata = collect_ttml_metadata(root, timing_contexts=timing_contexts)
     return ConversionResult(
         tuple(lines),
         paragraph_count,
@@ -842,6 +1179,7 @@ def convert_tree(
         source_format="ttml",
         timing_mode=timing_mode,
         word_synced_line_count=word_synced_count,
+        metadata=metadata,
     )
 
 
@@ -850,10 +1188,23 @@ def serialize_line(
     *,
     mark_background: bool = True,
     enhanced: bool | None = None,
+    agent_kinds: dict[str, str] | None = None,
 ) -> str:
     parts = [f"[{elrc_time(line.start_ms)}]"]
     if line.kind == "background" and mark_background:
         parts.append(BACKGROUND_SENTINEL)
+
+    # These inline ASCII transport tokens survive Jellyfin's sidecar parser,
+    # unlike document-level LRC headers which a server is free to consume.
+    # LyricMotion strips them before display and shifts every cue position by
+    # their exact character length, just like the existing background token.
+    if line.agent:
+        encoded_agent = quote(line.agent, safe="-._")
+        agent_kind = (agent_kinds or {}).get(line.agent, "").casefold()
+        token_prefix = GROUP_TOKEN_PREFIX if agent_kind == "group" else AGENT_TOKEN_PREFIX
+        parts.append(f"{token_prefix}{encoded_agent}]")
+    if line.section:
+        parts.append(f"{SECTION_TOKEN_PREFIX}{quote(line.section, safe='-._')}]")
 
     if enhanced is None:
         enhanced = line_is_word_synced(line)
@@ -873,6 +1224,30 @@ def serialize_line(
     if line.end_ms is not None:
         parts.append(f"<{elrc_time(line.end_ms)}>")
     return "".join(parts).strip()
+
+
+def serialize_document(
+    result: ConversionResult,
+    *,
+    mark_background: bool = True,
+) -> str:
+    """Render metadata before timed rows without touching their cue positions."""
+
+    headers = [f"[{tag.name}:{tag.value}]" for tag in metadata_tags(result.metadata)]
+    agent_kinds = {
+        agent.identifier: (agent.kind or "")
+        for agent in result.metadata.agents
+    }
+    rows = [
+        serialize_line(
+            line,
+            mark_background=mark_background,
+            enhanced=line_is_word_synced(line),
+            agent_kinds=agent_kinds,
+        )
+        for line in result.lines
+    ]
+    return "\n".join((*headers, *rows)) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -912,6 +1287,30 @@ def parse_qrc_metadata(content: str) -> dict[str, str]:
         if match:
             metadata[match.group(1).casefold()] = match.group(2).strip()
     return metadata
+
+
+def qrc_metadata_result(
+    metadata: dict[str, str],
+    lines: Sequence[LyricLine],
+) -> LyricMetadata:
+    """Preserve common QRC/LRC headers after normalising its cue offset."""
+
+    # QRC's [offset:] is already applied to every emitted timestamp. Repeating
+    # it as an LRC [offset:] would shift the finished ELRC a second time.
+    duration_ms = max(
+        (line.end_ms if line.end_ms is not None else line.start_ms for line in lines),
+        default=None,
+    )
+    return LyricMetadata(
+        source_format="qrc",
+        language=metadata.get("la") or metadata.get("lang") or metadata.get("language"),
+        title=metadata.get("ti") or metadata.get("title"),
+        artists=distinct_nonempty((metadata.get("ar"), metadata.get("artist"))),
+        album=metadata.get("al") or metadata.get("album"),
+        lyricists=distinct_nonempty((metadata.get("au"), metadata.get("lyricist"))),
+        songwriters=distinct_nonempty((metadata.get("composer"), metadata.get("songwriter"))),
+        duration_ms=duration_ms,
+    )
 
 
 def qrc_word_timing_mode(
@@ -1208,6 +1607,7 @@ def parse_qrc_file(path: Path) -> ConversionResult:
         timing_mode=mode,
         word_synced_line_count=word_synced_count,
         qrc_timing_mode=qrc_timing_mode,
+        metadata=qrc_metadata_result(metadata, lines),
     )
 
 
@@ -1295,17 +1695,7 @@ def convert_file(
             "Input and output paths must be different; refusing to overwrite the lyric source"
         )
 
-    rendered = (
-        "\n".join(
-            serialize_line(
-                line,
-                mark_background=mark_background,
-                enhanced=line_is_word_synced(line),
-            )
-            for line in result.lines
-        )
-        + "\n"
-    )
+    rendered = serialize_document(result, mark_background=mark_background)
     # Write beside the target and atomically replace it only after the whole
     # document is flushed. A full disk, interrupted write, or encoding error
     # therefore cannot leave an existing ELRC half-written.

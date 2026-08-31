@@ -14,6 +14,19 @@ With no input argument, the converter batch-converts every supported source in t
 
 ## Preserved information
 
+- document-level LRC/ELRC metadata headers: title, artist, album, lyricist/
+  songwriter credits, language, and exact duration when the source supplies
+  them;
+- Apple `itunes:timing` and `leadingSilence` metadata (the latter is recorded
+  as `[ak-leading-silence:]`, never as `[offset:]`, because the emitted word
+  timestamps are already absolute);
+- TTML vocal agents (`ttm:agent`) and timed Apple song parts such as Verse and
+  Chorus, recorded in non-timed `[ak-agent-*:]` and `[ak-section:]` headers;
+- per-line singer/group and song-part ownership, carried immediately after the
+  LRC timestamp as `[ak:agent=…]`, `[ak:group=…]`, and `[ak:section=…]`
+  tokens. LyricMotion removes these tokens before display, corrects word-cue
+  positions, and assigns the first two individual singers to stable left/right
+  lanes while keeping groups centred;
 - paragraph start, end, and duration;
 - nested span text in document order;
 - word and syllable start/end timing;
@@ -21,6 +34,12 @@ With no input argument, the converter batch-converts every supported source in t
 - whitespace inherited through nested containers;
 - `ttm:role="x-bg"`, `background`, and `bg` subtrees as separate lyric lines;
 - independent final timestamps for overlapping lines.
+
+The `ak-*` headers are LyricMotion transport/archive metadata. The inline
+`[ak:agent=…]`, `[ak:group=…]`, and `[ak:section=…]` tokens are also
+LyricMotion-specific; they are stripped before painting. ELRC has no standard
+per-line field for agent, section, layout, styling, translation, or arbitrary
+TTML extensions, so the original TTML remains the lossless master.
 
 ## Background-vocal transport
 

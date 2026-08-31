@@ -173,7 +173,10 @@
         Arial,
         sans-serif;
 
-    font-size: clamp(2.2rem, 4vw, 4.55rem);
+    /* A lyric screen is read continuously, not scanned one word at a time.
+     * Keep the active line immersive without making a normal desktop phrase
+     * span the viewer's whole field of vision. */
+    font-size: clamp(1.9rem, 3.35vw, 3.75rem);
     font-weight: 725;
     line-height: 1.17;
     letter-spacing: -0.026em;
@@ -213,7 +216,7 @@
         Arial,
         sans-serif;
 
-    font-size: clamp(2.2rem, 4vw, 4.55rem);
+    font-size: clamp(1.9rem, 3.35vw, 3.75rem);
     font-weight: 725;
     line-height: 1.17;
     letter-spacing: -0.026em;
@@ -239,7 +242,7 @@
     margin-left: 0;
 
     /* A restrained role cue: approximately 9% smaller than lead lyrics. */
-    font-size: clamp(2rem, 3.65vw, 4.1rem);
+    font-size: clamp(1.7rem, 2.95vw, 3.3rem);
     font-weight: 725;
     line-height: 1.17;
     letter-spacing: -0.026em;
@@ -266,6 +269,87 @@
 
 .lyricPage .lyricsLine.ak-enhanced-line[dir="rtl"] {
     letter-spacing: normal;
+}
+
+/* -------------------------------------------------------------------------- */
+/* TTML vocal-agent lanes                                                     */
+/* -------------------------------------------------------------------------- */
+
+/* Enhanced LRC has no native duet layout. The converter's inline `ak` tokens
+ * let LyricMotion keep each TTML vocalist in a stable visual lane without
+ * changing its timing or DOM order. A single vocalist retains the normal
+ * centred layout; groups remain centred; the first two person agents occupy
+ * left and right lanes. */
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-lane-left {
+    margin-left: 0;
+    margin-right: auto;
+    text-align: left;
+    transform-origin: 4% 50%;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-lane-center {
+    margin-left: auto;
+    margin-right: auto;
+    text-align: center;
+    transform-origin: 50% 50%;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-lane-right {
+    margin-left: auto;
+    margin-right: 0;
+    text-align: right;
+    transform-origin: 96% 50%;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-lane-group {
+    margin-left: auto;
+    margin-right: auto;
+    text-align: center;
+    transform-origin: 50% 50%;
+}
+
+/* A restrained singer signature: colours apply to the active text/glow but
+ * inactive lines remain calm enough to scan as one coherent lyric page. */
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-tone-1 {
+    --ak-primary: rgba(183, 224, 255, 0.99);
+    --ak-primary-soft: rgba(183, 224, 255, 0.78);
+    --ak-glow-primary-rgb: 132, 205, 255;
+    --ak-glow-secondary-rgb: 101, 154, 255;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-tone-2 {
+    --ak-primary: rgba(255, 202, 225, 0.99);
+    --ak-primary-soft: rgba(255, 202, 225, 0.78);
+    --ak-glow-primary-rgb: 255, 132, 191;
+    --ak-glow-secondary-rgb: 216, 110, 255;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-tone-3 {
+    --ak-primary: rgba(255, 228, 171, 0.99);
+    --ak-primary-soft: rgba(255, 228, 171, 0.80);
+    --ak-glow-primary-rgb: 255, 194, 93;
+    --ak-glow-secondary-rgb: 255, 137, 91;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-tone-4 {
+    --ak-primary: rgba(199, 239, 207, 0.99);
+    --ak-primary-soft: rgba(199, 239, 207, 0.79);
+    --ak-glow-primary-rgb: 103, 226, 164;
+    --ak-glow-secondary-rgb: 69, 187, 212;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-tone-5 {
+    --ak-primary: rgba(220, 207, 255, 0.99);
+    --ak-primary-soft: rgba(220, 207, 255, 0.79);
+    --ak-glow-primary-rgb: 177, 142, 255;
+    --ak-glow-secondary-rgb: 132, 117, 232;
+}
+
+.lyricPage .lyricsLine.ak-enhanced-line.ak-vocal-tone-group {
+    --ak-primary: rgba(255, 244, 205, 0.99);
+    --ak-primary-soft: rgba(255, 244, 205, 0.82);
+    --ak-glow-primary-rgb: 255, 221, 123;
+    --ak-glow-secondary-rgb: 255, 173, 102;
 }
 
 .lyricPage .lyricsLine.ak-enhanced-line.ak-near {
@@ -488,7 +572,7 @@
     padding-bottom: 0.08em;
 
     /* Match the plain-line background-vocal size. */
-    font-size: clamp(2rem, 3.65vw, 4.1rem);
+    font-size: clamp(1.7rem, 2.95vw, 3.3rem);
     font-weight: 725;
     line-height: 1.17;
     letter-spacing: -0.026em;

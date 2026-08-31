@@ -167,6 +167,8 @@
      */
     const BACKGROUND_VOCAL_TOKEN = '[ak:bg]';
     const LEGACY_BACKGROUND_VOCAL_SENTINEL = '\u2063\u2060';
+    const AK_INLINE_TOKEN_PATTERN =
+        /^\[ak:(bg|agent=([A-Za-z0-9._~%-]+)|group=([A-Za-z0-9._~%-]+)|section=([A-Za-z0-9._~%-]+))\]/;
     const UNIFIED_RENDERER_SIGNATURE =
         'unified-pc-mobile-v3:60fps:multiscript-shaped-wipe:classic-bloom64:atmo-dynamic-kawarp-v325-hotfix';
 
@@ -4266,13 +4268,65 @@
 
         let markerLength = 0;
         let roleSource = null;
+        let vocalAgent = null;
+        let vocalKind = null;
+        let songSection = null;
+
+        const decodeTransportValue = value => {
+            try {
+                return decodeURIComponent(value);
+            } catch {
+                return value;
+            }
+        };
+
+        /* The converter places every LyricMotion token immediately after the
+         * LRC timestamp and before the first ELRC cue. Strip the complete
+         * prefix as one unit so Jellyfin's cue character offsets stay exact. */
+        const leadingWhitespace = rawText.match(/^\s*/);
+        let transportCursor = leadingWhitespace
+            ? leadingWhitespace[0].length
+            : 0;
+        let transportMatched = false;
+
+        while (true) {
+            const tokenMatch = rawText
+                .slice(transportCursor)
+                .match(AK_INLINE_TOKEN_PATTERN);
+            if (!tokenMatch) break;
+
+            transportMatched = true;
+            transportCursor += tokenMatch[0].length;
+
+            if (tokenMatch[1] === 'bg') {
+                roleSource = 'ascii-marker';
+            } else if (tokenMatch[2]) {
+                vocalAgent = decodeTransportValue(tokenMatch[2]);
+                vocalKind = 'person';
+            } else if (tokenMatch[3]) {
+                vocalAgent = decodeTransportValue(tokenMatch[3]);
+                vocalKind = 'group';
+            } else if (tokenMatch[4]) {
+                songSection = decodeTransportValue(tokenMatch[4]);
+            }
+        }
+
+        if (roleSource === 'ascii-marker'
+            && rawText.charAt(transportCursor) === '\\'
+            && /[（(]/u.test(rawText.charAt(transportCursor + 1))) {
+            transportCursor += 1;
+        }
+
+        if (transportMatched) {
+            markerLength = transportCursor;
+        }
 
         /* Providers can prepend whitespace/BOM characters to a lyric line,
          * and some ELRC/LRC transport paths escape the opening parenthesis as
          * `\(`. Match the complete transport prefix instead of requiring the
          * token to be byte zero. Nothing in this prefix is sung text, so cue
          * positions are shifted by the same number of removed characters. */
-        const asciiMarkerMatch = rawText.match(
+        const asciiMarkerMatch = transportMatched ? null : rawText.match(
             /^\s*\[ak:bg\](?:\\(?=[(（]))?/
         );
         const legacyMarkerMatch = rawText.match(
@@ -4322,7 +4376,10 @@
                 : rawText,
             positionOffset: markerLength,
             isBackgroundVocal,
-            backgroundVocalRoleSource: roleSource
+            backgroundVocalRoleSource: roleSource,
+            vocalAgent,
+            vocalKind,
+            songSection
         };
     }
 
@@ -7421,6 +7478,9 @@
             textProfile.isBackgroundVocal;
         const backgroundVocalRoleSource =
             textProfile.backgroundVocalRoleSource;
+        const vocalAgent = textProfile.vocalAgent;
+        const vocalKind = textProfile.vocalKind;
+        const songSection = textProfile.songSection;
         const rawCues = lyricValue(displayLyric, 'Cues', 'cues');
         const orderedCues = Array.isArray(rawCues)
             ? orderedCuesBySourcePosition(rawCues)
@@ -7477,6 +7537,18 @@
         lineElement.classList.remove(
             'ak-has-shaped-script'
         );
+        lineElement.classList.remove(
+            'ak-vocal-lane-left',
+            'ak-vocal-lane-center',
+            'ak-vocal-lane-right',
+            'ak-vocal-lane-group',
+            'ak-vocal-tone-1',
+            'ak-vocal-tone-2',
+            'ak-vocal-tone-3',
+            'ak-vocal-tone-4',
+            'ak-vocal-tone-5',
+            'ak-vocal-tone-group'
+        );
         lineElement.dataset.akGeneration = String(state.generation);
         lineElement.dataset.akLyricIdentity = lyricDomIdentity(lyric);
         lineElement.dataset.akVocalRole =
@@ -7488,6 +7560,21 @@
                 backgroundVocalRoleSource;
         } else {
             delete lineElement.dataset.akVocalRoleSource;
+        }
+        if (vocalAgent) {
+            lineElement.dataset.akVocalAgent = vocalAgent;
+        } else {
+            delete lineElement.dataset.akVocalAgent;
+        }
+        if (vocalKind) {
+            lineElement.dataset.akVocalKind = vocalKind;
+        } else {
+            delete lineElement.dataset.akVocalKind;
+        }
+        if (songSection) {
+            lineElement.dataset.akSongSection = songSection;
+        } else {
+            delete lineElement.dataset.akSongSection;
         }
         const lineDirection = firstStrongDirection(text);
         lineElement.setAttribute('dir', lineDirection);
@@ -7517,6 +7604,9 @@
                 trustedEndTicks: bounds.trustedEndTicks,
                 isBackgroundVocal,
                 backgroundVocalRoleSource,
+                vocalAgent,
+                vocalKind,
+                songSection,
                 ownedText: text,
                 ownedNodes: Array.from(lineElement.children || [])
             };
@@ -7676,6 +7766,9 @@
             trustedEndTicks: bounds.trustedEndTicks,
             isBackgroundVocal,
             backgroundVocalRoleSource,
+            vocalAgent,
+            vocalKind,
+            songSection,
             ownedText: text,
             ownedNodes: Array.from(lineElement.children || [])
         };
@@ -7818,6 +7911,80 @@
                 placement: 'after',
                 anchorLineIndex: previousLead.lineIndex
             };
+    }
+
+    function applyVocalLanes(lineRecords) {
+        /* TTML agent IDs have no inherent screen position. Assign person
+         * agents deterministic lanes in source order: a duet is left/right;
+         * three or more voices use left/centre/right and cycle thereafter.
+         * Group agents stay centred. This keeps call-and-response legible
+         * without inventing a singer identity that the TTML never supplied. */
+        const personAgents = [];
+        (lineRecords || []).forEach(record => {
+            if (
+                !record
+                || record.isBackgroundVocal
+                || !record.vocalAgent
+                || record.vocalKind === 'group'
+                || personAgents.includes(record.vocalAgent)
+            ) {
+                return;
+            }
+            personAgents.push(record.vocalAgent);
+        });
+
+        const laneForAgent = new Map();
+        const toneForAgent = new Map();
+        if (personAgents.length > 1) {
+            const lanes = personAgents.length === 2
+                ? ['left', 'right']
+                : ['left', 'center', 'right'];
+            personAgents.forEach((agent, index) => {
+                laneForAgent.set(agent, lanes[index % lanes.length]);
+                toneForAgent.set(agent, (index % 5) + 1);
+            });
+        }
+
+        (lineRecords || []).forEach(record => {
+            const element = record && record.element;
+            if (!element || !element.classList) return;
+
+            const lane = record.isBackgroundVocal
+                ? null
+                : record.vocalKind === 'group'
+                    ? 'group'
+                    : laneForAgent.get(record.vocalAgent) || null;
+            const tone = record.isBackgroundVocal
+                ? null
+                : record.vocalKind === 'group'
+                    ? 'group'
+                    : toneForAgent.get(record.vocalAgent) || null;
+
+            record.vocalLane = lane;
+            record.vocalTone = tone;
+            element.classList.toggle('ak-vocal-lane-left', lane === 'left');
+            element.classList.toggle('ak-vocal-lane-center', lane === 'center');
+            element.classList.toggle('ak-vocal-lane-right', lane === 'right');
+            element.classList.toggle('ak-vocal-lane-group', lane === 'group');
+            [1, 2, 3, 4, 5].forEach(index => {
+                element.classList.toggle(
+                    `ak-vocal-tone-${index}`,
+                    tone === index
+                );
+            });
+            element.classList.toggle('ak-vocal-tone-group', tone === 'group');
+
+            if (lane) {
+                element.dataset.akVocalLane = lane;
+            } else {
+                delete element.dataset.akVocalLane;
+            }
+            if (tone) {
+                element.dataset.akVocalTone = String(tone);
+            } else {
+                delete element.dataset.akVocalTone;
+            }
+        });
     }
 
     function applyBackgroundVocalAttachment(
@@ -8386,6 +8553,8 @@
                     }
                 });
         }
+
+        applyVocalLanes(state.lineData);
 
         state.lineData.forEach(lineRecord => {
             if (lineRecord.isBackgroundVocal) {
