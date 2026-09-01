@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.3] - 2026-09-01
+
+### Added
+
+- Unified TTML, DFXP and QRC conversion with batch support. The converter writes `.lrc` for line-synchronised lyrics and `.elrc` only when genuine word or syllable timing is available, including explicit single-word cues.
+- Optional Google Translate `dt=rm` Romanization for native-script lyrics, with readable ASCII normalization and graceful native-text fallback when a request cannot complete.
+- A small lyric-library fetch helper and refreshed, focused installation, conversion, privacy and platform documentation.
+
+### Improved
+
+- More accurate word karaoke and Classic Bloom: malformed timing is handled safely, non-glow words remain neutral, and single-word TTML/ELRC cues now animate correctly.
+- Background vocals now attach and align more reliably with their lead lyric, with typography refined to match the main lyric flow.
+- Dynamic Background sweep behavior and visual polish have been further refined.
+- Installer, Docker and release packaging were simplified around the current lightweight Google-Romanization runtime.
+
+### Removed
+
+- Retired the legacy in-browser LyricG2P Romanizer, its bundled data, and obsolete research, benchmark, validation and CI tooling. Google Romanization is now the maintained Romanized-view path.
+
 ## [3.2.8] - 2026-08-30
 
 ### Changed

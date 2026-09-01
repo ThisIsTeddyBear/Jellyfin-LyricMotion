@@ -8,7 +8,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '3.2.8';
+    const VERSION = '3.3';
 
     /*
      * A duplicated script tag used to create a second DOM observer, route-hook
