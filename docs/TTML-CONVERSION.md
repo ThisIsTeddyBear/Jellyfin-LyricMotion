@@ -1,75 +1,34 @@
-# TTML/QRC to LRC/ELRC conversion
+# TTML/QRC to LRC/ELRC
 
-Jellyfin LyricMotion includes a recursive TTML/QRC converter because a shallow `p/span` conversion loses nested text and vocal roles. It detects whether a source has actual word/syllable timing: line-synchronised sources are written as standard `.lrc`; word-synchronised sources are written as `.elrc`.
-
-## Basic use
+`scripts/ttml_qrc_to_elrc.py` converts timed `.ttml`, `.dfxp`, and `.qrc` lyrics for Jellyfin LyricMotion.
 
 ```bash
 python scripts/ttml_qrc_to_elrc.py "/music/Artist/Album/01 - Song.ttml"
 ```
 
-The default output is written beside the input. It uses `.lrc` when every vocal line is line-synchronised, otherwise `.elrc`; mixed sources use `.elrc` but keep their line-only rows as normal LRC rows. Use `-o` to choose a different output path, or `--replace-alternate` to remove an older conflicting default `.lrc`/`.elrc` sidecar after a successful conversion. `.qrc` and `.dfxp` inputs are auto-detected too.
+The output is created next to the source and should use the same basename as the audio file.
 
-With no input argument, the converter batch-converts every supported source in the current directory. `--recursive` includes subdirectories and `--skip-existing` leaves an existing `.lrc` or `.elrc` untouched. Sources in the same directory with the same basename are deliberately not batch-converted because they would otherwise target the same output name; use `-o` on each one instead.
+## Why the output format matters
 
-## Preserved information
+The converter writes:
 
-- document-level LRC/ELRC metadata headers: title, artist, album, lyricist/
-  songwriter credits, language, and exact duration when the source supplies
-  them;
-- Apple `itunes:timing` and `leadingSilence` metadata (the latter is recorded
-  as `[ak-leading-silence:]`, never as `[offset:]`, because the emitted word
-  timestamps are already absolute);
-- TTML vocal agents (`ttm:agent`) and timed Apple song parts such as Verse and
-  Chorus, recorded in non-timed `[ak-agent-*:]` and `[ak-section:]` headers;
-- per-line singer/group and song-part ownership, carried immediately after the
-  LRC timestamp as `[ak:agent=…]`, `[ak:group=…]`, and `[ak:section=…]`
-  tokens. LyricMotion removes these tokens before display, corrects word-cue
-  positions, and assigns the first two individual singers to stable left/right
-  lanes while keeping groups centred;
-- paragraph start, end, and duration;
-- nested span text in document order;
-- word and syllable start/end timing;
-- TTML clock times, offset times, frame times, and tick times;
-- whitespace inherited through nested containers;
-- `ttm:role="x-bg"`, `background`, and `bg` subtrees as separate lyric lines;
-- independent final timestamps for overlapping lines.
+- `.elrc` when the source has genuine word or syllable timing;
+- `.lrc` when it only has line timing.
 
-The `ak-*` headers are LyricMotion transport/archive metadata. The inline
-`[ak:agent=…]`, `[ak:group=…]`, and `[ak:section=…]` tokens are also
-LyricMotion-specific; they are stripped before painting. ELRC has no standard
-per-line field for agent, section, layout, styling, translation, or arbitrary
-TTML extensions, so the original TTML remains the lossless master.
+This distinction matters. ELRC enables LyricMotion's word sweep, per-word glow, overlapping vocal timing, and dependable instrumental-break progress. A line-timed source saved with an `.elrc` extension still has no word timing and would display poorly, so the converter does not fabricate it.
 
-## Background-vocal transport
+TTML `ttm:role="x-bg"` vocals are preserved as separate LyricMotion background-vocal lines. Use `--no-background` to omit them or `--plain-background` to retain them without the LyricMotion role token.
 
-LRC/ELRC has no standard field for a vocal role. The converter prefixes a background line with the ASCII token `[ak:bg]` immediately after its line timestamp. Unlike Unicode format controls, this survives Jellyfin server parsing. LyricMotion removes it before display, corrects cue positions by the token length, and renders the smaller background line aligned to its attached lead's rendered left edge. It compares the nearest preceding and following lead by same-start timing, overlap, then gap, placing the backing line immediately before or after the better match.
+## Batch conversion and options
 
-The remaining timing text uses the selected LRC or ELRC format. The token may be visible in players that do not run LyricMotion, which is the necessary tradeoff for reliable transport through Jellyfin.
-
-Use `--plain-background` to create separate background lines without the token, or `--no-background` to omit them.
-
-## Sidecar naming
-
-The audio and LRC/ELRC basenames must match:
+Run without an input to convert supported files in the current directory. Add `--recursive` for subfolders and `--skip-existing` to retain existing sidecars.
 
 ```text
-01 - Song.flac
-01 - Song.lrc   # line-synchronised source
-# or
-01 - Song.elrc  # word/syllable-synchronised source
+-o OUTPUT              choose an output file
+--format auto|ttml|qrc force the input format
+--replace-alternate    remove an older conflicting .lrc/.elrc after success
+--no-background        omit x-bg vocals
+--plain-background     keep background lines without the role token
 ```
 
-After replacing the LRC/ELRC sidecar, refresh the song or its library in Jellyfin. Fully restart a TV/mobile client if it has cached the previous lyric payload.
-
-## Source of truth
-
-Keep the original TTML, DFXP, or QRC source. LRC/ELRC can preserve timing and LyricMotion's private background token, but it cannot express every source layout, metadata, agent, or role feature in a standard way.
-
-## Safety and timing validation
-
-The converter refuses TTML/QRC inputs larger than 64 MiB and rejects TTML documents containing DTD/entity declarations before XML parsing. Frame/tick rates and parsed clock values must be finite and non-negative; malformed minute/second/frame fields fail conversion rather than creating corrupt timestamps.
-
-When both `end` and `dur` are present, the converter uses the earlier effective end. Child timing is also clamped to an inherited parent end. Apple-style nested lyric span timestamps remain treated as absolute media times, matching the source format this converter targets.
-
-LRC/ELRC output is written to a same-directory temporary file, flushed, then atomically replaces the destination only after the whole conversion succeeds. Existing output therefore survives parse/conversion/write failures instead of being left half-written.
+Keep the original TTML/QRC file as your lossless master. The converter rejects unsafe XML constructs and invalid timing; check its error output instead of forcing a malformed lyric file.
