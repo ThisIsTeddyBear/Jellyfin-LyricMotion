@@ -847,17 +847,34 @@ def line_is_word_synced(line: LyricLine) -> bool:
     TTML frequently wraps a complete line in one or many spans that all inherit
     the paragraph's begin time. Serializing those inherited duplicates as ELRC
     makes Jellyfin expose the entire lyric as one animated word. At least two
-    distinct timed text starts are required before emitting enhanced cues.
+    distinct timed text starts are normally required before emitting enhanced
+    cues. The exception is one explicitly timed display word: its own end time
+    gives LyricMotion a real sweep duration even though it has only one start.
     """
 
-    starts = {
-        token.begin_ms
+    timed_tokens = [
+        token
         for token in line.tokens
-        if token.timed
-        and token.begin_ms is not None
-        and token.text.strip()
-    }
-    return len(starts) >= 2
+        if token.timed and token.begin_ms is not None and token.text.strip()
+    ]
+    starts = {token.begin_ms for token in timed_tokens}
+    if len(starts) >= 2:
+        return True
+
+    if len(timed_tokens) != 1:
+        return False
+
+    token = timed_tokens[0]
+    # A whole sentence in one timed TTML span is still line-synchronised and
+    # must not become one large glowing ELRC "word". A single lexical display
+    # word (for example, a sustained "Mitwa") is different: its explicit end
+    # is the intended karaoke duration. Punctuation is allowed; whitespace is
+    # not.
+    return (
+        token.end_ms is not None
+        and token.end_ms > token.begin_ms
+        and not any(character.isspace() for character in token.text.strip())
+    )
 
 
 def timing_mode_for(lines: Sequence[LyricLine]) -> tuple[str, int]:

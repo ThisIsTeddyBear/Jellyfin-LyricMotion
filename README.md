@@ -74,7 +74,7 @@ Use the resulting image in place of your normal Jellyfin image. After any instal
 
 ELRC carries word/syllable timestamps, which unlock LyricMotion's karaoke sweep, precise glow, concurrent vocals, and reliable instrumental-break timing. Standard LRC only has line timing, so it receives the lighter line-synced presentation.
 
-Our converter preserves LyricMotion-specific vocal information when present, including TTML `x-bg` background vocals. It deliberately writes `.lrc` for line-timed sources and `.elrc` only when real word/syllable timing exists. Renaming an LRC file to ELRC cannot create karaoke timing.
+Our converter preserves LyricMotion-specific vocal information when present, including TTML `x-bg` background vocals. It deliberately writes `.lrc` for line-timed sources and `.elrc` only when real word/syllable timing exists, including an explicitly timed single word. Renaming an LRC file to ELRC cannot create karaoke timing.
 
 From a source checkout (the converter is not included in release archives):
 

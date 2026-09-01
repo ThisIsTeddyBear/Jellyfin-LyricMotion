@@ -12,7 +12,7 @@ The output is created next to the source and should use the same basename as the
 
 The converter writes:
 
-- `.elrc` when the source has genuine word or syllable timing;
+- `.elrc` when the source has genuine word/syllable timing, including an explicitly timed single word;
 - `.lrc` when it only has line timing.
 
 This distinction matters. ELRC enables LyricMotion's word sweep, per-word glow, overlapping vocal timing, and dependable instrumental-break progress. A line-timed source saved with an `.elrc` extension still has no word timing and would display poorly, so the converter does not fabricate it.

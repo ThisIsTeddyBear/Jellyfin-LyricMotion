@@ -94,5 +94,51 @@ class TtmlMetadataConversionTests(unittest.TestCase):
         self.assertNotIn("[offset:", rendered)
 
 
+class SingleWordTimingTests(unittest.TestCase):
+    def test_explicitly_timed_single_ttml_word_keeps_its_sweep(self) -> None:
+        line = CONVERTER.LyricLine(
+            53_951,
+            58_628,
+            (CONVERTER.TimedText("Mitwa", 53_951, 58_628),),
+            "main",
+            0,
+            0,
+        )
+
+        self.assertTrue(CONVERTER.line_is_word_synced(line))
+        self.assertEqual(
+            CONVERTER.serialize_line(line),
+            "[00:53.951]<00:53.951>Mitwa<00:58.628>",
+        )
+
+    def test_single_timed_sentence_remains_line_synced(self) -> None:
+        line = CONVERTER.LyricLine(
+            1_000,
+            3_000,
+            (CONVERTER.TimedText("This is one complete line", 1_000, 3_000),),
+            "main",
+            0,
+            0,
+        )
+
+        self.assertFalse(CONVERTER.line_is_word_synced(line))
+
+    def test_explicitly_timed_single_qrc_word_keeps_its_sweep(self) -> None:
+        line, timing_mode = CONVERTER.parse_qrc_timed_line(
+            "[53951,4677](53951,4677)Mitwa",
+            source_order=0,
+            offset_ms=0,
+        )
+
+        self.assertEqual(timing_mode, "absolute")
+        self.assertIsNotNone(line)
+        assert line is not None
+        self.assertTrue(CONVERTER.line_is_word_synced(line))
+        self.assertEqual(
+            CONVERTER.serialize_line(line),
+            "[00:53.951]<00:53.951>Mitwa<00:58.628>",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

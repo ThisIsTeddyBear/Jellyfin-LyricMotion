@@ -1595,16 +1595,71 @@
         return advancing;
     }
 
+    function hasTrustedSingleWordCueSweep({
+        text,
+        cue,
+        cueIndex,
+        cues,
+        lineEnd
+    }) {
+        /*
+         * A sustained one-word lyric is valid ELRC: Jellyfin exposes one
+         * visible cue for the word and either an explicit end, the converter's
+         * following empty terminal cue, or a line end. Do not apply this to a
+         * complete sentence wrapped in one timed span, which would turn an
+         * ordinary line-synchronised row into one false karaoke word.
+         */
+        if (!text || /\s/u.test(text)) return false;
+
+        const start = finiteTick(cueValue(cue, 'Start', 'start'));
+        if (start === null) return false;
+
+        const explicitEnd = finiteTick(cueValue(cue, 'End', 'end'));
+        if (explicitEnd !== null && explicitEnd > start) return true;
+
+        const cueList = Array.isArray(cues) ? cues : [];
+        for (let index = cueIndex + 1; index < cueList.length; index += 1) {
+            const followingStart = finiteTick(
+                cueValue(cueList[index], 'Start', 'start')
+            );
+            if (followingStart !== null && followingStart > start) return true;
+        }
+
+        const explicitLineEnd = finiteTick(lineEnd);
+        return explicitLineEnd !== null && explicitLineEnd > start;
+    }
+
     function hasUsableWordTiming(lyric, orderedCues = null) {
         const ranges = usableWordCueRanges(lyric, orderedCues);
-        if (ranges.length < 2) return false;
+        if (ranges.length >= 2) {
+            const starts = new Set(
+                ranges.map(range =>
+                    finiteTick(cueValue(range.cue, 'Start', 'start'))
+                )
+            );
+            return starts.size >= 2;
+        }
+        if (ranges.length !== 1) return false;
 
-        const starts = new Set(
-            ranges.map(range =>
-                finiteTick(cueValue(range.cue, 'Start', 'start'))
-            )
+        const profile = lyricTextProfile(lyric);
+        const range = ranges[0];
+        const start = Math.max(
+            0,
+            range.startPosition - profile.positionOffset
         );
-        return starts.size >= 2;
+        const end = Math.max(
+            start,
+            range.endPosition - profile.positionOffset
+        );
+        return hasTrustedSingleWordCueSweep({
+            text: profile.text.slice(start, end),
+            cue: range.cue,
+            cueIndex: range.cueIndex,
+            cues: orderedCues || orderedCuesBySourcePosition(
+                lyricValue(lyric, 'Cues', 'cues')
+            ),
+            lineEnd: lyricValue(lyric, 'End', 'end')
+        });
     }
 
 
