@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Fetch missing, synchronized lyric sidecars for a local music library.
+"""Fetch missing, synchronized lyric masters for a local music library.
 
-This is a conservative wrapper around ``am_lyrics_fetch.py`` and
-``ttml_qrc_to_elrc.py``. Existing lyric sidecars are never overwritten. The
-best word-synchronized result is retained as a TTML/QRC source and converted
-to ELRC; line-synchronized results are saved as LRC.
+This is a conservative wrapper around ``am_lyrics_fetch.py``. Existing lyric
+sidecars are never overwritten. Every synchronized result is saved in the
+original master format returned by its provider, without conversion.
 """
 
 from __future__ import annotations
@@ -103,7 +102,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("library", type=Path)
     parser.add_argument("--fetcher", type=Path, required=True)
-    parser.add_argument("--converter", type=Path, required=True)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--limit", type=int, help="process at most this many missing tracks")
     parser.add_argument("--pause", type=float, default=0.2, help="delay between provider searches")
@@ -117,7 +115,6 @@ def main() -> int:
         raise SystemExit(f"Library directory does not exist: {library}")
 
     fetcher = load_module(args.fetcher.resolve(), "library_lyrics_fetcher")
-    converter = load_module(args.converter.resolve(), "library_lyrics_converter")
     audio_files = sorted(
         (path for path in library.rglob("*") if path.is_file() and path.suffix.casefold() in AUDIO_SUFFIXES),
         key=lambda path: str(path).casefold(),
@@ -211,29 +208,12 @@ def main() -> int:
                 continue
 
             extension, payload = fetcher.save_payload(result)
-            created: list[str] = []
-            if result.sync_type == fetcher.SYNC_WORD:
-                if extension not in {".ttml", ".qrc"}:
-                    extension = ".ttml"
-                    payload = fetcher.generate_ttml(result)
-                source_path = audio.with_suffix(extension)
-                atomic_write_text(source_path, payload)
-                created.append(source_path.name)
-                try:
-                    output_path, conversion = converter.convert_file(source_path)
-                except Exception:
-                    source_path.unlink(missing_ok=True)
-                    raise
-                created.append(output_path.name)
-                timing = conversion.timing_mode
-            else:
-                output_path = audio.with_suffix(".lrc")
-                if extension == ".lrc":
-                    atomic_write_text(output_path, payload)
-                else:
-                    atomic_write_text(output_path, fetcher.generate_lrc(result))
-                created.append(output_path.name)
-                timing = "lrc"
+            # Keep the provider's original master payload and extension. Do
+            # not convert TTML/QRC to ELRC/LRC or synthesize a replacement.
+            output_path = audio.with_suffix(extension)
+            atomic_write_text(output_path, payload)
+            created = [output_path.name]
+            timing = extension.removeprefix(".")
 
             record = {
                 "track": relative,
