@@ -140,5 +140,47 @@ class SingleWordTimingTests(unittest.TestCase):
         )
 
 
+class WordEndBoundaryTests(unittest.TestCase):
+    def test_explicit_end_uses_an_invisible_elrc_boundary(self) -> None:
+        line = CONVERTER.LyricLine(
+            4_641,
+            9_055,
+            (
+                CONVERTER.TimedText("I ", 4_641, 4_830),
+                CONVERTER.TimedText("know ", 4_830, 5_005),
+                CONVERTER.TimedText("sometimes ", 5_005, 5_449),
+                CONVERTER.TimedText("things", 6_527, 6_767),
+            ),
+            "main",
+            0,
+            0,
+        )
+        rendered = CONVERTER.serialize_line(line)
+        self.assertEqual(
+            rendered,
+            "[00:04.641]<00:04.641>I <00:04.830>know "
+            "<00:05.005>sometimes<00:05.449> <00:06.527>things"
+            "<00:06.767><00:09.055>",
+        )
+        self.assertNotIn("[ak:ends=", rendered)
+
+    def test_same_position_boundary_stays_textless(self) -> None:
+        line = CONVERTER.LyricLine(
+            1_000,
+            4_000,
+            (
+                CONVERTER.TimedText("你", 1_000, 1_350),
+                CONVERTER.TimedText("好", 1_800, 2_100),
+            ),
+            "main",
+            0,
+            0,
+        )
+        self.assertEqual(
+            CONVERTER.serialize_line(line),
+            "[00:01.000]<00:01.000>你<00:01.350><00:01.800>好<00:02.100><00:04.000>",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1520,6 +1520,24 @@
                 : Math.max(0, Math.min(textLength, explicitEnd));
 
             if (rawEnd <= rawStart) {
+                const immediatelyFollowingCue = source[cueIndex + 1];
+                const immediatelyFollowingPosition =
+                    immediatelyFollowingCue
+                        ? positions[cueIndex + 1]
+                        : null;
+
+                /*
+                 * The converter represents a non-default word end as an
+                 * empty ELRC timestamp at the word boundary. When it shares
+                 * a position with the next visible cue there is deliberately
+                 * no text for this cue. Do not extend it across the following
+                 * word: cueEndTicks() uses its timestamp as the prior word's
+                 * endpoint and this empty record is omitted from painting.
+                 */
+                if (immediatelyFollowingPosition === rawStart) {
+                    return ranges;
+                }
+
                 const nextPosition = positions
                     .slice(cueIndex + 1)
                     .find(position => position > rawStart);

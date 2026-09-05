@@ -1230,13 +1230,59 @@ def serialize_line(
         parts.append(line.text)
         return "".join(parts).strip()
 
+    # ELRC normally infers a cue's end from the next start. That loses rests
+    # and overlapping syllables. Encode only the exceptions as an empty ELRC
+    # boundary timestamp, placed after the timed text and before its trailing
+    # whitespace. It is invisible to every lyric UI, while LyricMotion reads
+    # it as the preceding cue's end. Equal-start fragments share one boundary
+    # after their final text fragment. Missing ends retain ordinary ELRC timing.
+    cue_ends: dict[int, int | None] = {}
+    for token in line.tokens:
+        if token.timed and token.begin_ms is not None:
+            previous = cue_ends.get(token.begin_ms)
+            cue_ends[token.begin_ms] = max(
+                (end for end in (previous, token.end_ms) if end is not None),
+                default=None,
+            )
+    cue_starts = list(cue_ends)
+    end_boundaries: dict[int, int] = {}
+    for index, start in enumerate(cue_starts):
+        end = cue_ends[start]
+        inferred_end = cue_starts[index + 1] if index + 1 < len(cue_starts) else line.end_ms
+        if end is not None and end >= start and end != inferred_end:
+            end_boundaries[start] = end
+
+    last_token_for_start: dict[int, int] = {}
+    for index, token in enumerate(line.tokens):
+        if token.timed and token.begin_ms is not None:
+            last_token_for_start[token.begin_ms] = index
+
     last_cue: int | None = None
 
-    for token in line.tokens:
+    for index, token in enumerate(line.tokens):
         if token.timed and token.begin_ms is not None and token.begin_ms != last_cue:
             parts.append(f"<{elrc_time(token.begin_ms)}>")
             last_cue = token.begin_ms
-        parts.append(token.text)
+
+        boundary = (
+            end_boundaries.get(token.begin_ms)
+            if token.timed
+            and token.begin_ms is not None
+            and last_token_for_start.get(token.begin_ms) == index
+            else None
+        )
+        if boundary is None:
+            parts.append(token.text)
+            continue
+
+        # Keep separator whitespace outside the empty boundary cue. This makes
+        # the boundary's source range empty/whitespace-only in Jellyfin, so it
+        # cannot become a second visible word.
+        text = token.text
+        trailing = text[len(text.rstrip()):]
+        parts.append(text[:len(text) - len(trailing)] if trailing else text)
+        parts.append(f"<{elrc_time(boundary)}>")
+        parts.append(trailing)
 
     if line.end_ms is not None:
         parts.append(f"<{elrc_time(line.end_ms)}>")
