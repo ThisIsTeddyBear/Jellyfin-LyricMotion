@@ -148,7 +148,7 @@ def main() -> int:
 
         title = metadata["title"]
         artist = metadata["artist"]
-        if INSTRUMENTAL_RE.search(title):
+        if INSTRUMENTAL_RE.search(title) or INSTRUMENTAL_RE.search(artist):
             records.append({"track": relative, "status": "instrumental", **metadata})
             print(f"[{index}/{len(audio_files)}] INSTRUMENTAL   {relative}", flush=True)
             write_report(args.report, records)
