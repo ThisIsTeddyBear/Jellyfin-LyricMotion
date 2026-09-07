@@ -23,7 +23,7 @@ from typing import Any
 
 
 AUDIO_SUFFIXES = {".flac", ".m4a", ".mp3", ".aac", ".ogg", ".opus", ".wav"}
-LYRIC_SUFFIXES = (".elrc", ".lrc", ".ttml", ".qrc", ".txt")
+LYRIC_SUFFIXES = (".elrc", ".lrc", ".ttml", ".qrc", ".txt", ".json")
 INSTRUMENTAL_RE = re.compile(r"\b(instrumental|karaoke|backing track|theme)\b", re.I)
 
 
